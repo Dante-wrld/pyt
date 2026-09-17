@@ -14,7 +14,7 @@ import websockets
 from .config import Settings
 from .core import Launch, PaperBroker, RiskEngine, SQLiteStore
 from .intelligence import CoinIntelligence
-from .market import DexScreenerOracle
+from .market import DexScreenerOracle, MarketQuote
 from .wallet import SolanaRpc, WalletTrade, WalletWatcher
 
 LOGGER = logging.getLogger("solana_launch_guard")
@@ -386,20 +386,50 @@ async def run_demo(guard: LaunchGuard) -> None:
         "mint": "DemoMint111111111111111111111111111111111",
         "traderPublicKey": "DemoCreator11111111111111111111111111111",
         "txType": "create",
-        "initialBuy": 1_000_000,
         "solAmount": 1,
-        "bondingCurveKey": "DemoCurve111111111111111111111111111111",
         "vTokensInBondingCurve": 1_000_000_000,
         "vSolInBondingCurve": 30,
         "marketCapSol": 30,
         "name": "Demo Token",
         "symbol": "DEMO",
-        "uri": "https://example.invalid/demo.json",
     }
-    await guard.handle_launch(creation)
-    position = guard.broker.positions.get(str(creation["mint"]))
-    if position and position.status == "OPEN":
+    launch = Launch.from_payload(creation)
+    quote = MarketQuote(
+        mint=launch.mint,
+        symbol=launch.symbol,
+        price_sol=launch.price_sol or 0.00000003,
+        liquidity_usd=50_000,
+        market_cap_usd=100_000,
+        pair_address="DemoPair",
+        pair_created_at_ms=1,
+        buys_m5=60,
+        sells_m5=20,
+        volume_m5_usd=15_000,
+        price_change_m5_pct=15,
+    )
+    result = guard.intelligence.score(quote)
+    guard.store.save_intelligence_score(
+        mint=launch.mint,
+        symbol=launch.symbol,
+        tier=result.tier,
+        total_score=result.total_score,
+        safety_score=result.safety_score,
+        momentum_score=result.momentum_score,
+        reasons=result.reasons,
+    )
+    if not guard.broker.has_position(launch.mint):
+        position = guard.broker.open(
+            launch,
+            reason=f"DEMO:{result.tier}:{result.total_score}",
+        )
         guard.broker.mark(position.mint, position.entry_price_sol * 1.35)
+    LOGGER.info(
+        "Demo intelligence: tier=%s total=%d safety=%d momentum=%d",
+        result.tier,
+        result.total_score,
+        result.safety_score,
+        result.momentum_score,
+    )
     LOGGER.info("Demo summary: %s", guard.store.summary())
 
 
