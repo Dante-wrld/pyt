@@ -8,7 +8,7 @@ Version 0.2 **never signs or submits transactions**. It can monitor new-token ev
 
 - Receives real-time new-token events from PumpPortal.\n- Watches public trader wallets through Solana RPC without requiring wallet credentials.\n- Records wallet buys/sells and can paper-copy qualifying buys.
 - Rejects launches that lack enough pricing data or violate configured limits.
-- Limits position size, concurrent positions, and total exposure.
+- Scores observed launches with separate safety and momentum components.\n- Uses a CORE tier for stronger setups and a $5 MOONSHOT tier for higher-risk setups.\n- Limits position size, concurrent positions, and total exposure.
 - Simulates take-profit and stop-loss exits using subsequent trade events.
 - Persists launches, decisions, positions, and fills in `launch_guard.db`.
 - Reconnects after WebSocket failures.
@@ -118,3 +118,26 @@ Official references:
 
 - [PumpPortal real-time data](https://pumpportal.fun/data-api/real-time/)
 - [Solana token verification guidance](https://solana.com/docs/tokens/how-to-verify-a-token)
+
+
+## Intelligent launch filter
+
+New launches are no longer bought immediately. After passing the event-level
+prefilter, each token enters a configurable observation window. The scorer then
+uses DEX Screener's five-minute transaction, volume, price-change, liquidity,
+market-cap, and pair data.
+
+| Tier | Default paper size | Minimum profile | Default exit |
+| --- | ---: | --- | --- |
+| CORE | $10 equivalent | score 75+, safety 35+, liquidity $20K+ | +30% / -20% |
+| MOONSHOT | $5 equivalent | score 60+, safety 25+, market cap <= $500K | +5000% / -40% |
+| REJECT | $0 | hard gate or score not met | none |
+
+The 5,000% moonshot target is an experiment, not a forecast. A +5,000% gain
+would turn $5 into $255 before fees because final value is
+$5 × (1 + 50) = $255. Real execution would also face slippage, fees, failed
+transactions, and the possibility of a total loss.
+
+Each scoring result is stored in the `intelligence_scores` SQLite table with
+its component scores and reasons, allowing thresholds to be calibrated from
+paper results instead of intuition.
