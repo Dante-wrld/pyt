@@ -200,7 +200,9 @@ class PaperBroker:
     def __init__(self, settings: Settings, store: "SQLiteStore") -> None:
         self.settings = settings
         self.store = store
-        self.positions: dict[str, Position] = {}
+        self.positions: dict[str, Position] = {
+            position.mint: position for position in store.load_open_positions()
+        }
 
     @property
     def open_count(self) -> int:
@@ -328,6 +330,21 @@ class SQLiteStore:
                 amount_sol REAL NOT NULL,
                 reason TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS wallet_trades (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                seen_at TEXT NOT NULL,
+                wallet TEXT NOT NULL,
+                signature TEXT NOT NULL,
+                slot INTEGER NOT NULL,
+                mint TEXT NOT NULL,
+                symbol TEXT,
+                side TEXT NOT NULL,
+                token_delta REAL NOT NULL,
+                native_sol_delta REAL,
+                observed_price_sol REAL,
+                UNIQUE(wallet, signature, mint)
+            );
             """
         )
         self.connection.commit()
@@ -424,6 +441,104 @@ class SQLiteStore:
             (utc_now(), mint, side, price_sol, quantity, amount_sol, reason),
         )
         self.connection.commit()
+
+    def load_open_positions(self) -> list[Position]:
+        rows = self.connection.execute(
+            "SELECT * FROM positions WHERE status = 'OPEN'"
+        ).fetchall()
+        return [
+            Position(
+                mint=row["mint"],
+                symbol=row["symbol"],
+                entry_price_sol=float(row["entry_price_sol"]),
+                latest_price_sol=float(row["latest_price_sol"]),
+                quantity=float(row["quantity"]),
+                cost_sol=float(row["cost_sol"]),
+                take_profit_price_sol=float(row["take_profit_price_sol"]),
+                stop_loss_price_sol=float(row["stop_loss_price_sol"]),
+                opened_at=row["opened_at"],
+                status=row["status"],
+                closed_at=row["closed_at"],
+                exit_price_sol=row["exit_price_sol"],
+                exit_reason=row["exit_reason"],
+                pnl_sol=row["pnl_sol"],
+                pnl_pct=row["pnl_pct"],
+            )
+            for row in rows
+        ]
+
+    def save_wallet_trade(
+        self,
+        *,
+        wallet: str,
+        signature: str,
+        slot: int,
+        mint: str,
+        symbol: str | None,
+        side: str,
+        token_delta: float,
+        native_sol_delta: float | None,
+        observed_price_sol: float | None,
+    ) -> bool:
+        cursor = self.connection.execute(
+            """
+            INSERT OR IGNORE INTO wallet_trades(
+                seen_at, wallet, signature, slot, mint, symbol, side,
+                token_delta, native_sol_delta, observed_price_sol
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                utc_now(),
+                wallet,
+                signature,
+                slot,
+                mint,
+                symbol,
+                side,
+                token_delta,
+                native_sol_delta,
+                observed_price_sol,
+            ),
+        )
+        self.connection.commit()
+        return cursor.rowcount > 0
+
+    def trader_info(self, wallet: str) -> dict[str, Any]:
+        totals = self.connection.execute(
+            """
+            SELECT
+                COUNT(*) AS trades,
+                SUM(CASE WHEN side = 'BUY' THEN 1 ELSE 0 END) AS buys,
+                SUM(CASE WHEN side = 'SELL' THEN 1 ELSE 0 END) AS sells,
+                COUNT(DISTINCT mint) AS unique_tokens,
+                MIN(seen_at) AS first_seen,
+                MAX(seen_at) AS last_seen
+            FROM wallet_trades
+            WHERE wallet = ?
+            """,
+            (wallet,),
+        ).fetchone()
+        recent_rows = self.connection.execute(
+            """
+            SELECT seen_at, signature, mint, symbol, side, token_delta,
+                   native_sol_delta, observed_price_sol
+            FROM wallet_trades
+            WHERE wallet = ?
+            ORDER BY id DESC
+            LIMIT 10
+            """,
+            (wallet,),
+        ).fetchall()
+        return {
+            "wallet": wallet,
+            "trades": int(totals["trades"] or 0),
+            "buys": int(totals["buys"] or 0),
+            "sells": int(totals["sells"] or 0),
+            "unique_tokens": int(totals["unique_tokens"] or 0),
+            "first_seen": totals["first_seen"],
+            "last_seen": totals["last_seen"],
+            "recent": [dict(row) for row in recent_rows],
+        }
 
     def summary(self) -> dict[str, float | int]:
         row = self.connection.execute(
