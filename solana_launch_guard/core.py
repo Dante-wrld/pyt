@@ -219,7 +219,7 @@ class PaperBroker:
     def has_position(self, mint: str) -> bool:
         return mint in self.positions
 
-    def open(self, launch: Launch) -> Position:
+    def open(self, launch: Launch, reason: str = "RISK_PASS") -> Position:
         if launch.price_sol is None or launch.price_sol <= 0:
             raise ValueError("cannot open a paper position without a positive price")
         if self.has_position(launch.mint):
@@ -249,7 +249,7 @@ class PaperBroker:
             price_sol=position.entry_price_sol,
             quantity=position.quantity,
             amount_sol=position.cost_sol,
-            reason="RISK_PASS",
+            reason=reason,
         )
         return position
 
