@@ -95,6 +95,15 @@ class Settings:
     moonshot_take_profit_pct: float = 5_000.0
     moonshot_stop_loss_pct: float = 40.0
     max_pending_candidates: int = 50
+    trailing_activation_pct: float = 20.0
+    trailing_stop_pct: float = 12.0
+    momentum_exit_pct: float = -8.0
+    sell_pressure_ratio: float = 1.5
+    liquidity_drop_pct: float = 30.0
+    reentry_cooldown_seconds: float = 120.0
+    reentry_momentum_pct: float = 3.0
+    reentry_buy_sell_ratio: float = 1.4
+    max_reentries: int = 2
 
     @classmethod
     def from_env(cls, dotenv_path: str = ".env") -> "Settings":
@@ -146,6 +155,17 @@ class Settings:
             ),
             moonshot_stop_loss_pct=_float("MOONSHOT_STOP_LOSS_PCT", 40.0),
             max_pending_candidates=_int("MAX_PENDING_CANDIDATES", 50),
+            trailing_activation_pct=_float("TRAILING_ACTIVATION_PCT", 20.0),
+            trailing_stop_pct=_float("TRAILING_STOP_PCT", 12.0),
+            momentum_exit_pct=float(os.getenv("MOMENTUM_EXIT_PCT", "-8")),
+            sell_pressure_ratio=_float("SELL_PRESSURE_RATIO", 1.5),
+            liquidity_drop_pct=_float("LIQUIDITY_DROP_PCT", 30.0),
+            reentry_cooldown_seconds=_float(
+                "REENTRY_COOLDOWN_SECONDS", 120.0
+            ),
+            reentry_momentum_pct=_float("REENTRY_MOMENTUM_PCT", 3.0),
+            reentry_buy_sell_ratio=_float("REENTRY_BUY_SELL_RATIO", 1.4),
+            max_reentries=_int("MAX_REENTRIES", 2),
         )
         settings.validate()
         return settings
@@ -185,6 +205,12 @@ class Settings:
             raise ValueError("CORE_INTELLIGENCE_SCORE must be 0 through 100")
         if self.core_intelligence_score < self.moonshot_intelligence_score:
             raise ValueError("CORE_INTELLIGENCE_SCORE cannot be lower than moonshot")
+        if not 0 < self.trailing_stop_pct < 100:
+            raise ValueError("TRAILING_STOP_PCT must be between 0 and 100")
+        if not 0 < self.liquidity_drop_pct < 100:
+            raise ValueError("LIQUIDITY_DROP_PCT must be between 0 and 100")
+        if self.sell_pressure_ratio <= 0 or self.reentry_buy_sell_ratio <= 0:
+            raise ValueError("buy/sell ratio settings must be positive")
         if self.max_pending_candidates < 1:
             raise ValueError("MAX_PENDING_CANDIDATES must be at least one")
         for wallet in self.watched_wallets:
