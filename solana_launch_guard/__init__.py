@@ -1,3 +1,3 @@
 """Solana Launch Guard: event-driven paper trading for new token launches."""
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
