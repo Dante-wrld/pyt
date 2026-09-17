@@ -15,6 +15,7 @@ from .config import Settings
 from .core import Launch, PaperBroker, RiskEngine, SQLiteStore
 from .intelligence import CoinIntelligence
 from .market import DexScreenerOracle, MarketQuote
+from .strategy import AdaptiveStrategy
 from .wallet import SolanaRpc, WalletTrade, WalletWatcher
 
 LOGGER = logging.getLogger("solana_launch_guard")
@@ -40,6 +41,17 @@ class LaunchGuard:
             ),
         )
         self.candidate_tasks: set[asyncio.Task[Any]] = set()
+        self.strategy = AdaptiveStrategy(
+            trailing_activation_pct=settings.trailing_activation_pct,
+            trailing_stop_pct=settings.trailing_stop_pct,
+            momentum_exit_pct=settings.momentum_exit_pct,
+            sell_pressure_ratio=settings.sell_pressure_ratio,
+            liquidity_drop_pct=settings.liquidity_drop_pct,
+            reentry_cooldown_seconds=settings.reentry_cooldown_seconds,
+            reentry_momentum_pct=settings.reentry_momentum_pct,
+            reentry_buy_sell_ratio=settings.reentry_buy_sell_ratio,
+            max_reentries=settings.max_reentries,
+        )
 
     async def handle_launch(self, payload: Mapping[str, Any]) -> None:
         try:
@@ -176,6 +188,7 @@ class LaunchGuard:
             take_profit_pct=take_profit,
             stop_loss_pct=stop_loss,
         )
+        self.strategy.register_open(position, quote, result.tier)
         LOGGER.info(
             "INTELLIGENT PAPER BUY %-10s tier=%s score=%d size=$%.2f "
             "cost=%.6f SOL entry=%.12g TP=+%.0f%% SL=-%.0f%%",
@@ -264,6 +277,7 @@ class LaunchGuard:
             raw={"source": "wallet_copy", "wallet": trade.wallet},
         )
         position = self.broker.open(launch, reason=f"COPY:{trade.wallet}")
+        self.strategy.register_open(position, quote, "COPY")
         LOGGER.info(
             "COPY PAPER BUY %-10s %.6f SOL at %.12g SOL/token leader=%s",
             position.symbol,
@@ -316,7 +330,7 @@ class LaunchGuard:
 
     async def run_price_monitor(self) -> None:
         LOGGER.info(
-            "Price monitor active for %d restored/open positions",
+            "Adaptive price monitor active for %d restored/open positions",
             self.broker.open_count,
         )
         while True:
@@ -329,12 +343,33 @@ class LaunchGuard:
                 quote = await self.oracle.quote(position.mint)
                 if quote is None:
                     continue
+
+                self.strategy.ensure_open(position, quote)
                 updated = self.broker.mark(position.mint, quote.price_sol)
                 if updated is None:
                     continue
+
                 pnl_pct = (
                     quote.price_sol / updated.entry_price_sol - 1
                 ) * 100
+
+                if updated.status == "OPEN":
+                    decision = self.strategy.evaluate_open(updated, quote)
+                    if decision.action == "SELL":
+                        updated = self.broker.close(
+                            updated.mint,
+                            quote.price_sol,
+                            decision.reason,
+                        )
+                        if updated is not None:
+                            self.strategy.record_exit(
+                                updated.mint, quote.price_sol
+                            )
+                else:
+                    self.strategy.record_exit(updated.mint, quote.price_sol)
+
+                if updated is None:
+                    continue
                 LOGGER.info(
                     "MARK %-10s price=%.12g pnl=%+.2f%% status=%s",
                     updated.symbol,
@@ -344,13 +379,135 @@ class LaunchGuard:
                 )
                 if updated.status == "CLOSED":
                     LOGGER.info(
-                        "PAPER SELL %-10s reason=%s pnl=%+.6f SOL (%+.2f%%)",
+                        "ADAPTIVE PAPER SELL %-10s reason=%s "
+                        "pnl=%+.6f SOL (%+.2f%%)",
                         updated.symbol,
                         updated.exit_reason,
                         updated.pnl_sol or 0,
                         updated.pnl_pct or 0,
                     )
+
+            await self.evaluate_reentries()
             await asyncio.sleep(self.settings.price_poll_seconds)
+
+    async def evaluate_reentries(self) -> None:
+        closed_states = [
+            state for state in self.strategy.states.values() if not state.is_open
+        ]
+        if not closed_states:
+            return
+
+        sol_usd = await self.oracle.sol_usd_price()
+        for state in closed_states:
+            quote = await self.oracle.quote(state.mint)
+            if quote is None:
+                continue
+            decision = self.strategy.evaluate_reentry(quote)
+            if decision.action != "REENTER":
+                continue
+
+            if self.broker.open_count >= self.settings.max_open_positions:
+                continue
+            if sol_usd is not None:
+                exposure_usd = self.broker.exposure_sol * sol_usd
+                reentry_usd = state.cost_sol * sol_usd
+                if (
+                    exposure_usd + reentry_usd
+                    > self.settings.max_total_exposure_usd
+                ):
+                    continue
+
+            launch = Launch(
+                mint=state.mint,
+                name=quote.symbol,
+                symbol=quote.symbol,
+                creator=None,
+                signature=None,
+                virtual_sol=None,
+                virtual_tokens=None,
+                market_cap_sol=None,
+                creator_buy_sol=None,
+                price_sol=quote.price_sol,
+                received_at="",
+                raw={"source": "adaptive_reentry"},
+            )
+            if state.tier == "MOONSHOT":
+                take_profit = self.settings.moonshot_take_profit_pct
+                stop_loss = self.settings.moonshot_stop_loss_pct
+            else:
+                take_profit = self.settings.take_profit_pct
+                stop_loss = self.settings.stop_loss_pct
+
+            position = self.broker.open(
+                launch,
+                reason=f"REENTRY:{state.tier}:{decision.reason}",
+                cost_sol=state.cost_sol,
+                take_profit_pct=take_profit,
+                stop_loss_pct=stop_loss,
+            )
+            self.strategy.register_open(
+                position, quote, state.tier, is_reentry=True
+            )
+            LOGGER.info(
+                "ADAPTIVE REENTRY %-10s cost=%.6f SOL reason=%s",
+                position.symbol,
+                position.cost_sol,
+                decision.reason,
+            )
+
+    async def import_fomo_position(
+        self,
+        *,
+        mint: str,
+        symbol: str,
+        token_amount: float,
+        cost_usd: float,
+    ) -> None:
+        if token_amount <= 0 or cost_usd <= 0:
+            raise ValueError("token amount and cost USD must be positive")
+        if self.broker.has_position(mint):
+            raise ValueError("an open paper position already exists for this mint")
+
+        quote, sol_usd = await asyncio.gather(
+            self.oracle.quote(mint),
+            self.oracle.sol_usd_price(),
+        )
+        if quote is None:
+            raise ValueError("no SOL market quote found for this mint")
+        if sol_usd is None:
+            raise ValueError("SOL/USD price is unavailable")
+
+        entry_price_usd = cost_usd / token_amount
+        entry_price_sol = entry_price_usd / sol_usd
+        launch = Launch(
+            mint=mint,
+            name=symbol,
+            symbol=symbol,
+            creator=None,
+            signature=None,
+            virtual_sol=None,
+            virtual_tokens=None,
+            market_cap_sol=None,
+            creator_buy_sol=None,
+            price_sol=entry_price_sol,
+            received_at="",
+            raw={"source": "fomo_manual_import"},
+        )
+        position = self.broker.open(
+            launch,
+            reason="FOMO_MANUAL_IMPORT",
+            cost_sol=cost_usd / sol_usd,
+        )
+        self.strategy.register_open(position, quote, "IMPORTED")
+        LOGGER.info(
+            "IMPORTED FOMO POSITION %-10s tokens=%.8g cost=$%.2f "
+            "entry=$%.12g current=$%.12g",
+            symbol,
+            token_amount,
+            cost_usd,
+            entry_price_usd,
+            quote.price_sol * sol_usd,
+        )
 
     async def run(self, mode: str) -> None:
         tasks: list[asyncio.Task[Any]] = [
@@ -458,6 +615,26 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="WALLET",
         help="show stored activity for a watched public wallet and exit",
     )
+    parser.add_argument(
+        "--import-fomo-mint",
+        metavar="MINT",
+        help="import an existing Solana Fomo holding for paper management",
+    )
+    parser.add_argument(
+        "--import-symbol",
+        default="IMPORTED",
+        help="symbol used with --import-fomo-mint",
+    )
+    parser.add_argument(
+        "--import-token-amount",
+        type=float,
+        help="token quantity currently held",
+    )
+    parser.add_argument(
+        "--import-cost-usd",
+        type=float,
+        help="total USD cost basis of the currently held tokens",
+    )
     return parser
 
 
@@ -472,7 +649,20 @@ def main() -> None:
     store = SQLiteStore(settings.database_path)
     guard = LaunchGuard(settings, store)
     try:
-        if args.trader_info:
+        if args.import_fomo_mint:
+            if args.import_token_amount is None or args.import_cost_usd is None:
+                raise ValueError(
+                    "--import-token-amount and --import-cost-usd are required"
+                )
+            asyncio.run(
+                guard.import_fomo_position(
+                    mint=args.import_fomo_mint,
+                    symbol=args.import_symbol,
+                    token_amount=args.import_token_amount,
+                    cost_usd=args.import_cost_usd,
+                )
+            )
+        elif args.trader_info:
             print(json.dumps(store.trader_info(args.trader_info), indent=2))
         elif args.summary:
             print(json.dumps(store.summary(), indent=2))
