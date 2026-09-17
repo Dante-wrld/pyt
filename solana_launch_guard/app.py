@@ -4,9 +4,11 @@ import argparse
 import asyncio
 import json
 import logging
+import ssl
 from collections.abc import Mapping
 from typing import Any
 
+import certifi
 import websockets
 
 from .config import Settings
@@ -122,11 +124,13 @@ class LaunchGuard:
 
     async def run_forever(self) -> None:
         backoff_seconds = 1
+        tls_context = ssl.create_default_context(cafile=certifi.where())
         while True:
             try:
                 LOGGER.info("Connecting to the new-token feed")
                 async with websockets.connect(
                     self.settings.websocket_uri,
+                    ssl=tls_context,
                     ping_interval=20,
                     ping_timeout=20,
                     close_timeout=10,
