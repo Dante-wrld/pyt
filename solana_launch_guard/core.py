@@ -217,7 +217,8 @@ class PaperBroker:
         )
 
     def has_position(self, mint: str) -> bool:
-        return mint in self.positions
+        position = self.positions.get(mint)
+        return position is not None and position.status == "OPEN"
 
     def open(
         self,
@@ -269,6 +270,22 @@ class PaperBroker:
             price_sol=position.entry_price_sol,
             quantity=position.quantity,
             amount_sol=position.cost_sol,
+            reason=reason,
+        )
+        return position
+
+    def close(self, mint: str, price_sol: float, reason: str) -> Position | None:
+        position = self.positions.get(mint)
+        if position is None or position.status != "OPEN":
+            return None
+        position.close(price_sol, reason)
+        self.store.save_position(position)
+        self.store.save_fill(
+            mint=position.mint,
+            side="SELL",
+            price_sol=price_sol,
+            quantity=position.quantity,
+            amount_sol=position.quantity * price_sol,
             reason=reason,
         )
         return position
@@ -426,7 +443,14 @@ class SQLiteStore:
                 pnl_sol, pnl_pct
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(mint) DO UPDATE SET
+                symbol=excluded.symbol,
+                entry_price_sol=excluded.entry_price_sol,
                 latest_price_sol=excluded.latest_price_sol,
+                quantity=excluded.quantity,
+                cost_sol=excluded.cost_sol,
+                take_profit_price_sol=excluded.take_profit_price_sol,
+                stop_loss_price_sol=excluded.stop_loss_price_sol,
+                opened_at=excluded.opened_at,
                 status=excluded.status,
                 closed_at=excluded.closed_at,
                 exit_price_sol=excluded.exit_price_sol,
