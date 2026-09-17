@@ -219,13 +219,33 @@ class PaperBroker:
     def has_position(self, mint: str) -> bool:
         return mint in self.positions
 
-    def open(self, launch: Launch, reason: str = "RISK_PASS") -> Position:
+    def open(
+        self,
+        launch: Launch,
+        reason: str = "RISK_PASS",
+        *,
+        cost_sol: float | None = None,
+        take_profit_pct: float | None = None,
+        stop_loss_pct: float | None = None,
+    ) -> Position:
         if launch.price_sol is None or launch.price_sol <= 0:
             raise ValueError("cannot open a paper position without a positive price")
         if self.has_position(launch.mint):
             raise ValueError("a paper position already exists for this mint")
 
-        cost = self.settings.trade_size_sol
+        cost = self.settings.trade_size_sol if cost_sol is None else cost_sol
+        if cost <= 0:
+            raise ValueError("paper position cost must be positive")
+        tp_pct = (
+            self.settings.take_profit_pct
+            if take_profit_pct is None
+            else take_profit_pct
+        )
+        sl_pct = (
+            self.settings.stop_loss_pct
+            if stop_loss_pct is None
+            else stop_loss_pct
+        )
         position = Position(
             mint=launch.mint,
             symbol=launch.symbol,
@@ -233,10 +253,10 @@ class PaperBroker:
             quantity=cost / launch.price_sol,
             cost_sol=cost,
             take_profit_price_sol=(
-                launch.price_sol * (1 + self.settings.take_profit_pct / 100)
+                launch.price_sol * (1 + tp_pct / 100)
             ),
             stop_loss_price_sol=(
-                launch.price_sol * (1 - self.settings.stop_loss_pct / 100)
+                launch.price_sol * (1 - sl_pct / 100)
             ),
             opened_at=utc_now(),
             latest_price_sol=launch.price_sol,
@@ -329,6 +349,18 @@ class SQLiteStore:
                 quantity REAL NOT NULL,
                 amount_sol REAL NOT NULL,
                 reason TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS intelligence_scores (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                scored_at TEXT NOT NULL,
+                mint TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                tier TEXT NOT NULL,
+                total_score INTEGER NOT NULL,
+                safety_score INTEGER NOT NULL,
+                momentum_score INTEGER NOT NULL,
+                reasons_json TEXT NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS wallet_trades (
@@ -439,6 +471,37 @@ class SQLiteStore:
             ) VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (utc_now(), mint, side, price_sol, quantity, amount_sol, reason),
+        )
+        self.connection.commit()
+
+    def save_intelligence_score(
+        self,
+        *,
+        mint: str,
+        symbol: str,
+        tier: str,
+        total_score: int,
+        safety_score: int,
+        momentum_score: int,
+        reasons: tuple[str, ...],
+    ) -> None:
+        self.connection.execute(
+            """
+            INSERT INTO intelligence_scores(
+                scored_at, mint, symbol, tier, total_score,
+                safety_score, momentum_score, reasons_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                utc_now(),
+                mint,
+                symbol,
+                tier,
+                total_score,
+                safety_score,
+                momentum_score,
+                json.dumps(reasons),
+            ),
         )
         self.connection.commit()
 
