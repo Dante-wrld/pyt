@@ -82,6 +82,19 @@ class Settings:
     watched_wallets: tuple[str, ...] = ()
     price_poll_seconds: float = 5.0
     copy_min_liquidity_usd: float = 10_000.0
+    standard_trade_size_usd: float = 10.0
+    moonshot_trade_size_usd: float = 5.0
+    max_total_exposure_usd: float = 30.0
+    intelligence_wait_seconds: float = 30.0
+    core_intelligence_score: int = 75
+    moonshot_intelligence_score: int = 60
+    intelligence_min_liquidity_usd: float = 5_000.0
+    core_min_liquidity_usd: float = 20_000.0
+    max_market_cap_liquidity_ratio: float = 30.0
+    moonshot_max_market_cap_usd: float = 500_000.0
+    moonshot_take_profit_pct: float = 5_000.0
+    moonshot_stop_loss_pct: float = 40.0
+    max_pending_candidates: int = 50
 
     @classmethod
     def from_env(cls, dotenv_path: str = ".env") -> "Settings":
@@ -110,6 +123,29 @@ class Settings:
             watched_wallets=_wallets("WATCHED_WALLETS"),
             price_poll_seconds=_float("PRICE_POLL_SECONDS", 5.0),
             copy_min_liquidity_usd=_float("COPY_MIN_LIQUIDITY_USD", 10_000.0),
+            standard_trade_size_usd=_float("STANDARD_TRADE_SIZE_USD", 10.0),
+            moonshot_trade_size_usd=_float("MOONSHOT_TRADE_SIZE_USD", 5.0),
+            max_total_exposure_usd=_float("MAX_TOTAL_EXPOSURE_USD", 30.0),
+            intelligence_wait_seconds=_float("INTELLIGENCE_WAIT_SECONDS", 30.0),
+            core_intelligence_score=_int("CORE_INTELLIGENCE_SCORE", 75),
+            moonshot_intelligence_score=_int("MOONSHOT_INTELLIGENCE_SCORE", 60),
+            intelligence_min_liquidity_usd=_float(
+                "INTELLIGENCE_MIN_LIQUIDITY_USD", 5_000.0
+            ),
+            core_min_liquidity_usd=_float(
+                "CORE_MIN_LIQUIDITY_USD", 20_000.0
+            ),
+            max_market_cap_liquidity_ratio=_float(
+                "MAX_MARKET_CAP_LIQUIDITY_RATIO", 30.0
+            ),
+            moonshot_max_market_cap_usd=_float(
+                "MOONSHOT_MAX_MARKET_CAP_USD", 500_000.0
+            ),
+            moonshot_take_profit_pct=_float(
+                "MOONSHOT_TAKE_PROFIT_PCT", 5_000.0
+            ),
+            moonshot_stop_loss_pct=_float("MOONSHOT_STOP_LOSS_PCT", 40.0),
+            max_pending_candidates=_int("MAX_PENDING_CANDIDATES", 50),
         )
         settings.validate()
         return settings
@@ -137,6 +173,20 @@ class Settings:
             raise ValueError("TAKE_PROFIT_PCT and STOP_LOSS_PCT must be positive")
         if self.price_poll_seconds < 1:
             raise ValueError("PRICE_POLL_SECONDS must be at least one")
+        if self.standard_trade_size_usd <= 0 or self.moonshot_trade_size_usd <= 0:
+            raise ValueError("USD position sizes must be greater than zero")
+        if self.max_total_exposure_usd < max(
+            self.standard_trade_size_usd, self.moonshot_trade_size_usd
+        ):
+            raise ValueError("MAX_TOTAL_EXPOSURE_USD is too small for one position")
+        if not 0 <= self.moonshot_intelligence_score <= 100:
+            raise ValueError("MOONSHOT_INTELLIGENCE_SCORE must be 0 through 100")
+        if not 0 <= self.core_intelligence_score <= 100:
+            raise ValueError("CORE_INTELLIGENCE_SCORE must be 0 through 100")
+        if self.core_intelligence_score < self.moonshot_intelligence_score:
+            raise ValueError("CORE_INTELLIGENCE_SCORE cannot be lower than moonshot")
+        if self.max_pending_candidates < 1:
+            raise ValueError("MAX_PENDING_CANDIDATES must be at least one")
         for wallet in self.watched_wallets:
             if not 32 <= len(wallet) <= 44:
                 raise ValueError(f"WATCHED_WALLETS contains an invalid address: {wallet}")
