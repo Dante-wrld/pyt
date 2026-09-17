@@ -141,3 +141,44 @@ transactions, and the possibility of a total loss.
 Each scoring result is stored in the `intelligence_scores` SQLite table with
 its component scores and reasons, allowing thresholds to be calibrated from
 paper results instead of intuition.
+
+
+## Adaptive exits and re-entry
+
+Open paper positions are checked against both their configured hard stop/target and
+an adaptive strategy:
+
+- trailing protection activates after a 20% peak gain and exits after a 12%
+  pullback from the peak;
+- a five-minute move of -8% or worse can exit when sell pressure is at least
+  1.5 times buy activity and at least five sellers are observed;
+- a 30% liquidity reduction can exit when sellers also outnumber buyers;
+- re-entry waits at least 120 seconds, requires positive five-minute momentum,
+  buyer dominance, a rising latest tick, and at least 80% of baseline liquidity;
+- at most two re-entries are permitted per token during one process session.
+
+These are heuristic paper rules, not price predictions. DEX Screener data can be
+delayed or incomplete, and a sudden gap or rug can move faster than polling.
+
+### Import an existing Solana Fomo holding
+
+Use the token mint, the quantity you still hold, and the USD cost basis allocated
+to that remaining quantity:
+
+```bash
+launch-guard \
+  --import-fomo-mint TOKEN_MINT \
+  --import-symbol SYMBOL \
+  --import-token-amount 123456.78 \
+  --import-cost-usd 25
+```
+
+Then monitor it in launch mode without opening a new database:
+
+```bash
+launch-guard --mode launches
+```
+
+Importing creates a paper representation only. It does not connect to Fomo,
+submit an order, or move the real holding. Never put a Fomo password, session
+cookie, recovery phrase, or private key in this project.
