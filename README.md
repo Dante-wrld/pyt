@@ -2,11 +2,11 @@
 
 A safety-first Python monitor and paper trader for newly created Pump.fun tokens.
 
-This first release **never signs or submits transactions**. It listens for new-token events, applies configurable gates, opens simulated positions, follows token trades, and records decisions and P&L in SQLite.
+Version 0.2 **never signs or submits transactions**. It can monitor new-token events or a public Solana trader wallet, apply configurable gates, open simulated positions, follow prices through a public market-data endpoint, and record decisions and P&L in SQLite.
 
 ## What it does
 
-- Receives real-time new-token events from PumpPortal.
+- Receives real-time new-token events from PumpPortal.\n- Watches public trader wallets through Solana RPC without requiring wallet credentials.\n- Records wallet buys/sells and can paper-copy qualifying buys.
 - Rejects launches that lack enough pricing data or violate configured limits.
 - Limits position size, concurrent positions, and total exposure.
 - Simulates take-profit and stop-loss exits using subsequent trade events.
@@ -75,6 +75,11 @@ pytest
 | `TAKE_PROFIT_PCT` | `30` | Paper exit above entry |
 | `STOP_LOSS_PCT` | `20` | Paper exit below entry |
 | `DATABASE_PATH` | `launch_guard.db` | SQLite path |
+| `SOLANA_RPC_HTTP_URL` | public mainnet RPC | Transaction lookup endpoint |
+| `SOLANA_RPC_WS_URL` | public mainnet WebSocket | Wallet log subscription endpoint |
+| `WATCHED_WALLETS` | empty | Comma-separated public wallets |
+| `PRICE_POLL_SECONDS` | `5` | Seconds between paper-position price checks |
+| `COPY_MIN_LIQUIDITY_USD` | `10000` | Minimum liquidity for a copied paper entry |
 | `REJECT_UNKNOWN_PRICE` | `true` | Reject launches without a calculable price |
 
 The defaults are engineering examples, **not financial recommendations**. They should be evaluated in paper mode over a meaningful sample before any live-execution module is considered.
@@ -95,7 +100,7 @@ Pump.fun events may represent token amounts in different unit scales. Because bo
 
 - A passing result means only that the launch passed the configured event-level checks. It does **not** prove the token is safe.
 - This release does not claim to verify mint authority, freeze authority, holder concentration, bundled supply, social authenticity, or liquidity lock status. Those require additional on-chain or indexed data.
-- WebSocket feeds can be delayed, incomplete, changed, rate-limited, or unavailable.
+- WebSocket feeds can be delayed, incomplete, changed, rate-limited, or unavailable. Public Solana RPC is suitable for paper testing but not guaranteed low-latency production copying.\n- DEX Screener may not index a brand-new pair immediately, so some price marks or copy entries can be delayed or skipped.
 - Paper fills ignore latency, slippage, price impact, priority fees, platform fees, failed transactions, and MEV.
 - New tokens can lose essentially all value.
 
