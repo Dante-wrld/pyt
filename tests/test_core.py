@@ -5,6 +5,8 @@ from pathlib import Path
 import pytest
 
 from solana_launch_guard.config import Settings
+from solana_launch_guard.intelligence import CoinIntelligence
+from solana_launch_guard.market import MarketQuote
 from solana_launch_guard.wallet import parse_wallet_trades
 
 from solana_launch_guard.core import (
@@ -164,3 +166,76 @@ def test_wallet_transaction_parser_detects_token_buy() -> None:
     assert trades[0].mint == mint
     assert trades[0].token_delta == pytest.approx(50)
     assert trades[0].native_sol_delta == pytest.approx(-0.100005)
+
+
+def market_quote(
+    *,
+    liquidity: float,
+    market_cap: float,
+    buys: int,
+    sells: int,
+    volume: float,
+    change: float,
+) -> MarketQuote:
+    return MarketQuote(
+        mint="MintScore111",
+        symbol="SCORE",
+        price_sol=0.000001,
+        liquidity_usd=liquidity,
+        market_cap_usd=market_cap,
+        pair_address="Pair111",
+        pair_created_at_ms=1,
+        buys_m5=buys,
+        sells_m5=sells,
+        volume_m5_usd=volume,
+        price_change_m5_pct=change,
+    )
+
+
+def test_intelligence_assigns_core_tier() -> None:
+    result = CoinIntelligence().score(
+        market_quote(
+            liquidity=50_000,
+            market_cap=100_000,
+            buys=60,
+            sells=20,
+            volume=15_000,
+            change=15,
+        )
+    )
+
+    assert result.tier == "CORE"
+    assert result.safety_score >= 35
+    assert result.total_score >= 75
+
+
+def test_intelligence_assigns_five_dollar_moonshot_tier() -> None:
+    result = CoinIntelligence().score(
+        market_quote(
+            liquidity=10_000,
+            market_cap=80_000,
+            buys=25,
+            sells=5,
+            volume=10_000,
+            change=80,
+        )
+    )
+
+    assert result.tier == "MOONSHOT"
+    assert result.total_score >= 60
+
+
+def test_intelligence_hard_rejects_thin_liquidity() -> None:
+    result = CoinIntelligence().score(
+        market_quote(
+            liquidity=1_000,
+            market_cap=20_000,
+            buys=100,
+            sells=30,
+            volume=50_000,
+            change=100,
+        )
+    )
+
+    assert result.tier == "REJECT"
+    assert result.total_score == 0
