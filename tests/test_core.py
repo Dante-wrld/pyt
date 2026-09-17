@@ -5,6 +5,8 @@ from pathlib import Path
 import pytest
 
 from solana_launch_guard.config import Settings
+from solana_launch_guard.wallet import parse_wallet_trades
+
 from solana_launch_guard.core import (
     Launch,
     PaperBroker,
@@ -124,3 +126,41 @@ def test_exposure_limit_rejects_next_position(tmp_path: Path) -> None:
     assert decision.accepted is False
     assert "maximum total exposure would be exceeded" in decision.reasons
     store.close()
+
+
+def test_wallet_transaction_parser_detects_token_buy() -> None:
+    wallet = "Wallet1111111111111111111111111111111111111"
+    mint = "Mint222222222222222222222222222222222222222"
+    transaction = {
+        "transaction": {
+            "message": {
+                "accountKeys": [{"pubkey": wallet}, {"pubkey": "Program111"}]
+            }
+        },
+        "meta": {
+            "preBalances": [2_000_000_000, 0],
+            "postBalances": [1_899_995_000, 0],
+            "preTokenBalances": [
+                {
+                    "owner": wallet,
+                    "mint": mint,
+                    "uiTokenAmount": {"uiAmountString": "100", "decimals": 6},
+                }
+            ],
+            "postTokenBalances": [
+                {
+                    "owner": wallet,
+                    "mint": mint,
+                    "uiTokenAmount": {"uiAmountString": "150", "decimals": 6},
+                }
+            ],
+        },
+    }
+
+    trades = parse_wallet_trades(transaction, wallet, "Signature111", 123)
+
+    assert len(trades) == 1
+    assert trades[0].side == "BUY"
+    assert trades[0].mint == mint
+    assert trades[0].token_delta == pytest.approx(50)
+    assert trades[0].native_sol_delta == pytest.approx(-0.100005)
