@@ -92,6 +92,9 @@ class AdaptiveStrategy:
         state.last_price_sol = quote.price_sol
 
         pnl_pct = (quote.price_sol / position.entry_price_sol - 1) * 100
+        peak_gain_pct = (
+            state.peak_price_sol / position.entry_price_sol - 1
+        ) * 100
         drawdown_from_peak = (
             quote.price_sol / state.peak_price_sol - 1
         ) * 100
@@ -102,7 +105,7 @@ class AdaptiveStrategy:
         )
 
         if (
-            pnl_pct >= self.trailing_activation_pct
+            peak_gain_pct >= self.trailing_activation_pct
             and drawdown_from_peak <= -self.trailing_stop_pct
         ):
             return StrategyDecision(
