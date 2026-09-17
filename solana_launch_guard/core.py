@@ -1,0 +1,446 @@
+from __future__ import annotations
+
+import json
+import sqlite3
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Mapping, Protocol
+
+from .config import Settings
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def optional_float(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    return result if result >= 0 else None
+
+
+def indicative_price(payload: Mapping[str, Any]) -> float | None:
+    """Return SOL per token from virtual reserves when both values are usable."""
+    virtual_sol = optional_float(payload.get("vSolInBondingCurve"))
+    virtual_tokens = optional_float(payload.get("vTokensInBondingCurve"))
+    if virtual_sol is None or virtual_tokens is None or virtual_tokens <= 0:
+        return None
+    return virtual_sol / virtual_tokens
+
+
+@dataclass(frozen=True, slots=True)
+class Launch:
+    mint: str
+    name: str
+    symbol: str
+    creator: str | None
+    signature: str | None
+    virtual_sol: float | None
+    virtual_tokens: float | None
+    market_cap_sol: float | None
+    creator_buy_sol: float | None
+    price_sol: float | None
+    received_at: str
+    raw: Mapping[str, Any] = field(repr=False)
+
+    @classmethod
+    def from_payload(cls, payload: Mapping[str, Any]) -> "Launch":
+        mint = str(payload.get("mint") or "").strip()
+        if not mint:
+            raise ValueError("new-token event is missing mint")
+        return cls(
+            mint=mint,
+            name=str(payload.get("name") or "Unknown"),
+            symbol=str(payload.get("symbol") or "UNKNOWN"),
+            creator=(
+                str(payload.get("traderPublicKey"))
+                if payload.get("traderPublicKey")
+                else None
+            ),
+            signature=(
+                str(payload.get("signature")) if payload.get("signature") else None
+            ),
+            virtual_sol=optional_float(payload.get("vSolInBondingCurve")),
+            virtual_tokens=optional_float(payload.get("vTokensInBondingCurve")),
+            market_cap_sol=optional_float(payload.get("marketCapSol")),
+            creator_buy_sol=optional_float(payload.get("solAmount")),
+            price_sol=indicative_price(payload),
+            received_at=utc_now(),
+            raw=dict(payload),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class RiskDecision:
+    accepted: bool
+    score: int
+    reasons: tuple[str, ...]
+
+
+class PortfolioView(Protocol):
+    @property
+    def open_count(self) -> int: ...
+
+    @property
+    def exposure_sol(self) -> float: ...
+
+    def has_position(self, mint: str) -> bool: ...
+
+
+class RiskEngine:
+    """Deterministic gates based only on values present in the launch event."""
+
+    def __init__(self, settings: Settings) -> None:
+        self.settings = settings
+
+    def evaluate(self, launch: Launch, portfolio: PortfolioView) -> RiskDecision:
+        reasons: list[str] = []
+        deductions = 0
+
+        if portfolio.has_position(launch.mint):
+            reasons.append("position already exists for mint")
+
+        if portfolio.open_count >= self.settings.max_open_positions:
+            reasons.append("maximum open positions reached")
+
+        projected = portfolio.exposure_sol + self.settings.trade_size_sol
+        if projected > self.settings.max_total_exposure_sol + 1e-12:
+            reasons.append("maximum total exposure would be exceeded")
+
+        if launch.price_sol is None:
+            deductions += 35
+            if self.settings.reject_unknown_price:
+                reasons.append("price unavailable from virtual reserves")
+
+        if launch.virtual_sol is None:
+            deductions += 20
+            reasons.append("virtual SOL reserve unavailable")
+        elif launch.virtual_sol < self.settings.min_virtual_sol:
+            reasons.append(
+                f"virtual SOL {launch.virtual_sol:.6g} below "
+                f"minimum {self.settings.min_virtual_sol:.6g}"
+            )
+
+        if launch.market_cap_sol is None:
+            deductions += 15
+            reasons.append("market cap unavailable")
+        elif launch.market_cap_sol < self.settings.min_market_cap_sol:
+            reasons.append(
+                f"market cap {launch.market_cap_sol:.6g} SOL below "
+                f"minimum {self.settings.min_market_cap_sol:.6g}"
+            )
+        elif launch.market_cap_sol > self.settings.max_market_cap_sol:
+            reasons.append(
+                f"market cap {launch.market_cap_sol:.6g} SOL above "
+                f"maximum {self.settings.max_market_cap_sol:.6g}"
+            )
+
+        if launch.creator_buy_sol is None:
+            deductions += 10
+        elif launch.creator_buy_sol > self.settings.max_creator_buy_sol:
+            reasons.append(
+                f"creator buy {launch.creator_buy_sol:.6g} SOL above "
+                f"maximum {self.settings.max_creator_buy_sol:.6g}"
+            )
+
+        # Event-level data cannot establish these facts. Keep the score below 100
+        # so callers cannot mistake an accepted event for a verified-safe token.
+        deductions += 20
+        score = max(0, 100 - deductions - min(40, 10 * len(reasons)))
+        return RiskDecision(not reasons, score, tuple(reasons))
+
+
+@dataclass(slots=True)
+class Position:
+    mint: str
+    symbol: str
+    entry_price_sol: float
+    quantity: float
+    cost_sol: float
+    take_profit_price_sol: float
+    stop_loss_price_sol: float
+    opened_at: str
+    latest_price_sol: float
+    status: str = "OPEN"
+    closed_at: str | None = None
+    exit_price_sol: float | None = None
+    exit_reason: str | None = None
+    pnl_sol: float | None = None
+    pnl_pct: float | None = None
+
+    def mark(self, price_sol: float) -> str | None:
+        if self.status != "OPEN" or price_sol <= 0:
+            return None
+
+        self.latest_price_sol = price_sol
+        if price_sol >= self.take_profit_price_sol:
+            self.close(price_sol, "TAKE_PROFIT")
+            return self.exit_reason
+        if price_sol <= self.stop_loss_price_sol:
+            self.close(price_sol, "STOP_LOSS")
+            return self.exit_reason
+        return None
+
+    def close(self, price_sol: float, reason: str) -> None:
+        proceeds = self.quantity * price_sol
+        self.status = "CLOSED"
+        self.closed_at = utc_now()
+        self.exit_price_sol = price_sol
+        self.exit_reason = reason
+        self.pnl_sol = proceeds - self.cost_sol
+        self.pnl_pct = (price_sol / self.entry_price_sol - 1.0) * 100.0
+
+
+class PaperBroker:
+    def __init__(self, settings: Settings, store: "SQLiteStore") -> None:
+        self.settings = settings
+        self.store = store
+        self.positions: dict[str, Position] = {}
+
+    @property
+    def open_count(self) -> int:
+        return sum(position.status == "OPEN" for position in self.positions.values())
+
+    @property
+    def exposure_sol(self) -> float:
+        return sum(
+            position.cost_sol
+            for position in self.positions.values()
+            if position.status == "OPEN"
+        )
+
+    def has_position(self, mint: str) -> bool:
+        return mint in self.positions
+
+    def open(self, launch: Launch) -> Position:
+        if launch.price_sol is None or launch.price_sol <= 0:
+            raise ValueError("cannot open a paper position without a positive price")
+        if self.has_position(launch.mint):
+            raise ValueError("a paper position already exists for this mint")
+
+        cost = self.settings.trade_size_sol
+        position = Position(
+            mint=launch.mint,
+            symbol=launch.symbol,
+            entry_price_sol=launch.price_sol,
+            quantity=cost / launch.price_sol,
+            cost_sol=cost,
+            take_profit_price_sol=(
+                launch.price_sol * (1 + self.settings.take_profit_pct / 100)
+            ),
+            stop_loss_price_sol=(
+                launch.price_sol * (1 - self.settings.stop_loss_pct / 100)
+            ),
+            opened_at=utc_now(),
+            latest_price_sol=launch.price_sol,
+        )
+        self.positions[launch.mint] = position
+        self.store.save_position(position)
+        self.store.save_fill(
+            mint=position.mint,
+            side="BUY",
+            price_sol=position.entry_price_sol,
+            quantity=position.quantity,
+            amount_sol=position.cost_sol,
+            reason="RISK_PASS",
+        )
+        return position
+
+    def mark(self, mint: str, price_sol: float) -> Position | None:
+        position = self.positions.get(mint)
+        if position is None or position.status != "OPEN":
+            return None
+
+        exit_reason = position.mark(price_sol)
+        self.store.save_position(position)
+        if exit_reason:
+            self.store.save_fill(
+                mint=position.mint,
+                side="SELL",
+                price_sol=price_sol,
+                quantity=position.quantity,
+                amount_sol=position.quantity * price_sol,
+                reason=exit_reason,
+            )
+        return position
+
+
+class SQLiteStore:
+    def __init__(self, path: str) -> None:
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        self.connection = sqlite3.connect(path)
+        self.connection.row_factory = sqlite3.Row
+        self._migrate()
+
+    def _migrate(self) -> None:
+        self.connection.executescript(
+            """
+            PRAGMA journal_mode = WAL;
+
+            CREATE TABLE IF NOT EXISTS events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                received_at TEXT NOT NULL,
+                event_kind TEXT NOT NULL,
+                mint TEXT,
+                payload_json TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS decisions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                decided_at TEXT NOT NULL,
+                mint TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                accepted INTEGER NOT NULL,
+                score INTEGER NOT NULL,
+                reasons_json TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS positions (
+                mint TEXT PRIMARY KEY,
+                symbol TEXT NOT NULL,
+                entry_price_sol REAL NOT NULL,
+                latest_price_sol REAL NOT NULL,
+                quantity REAL NOT NULL,
+                cost_sol REAL NOT NULL,
+                take_profit_price_sol REAL NOT NULL,
+                stop_loss_price_sol REAL NOT NULL,
+                opened_at TEXT NOT NULL,
+                status TEXT NOT NULL,
+                closed_at TEXT,
+                exit_price_sol REAL,
+                exit_reason TEXT,
+                pnl_sol REAL,
+                pnl_pct REAL
+            );
+
+            CREATE TABLE IF NOT EXISTS fills (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                filled_at TEXT NOT NULL,
+                mint TEXT NOT NULL,
+                side TEXT NOT NULL,
+                price_sol REAL NOT NULL,
+                quantity REAL NOT NULL,
+                amount_sol REAL NOT NULL,
+                reason TEXT NOT NULL
+            );
+            """
+        )
+        self.connection.commit()
+
+    def save_event(
+        self, event_kind: str, payload: Mapping[str, Any], mint: str | None = None
+    ) -> None:
+        self.connection.execute(
+            """
+            INSERT INTO events(received_at, event_kind, mint, payload_json)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                utc_now(),
+                event_kind,
+                mint,
+                json.dumps(dict(payload), separators=(",", ":"), default=str),
+            ),
+        )
+        self.connection.commit()
+
+    def save_decision(self, launch: Launch, decision: RiskDecision) -> None:
+        self.connection.execute(
+            """
+            INSERT INTO decisions(
+                decided_at, mint, symbol, accepted, score, reasons_json
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                utc_now(),
+                launch.mint,
+                launch.symbol,
+                int(decision.accepted),
+                decision.score,
+                json.dumps(decision.reasons),
+            ),
+        )
+        self.connection.commit()
+
+    def save_position(self, position: Position) -> None:
+        self.connection.execute(
+            """
+            INSERT INTO positions(
+                mint, symbol, entry_price_sol, latest_price_sol, quantity,
+                cost_sol, take_profit_price_sol, stop_loss_price_sol,
+                opened_at, status, closed_at, exit_price_sol, exit_reason,
+                pnl_sol, pnl_pct
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(mint) DO UPDATE SET
+                latest_price_sol=excluded.latest_price_sol,
+                status=excluded.status,
+                closed_at=excluded.closed_at,
+                exit_price_sol=excluded.exit_price_sol,
+                exit_reason=excluded.exit_reason,
+                pnl_sol=excluded.pnl_sol,
+                pnl_pct=excluded.pnl_pct
+            """,
+            (
+                position.mint,
+                position.symbol,
+                position.entry_price_sol,
+                position.latest_price_sol,
+                position.quantity,
+                position.cost_sol,
+                position.take_profit_price_sol,
+                position.stop_loss_price_sol,
+                position.opened_at,
+                position.status,
+                position.closed_at,
+                position.exit_price_sol,
+                position.exit_reason,
+                position.pnl_sol,
+                position.pnl_pct,
+            ),
+        )
+        self.connection.commit()
+
+    def save_fill(
+        self,
+        *,
+        mint: str,
+        side: str,
+        price_sol: float,
+        quantity: float,
+        amount_sol: float,
+        reason: str,
+    ) -> None:
+        self.connection.execute(
+            """
+            INSERT INTO fills(
+                filled_at, mint, side, price_sol, quantity, amount_sol, reason
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (utc_now(), mint, side, price_sol, quantity, amount_sol, reason),
+        )
+        self.connection.commit()
+
+    def summary(self) -> dict[str, float | int]:
+        row = self.connection.execute(
+            """
+            SELECT
+                COUNT(*) AS total_positions,
+                SUM(CASE WHEN status = 'OPEN' THEN 1 ELSE 0 END) AS open_positions,
+                COALESCE(SUM(CASE WHEN status = 'CLOSED' THEN pnl_sol ELSE 0 END), 0)
+                    AS realized_pnl_sol
+            FROM positions
+            """
+        ).fetchone()
+        return {
+            "total_positions": int(row["total_positions"] or 0),
+            "open_positions": int(row["open_positions"] or 0),
+            "realized_pnl_sol": float(row["realized_pnl_sol"] or 0),
+        }
+
+    def close(self) -> None:
+        self.connection.close()
