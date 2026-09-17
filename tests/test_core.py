@@ -7,6 +7,7 @@ import pytest
 from solana_launch_guard.config import Settings
 from solana_launch_guard.intelligence import CoinIntelligence
 from solana_launch_guard.market import MarketQuote
+from solana_launch_guard.strategy import AdaptiveStrategy
 from solana_launch_guard.wallet import parse_wallet_trades
 
 from solana_launch_guard.core import (
@@ -239,3 +240,107 @@ def test_intelligence_hard_rejects_thin_liquidity() -> None:
 
     assert result.tier == "REJECT"
     assert result.total_score == 0
+
+
+def strategy_position() -> object:
+    from solana_launch_guard.core import Position
+
+    return Position(
+        mint="MintScore111",
+        symbol="SCORE",
+        entry_price_sol=1.0,
+        quantity=10,
+        cost_sol=10,
+        take_profit_price_sol=51,
+        stop_loss_price_sol=0.6,
+        opened_at="now",
+        latest_price_sol=1.0,
+    )
+
+
+def test_adaptive_strategy_trails_after_peak_gain() -> None:
+    strategy = AdaptiveStrategy(
+        trailing_activation_pct=20,
+        trailing_stop_pct=12,
+    )
+    position = strategy_position()
+    first = market_quote(
+        liquidity=50_000,
+        market_cap=100_000,
+        buys=30,
+        sells=15,
+        volume=10_000,
+        change=20,
+    )
+    first = MarketQuote(
+        **{**first.__dict__, "price_sol": 1.3}
+    ) if hasattr(first, "__dict__") else MarketQuote(
+        mint=first.mint,
+        symbol=first.symbol,
+        price_sol=1.3,
+        liquidity_usd=first.liquidity_usd,
+        market_cap_usd=first.market_cap_usd,
+        pair_address=first.pair_address,
+        pair_created_at_ms=first.pair_created_at_ms,
+        buys_m5=first.buys_m5,
+        sells_m5=first.sells_m5,
+        volume_m5_usd=first.volume_m5_usd,
+        price_change_m5_pct=first.price_change_m5_pct,
+    )
+    strategy.register_open(position, first, "MOONSHOT")
+    pullback = MarketQuote(
+        mint=first.mint,
+        symbol=first.symbol,
+        price_sol=1.1,
+        liquidity_usd=50_000,
+        market_cap_usd=100_000,
+        pair_address="Pair111",
+        pair_created_at_ms=1,
+        buys_m5=20,
+        sells_m5=15,
+        volume_m5_usd=8_000,
+        price_change_m5_pct=-2,
+    )
+
+    decision = strategy.evaluate_open(position, pullback)
+
+    assert decision.action == "SELL"
+    assert "TRAILING_STOP" in decision.reason
+
+
+def test_adaptive_strategy_requires_recovery_for_reentry() -> None:
+    strategy = AdaptiveStrategy(reentry_cooldown_seconds=0)
+    position = strategy_position()
+    entry_quote = MarketQuote(
+        mint="MintScore111",
+        symbol="SCORE",
+        price_sol=1.0,
+        liquidity_usd=50_000,
+        market_cap_usd=100_000,
+        pair_address="Pair111",
+        pair_created_at_ms=1,
+        buys_m5=20,
+        sells_m5=10,
+        volume_m5_usd=10_000,
+        price_change_m5_pct=5,
+    )
+    strategy.register_open(position, entry_quote, "CORE")
+    strategy.record_exit(position.mint, 0.9)
+    recovery = MarketQuote(
+        mint=entry_quote.mint,
+        symbol=entry_quote.symbol,
+        price_sol=0.95,
+        liquidity_usd=48_000,
+        market_cap_usd=95_000,
+        pair_address="Pair111",
+        pair_created_at_ms=1,
+        buys_m5=30,
+        sells_m5=10,
+        volume_m5_usd=12_000,
+        price_change_m5_pct=6,
+    )
+
+    decision = strategy.evaluate_reentry(recovery)
+
+    assert decision.action == "REENTER"
+    assert "RECOVERY" in decision.reason
