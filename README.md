@@ -5,8 +5,8 @@ multichain crypto tokens.
 
 Version 0.7 **never signs or submits transactions**. It can monitor Pump.fun
 new-token events, public Solana and EVM wallet activity, HyperCore holdings and
-fills, and token profiles on Ethereum, Base, BOB, Monad, Robinhood Chain, and
-HyperEVM. It applies configurable gates, ranks intelligence-qualified paper
+fills, and token profiles on Ethereum, Base, BNB Smart Chain, BOB, Monad,
+Robinhood Chain, and HyperEVM. It applies configurable gates, ranks intelligence-qualified paper
 candidates, opens simulated Solana positions, and records activity in SQLite.
 
 ## What it does
@@ -19,7 +19,7 @@ candidates, opens simulated Solana positions, and records activity in SQLite.
 - Uses a CORE tier for stronger setups and a $5 MOONSHOT tier for higher-risk setups.
 - Limits position size, concurrent positions, and total exposure.
 - Prints a gold top-10 paper watchlist and continuously re-ranks it using bounded live price momentum.
-- Discovers crypto-token profiles across six EVM networks and prints the chain,
+- Discovers crypto-token profiles across seven EVM networks and prints the chain,
   USD price, exact `0x` contract, and DEX Screener market link.
 - Filters official and recognizable wrapped stock tokens from recommendations.
 - Watches ERC-20 transfers for one shared public EVM address and separately
@@ -102,7 +102,7 @@ pytest
 | `RECOMMENDATION_TTL_SECONDS` | `1800` | Seconds before a candidate ages out of the watchlist |
 | `COLOR_OUTPUT` | `true` | Use gold ANSI terminal output when supported |
 | `ROBINHOOD_TOKEN_ADDRESSES` | empty | Comma-separated Robinhood Chain `0x` contracts to monitor in addition to discovery |
-| `ETHEREUM_TOKEN_ADDRESSES`, `BASE_TOKEN_ADDRESSES`, `BOB_TOKEN_ADDRESSES`, `MONAD_TOKEN_ADDRESSES`, `HYPEREVM_TOKEN_ADDRESSES` | empty | Exact contracts to monitor per chain |
+| `ETHEREUM_TOKEN_ADDRESSES`, `BASE_TOKEN_ADDRESSES`, `BNB_TOKEN_ADDRESSES`, `BOB_TOKEN_ADDRESSES`, `MONAD_TOKEN_ADDRESSES`, `HYPEREVM_TOKEN_ADDRESSES` | empty | Exact contracts to monitor per chain |
 | `MULTICHAIN_POLL_SECONDS` | `15` | Seconds between multichain discovery passes (minimum 15) |
 | `EVM_WALLET_ADDRESS` | empty | Shared public `0x` address monitored across configured EVM RPCs |
 | `HYPERLIQUID_ADDRESS` | `EVM_WALLET_ADDRESS` | Public address used for HyperCore balances and fills |
@@ -150,6 +150,7 @@ Official references:
 - [Robinhood Chain connection details](https://docs.robinhood.com/chain/connecting/)
 - [Robinhood Chain Stock Token registry](https://api.robinhood.com/rhj/assets)
 - [DEX Screener API reference](https://docs.dexscreener.com/api/reference)
+- [BNB Smart Chain JSON-RPC endpoints](https://docs.bnbchain.org/bnb-smart-chain/developers/json_rpc/json-rpc-endpoint/)
 - [Monad network information](https://docs.monad.xyz/developer-essentials/network-information)
 - [Hyperliquid HyperEVM](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/hyperevm)
 - [Hyperliquid Info endpoint](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint)
@@ -223,7 +224,7 @@ Run the Robinhood Chain scanner with the separate recommendation window:
 launch-guard --mode robinhood --recommendations-window
 ```
 
-Run Solana launches, Solana wallet copy monitoring, all six EVM discovery
+Run Solana launches, Solana wallet copy monitoring, all seven EVM discovery
 feeds, EVM wallet activity, and HyperCore monitoring together:
 
 ```bash
@@ -237,7 +238,7 @@ launch-guard --mode multichain --recommendations-window
 ```
 
 The scanner reads DEX Screener's latest and recently updated token profiles for
-Ethereum, Base, BOB, Monad, Robinhood Chain, and HyperEVM. It then scores each
+Ethereum, Base, BNB Smart Chain, BOB, Monad, Robinhood Chain, and HyperEVM. It then scores each
 token's most liquid pair on that same chain. A qualifying row uses a USD price,
 shows the exact EVM contract, and includes a DEX Screener market URL. Add exact
 contracts to `.env` when you want them monitored even if they are not present
@@ -245,7 +246,8 @@ in the current profile feed:
 
 ```dotenv
 BASE_TOKEN_ADDRESSES=0xContractOne,0xContractTwo
-MONAD_TOKEN_ADDRESSES=0xContractThree
+BNB_TOKEN_ADDRESSES=0xContractThree
+MONAD_TOKEN_ADDRESSES=0xContractFour
 ```
 
 To monitor the same Fomo public address on every configured EVM network and on
@@ -261,10 +263,14 @@ they do not by themselves prove that the movement was a buy or sell. Launch
 Guard therefore prints EVM activity as `IN` or `OUT`. HyperCore fills come from
 the exchange's public info API and are printed as `BUY` or `SELL`.
 
-Ethereum, Base, BOB, and Monad RPC values are left blank in `.env.example`.
+Ethereum, Base, BNB, BOB, and Monad RPC values are left blank in `.env.example`.
 Add read-only provider endpoints that you trust before their wallet watchers
 will start. Robinhood Chain and HyperEVM use the public endpoints documented by
 those networks.
+
+BNB Chain's documented public endpoints disable `eth_getLogs`, which this
+wallet watcher needs. Use a trusted third-party BNB RPC that supports
+`eth_getLogs`; discovery and recommendation scanning work without a BNB RPC.
 
 Official Robinhood Stock Token contracts are removed using Robinhood's live
 asset registry. Launch Guard also conservatively excludes matching direct and
