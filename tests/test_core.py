@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
 
+from solana_launch_guard.app import _is_stock_token_symbol
 from solana_launch_guard.config import Settings
 from solana_launch_guard.core import (
     Launch,
@@ -14,6 +16,7 @@ from solana_launch_guard.core import (
 )
 from solana_launch_guard.intelligence import CoinIntelligence
 from solana_launch_guard.market import DexScreenerOracle, MarketQuote
+from solana_launch_guard.multichain import EvmRpc, HyperCoreWatcher
 from solana_launch_guard.recommendations import (
     RecommendationBook,
     build_snapshot,
@@ -439,6 +442,7 @@ def test_robinhood_profiles_and_stock_contracts_are_discovered(
             return {
                 "assets": [
                     {
+                        "tokenSymbol": "NVDA",
                         "deployments": [
                             {"contractAddress": stock, "chainId": 4663}
                         ]
@@ -456,6 +460,15 @@ def test_robinhood_profiles_and_stock_contracts_are_discovered(
     assert oracle._robinhood_stock_token_addresses() == frozenset(
         {stock.casefold()}
     )
+    assert oracle._robinhood_stock_token_symbols() == frozenset({"nvda"})
+
+
+def test_stock_symbols_and_wrapped_stock_symbols_are_excluded() -> None:
+    symbols = frozenset({"nvda", "spy"})
+
+    assert _is_stock_token_symbol("NVDA", symbols) is True
+    assert _is_stock_token_symbol("wNVDAx", symbols) is True
+    assert _is_stock_token_symbol("MEME", symbols) is False
 
 
 def test_robinhood_recommendation_shows_contract_and_fomo_link() -> None:
@@ -485,6 +498,139 @@ def test_robinhood_recommendation_shows_contract_and_fomo_link() -> None:
     assert f"contract={address}" in output
     assert f"fomo=https://fomo.family/tokens/robinhood/{address}" in output
     assert "price=$0.00025" in output
+
+
+def test_base_recommendation_uses_generic_evm_contract_display() -> None:
+    address = "0x4444444444444444444444444444444444444444"
+    quote = MarketQuote(
+        mint=address,
+        symbol="BASECOIN",
+        price_sol=0,
+        price_usd=0.05,
+        chain="base",
+        liquidity_usd=50_000,
+        market_cap_usd=100_000,
+        pair_address="0xPair",
+        pair_created_at_ms=1,
+        buys_m5=60,
+        sells_m5=20,
+        volume_m5_usd=15_000,
+        price_change_m5_pct=15,
+    )
+    book = RecommendationBook(pool_size=10, ttl_seconds=60)
+    book.add(quote, CoinIntelligence().score(quote), now=0)
+
+    output = format_dashboard(
+        build_snapshot(book.ranked(), pending_count=0, poll_seconds=15),
+        color=False,
+    )
+
+    assert "chain=BASE" in output
+    assert f"contract={address}" in output
+    assert f"market=https://dexscreener.com/base/{address}" in output
+
+
+def test_evm_transfer_parser_reads_incoming_erc20(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wallet = "0x1111111111111111111111111111111111111111"
+    contract = "0x2222222222222222222222222222222222222222"
+    rpc = EvmRpc("https://example.invalid")
+    calls = 0
+
+    def fake_request(method: str, _params: list[object]) -> object:
+        nonlocal calls
+        assert method == "eth_getLogs"
+        calls += 1
+        if calls == 1:
+            return [
+                {
+                    "transactionHash": "0xabc",
+                    "address": contract,
+                    "logIndex": "0x2",
+                    "blockNumber": "0x64",
+                    "data": hex(1_500_000),
+                }
+            ]
+        return []
+
+    async def fake_metadata(_contract: str) -> tuple[str, int]:
+        return "TOK", 6
+
+    monkeypatch.setattr(rpc, "_request", fake_request)
+    monkeypatch.setattr(rpc, "token_metadata", fake_metadata)
+
+    transfers = asyncio.run(
+        rpc.transfers(
+            chain="base", wallet=wallet, from_block=1, to_block=100
+        )
+    )
+
+    assert len(transfers) == 1
+    assert transfers[0].direction == "IN"
+    assert transfers[0].symbol == "TOK"
+    assert transfers[0].token_amount == pytest.approx(1.5)
+
+
+def test_hypercore_parses_spot_perps_and_fills() -> None:
+    async def ignore(_item: object) -> None:
+        return None
+
+    watcher = HyperCoreWatcher(
+        wallet="0x1111111111111111111111111111111111111111",
+        fill_callback=ignore,
+        state_callback=ignore,
+    )
+    state = watcher._parse_state(
+        {"balances": [{"coin": "HYPE", "total": "2.5"}]},
+        {
+            "assetPositions": [
+                {"position": {"coin": "BTC", "szi": "0.01"}}
+            ]
+        },
+    )
+    fills = watcher._parse_fills(
+        [
+            {
+                "tid": 123,
+                "coin": "HYPE",
+                "side": "B",
+                "sz": "1.5",
+                "px": "20",
+                "time": 1000,
+            }
+        ]
+    )
+
+    assert state.spot_balances == (("HYPE", 2.5),)
+    assert state.perp_positions == (("BTC", 0.01),)
+    assert fills[0].fill_id == "123"
+    assert fills[0].price == pytest.approx(20)
+
+
+def test_multichain_wallet_events_are_deduplicated(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "wallet.db")
+    values = {
+        "chain": "base",
+        "wallet": "0x1111111111111111111111111111111111111111",
+        "event_id": "0xabc:2",
+        "block_number": 100,
+        "token_address": "0x2222222222222222222222222222222222222222",
+        "symbol": "TOK",
+        "direction": "IN",
+        "token_amount": 1.5,
+        "price_usd": 0.25,
+        "source": "EVM_TRANSFER",
+    }
+
+    assert store.save_wallet_event(**values) is True
+    assert store.save_wallet_event(**values) is False
+    info = store.multichain_wallet_info(values["wallet"])
+
+    assert info["chains"][0]["chain"] == "base"
+    assert info["chains"][0]["events"] == 1
+    assert info["recent"][0]["symbol"] == "TOK"
+    store.close()
 
 
 def strategy_position() -> object:
