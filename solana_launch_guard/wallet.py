@@ -21,6 +21,10 @@ IGNORED_MINTS = {
     "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",  # USDC
     "Es9vMFrzaCERmJfrF4H2FYDg1QhVg2u4NfrJkGg7QZp",   # USDT
 }
+TOKEN_PROGRAM_IDS = (
+    "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+    "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,6 +36,12 @@ class WalletTrade:
     side: str
     token_delta: float
     native_sol_delta: float | None
+
+
+@dataclass(frozen=True, slots=True)
+class SolanaTokenHolding:
+    mint: str
+    amount: float
 
 
 class SolanaRpc:
@@ -48,21 +58,68 @@ class SolanaRpc:
             await asyncio.sleep(delay)
         return None
 
+    async def token_holdings(self, owner: str) -> tuple[SolanaTokenHolding, ...]:
+        responses = await asyncio.gather(
+            *(
+                asyncio.to_thread(
+                    self._request,
+                    "getTokenAccountsByOwner",
+                    [
+                        owner,
+                        {"programId": program_id},
+                        {"encoding": "jsonParsed", "commitment": "confirmed"},
+                    ],
+                )
+                for program_id in TOKEN_PROGRAM_IDS
+            )
+        )
+        totals: dict[str, Decimal] = {}
+        successful = False
+        for response in responses:
+            if not isinstance(response, dict):
+                continue
+            successful = True
+            for item in response.get("value") or []:
+                try:
+                    info = item["account"]["data"]["parsed"]["info"]
+                    mint = str(info["mint"])
+                    amount = Decimal(
+                        str(info["tokenAmount"]["uiAmountString"])
+                    )
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if mint in IGNORED_MINTS or amount <= 0:
+                    continue
+                totals[mint] = totals.get(mint, Decimal(0)) + amount
+        if not successful:
+            raise ConnectionError("Solana token balances are unavailable")
+        return tuple(
+            SolanaTokenHolding(mint=mint, amount=float(amount))
+            for mint, amount in sorted(totals.items())
+        )
+
     def _get_transaction_sync(self, signature: str) -> dict[str, Any] | None:
+        result = self._request(
+            "getTransaction",
+            [
+                signature,
+                {
+                    "encoding": "jsonParsed",
+                    "commitment": "confirmed",
+                    "maxSupportedTransactionVersion": 0,
+                },
+            ],
+        )
+        return result if isinstance(result, dict) else None
+
+    def _request(self, method: str, params: list[Any]) -> Any:
         self._request_id += 1
         body = json.dumps(
             {
                 "jsonrpc": "2.0",
                 "id": self._request_id,
-                "method": "getTransaction",
-                "params": [
-                    signature,
-                    {
-                        "encoding": "jsonParsed",
-                        "commitment": "confirmed",
-                        "maxSupportedTransactionVersion": 0,
-                    },
-                ],
+                "method": method,
+                "params": params,
             }
         ).encode()
         request = urllib.request.Request(
@@ -80,6 +137,8 @@ class SolanaRpc:
             ) as response:
                 payload = json.load(response)
         except (OSError, ValueError, urllib.error.URLError):
+            return None
+        if not isinstance(payload, dict) or payload.get("error"):
             return None
         return payload.get("result")
 

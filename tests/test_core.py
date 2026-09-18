@@ -21,6 +21,12 @@ from solana_launch_guard.notifications import (
     DecisionNotifier,
     format_candidate_notification,
 )
+from solana_launch_guard.portfolio import (
+    OwnedHolding,
+    PortfolioAdvisor,
+    build_portfolio_snapshot,
+    format_portfolio_dashboard,
+)
 from solana_launch_guard.recommendations import (
     RecommendationBook,
     build_snapshot,
@@ -30,7 +36,7 @@ from solana_launch_guard.recommendations import (
     write_snapshot,
 )
 from solana_launch_guard.strategy import AdaptiveStrategy
-from solana_launch_guard.wallet import parse_wallet_trades
+from solana_launch_guard.wallet import SolanaRpc, parse_wallet_trades
 
 
 def settings(database_path: Path, **overrides: object) -> Settings:
@@ -197,6 +203,40 @@ def test_wallet_transaction_parser_detects_token_buy() -> None:
     assert trades[0].mint == mint
     assert trades[0].token_delta == pytest.approx(50)
     assert trades[0].native_sol_delta == pytest.approx(-0.100005)
+
+
+def test_solana_rpc_reads_and_aggregates_owned_token_balances(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rpc = SolanaRpc("https://example.invalid")
+
+    def fake_request(_method: str, params: list[object]) -> object:
+        options = params[1] if isinstance(params[1], dict) else {}
+        program = str(options.get("programId"))
+        amount = "1.5" if program.startswith("Tokenkeg") else "2.5"
+        return {
+            "value": [
+                {
+                    "account": {
+                        "data": {
+                            "parsed": {
+                                "info": {
+                                    "mint": "MintOwned111",
+                                    "tokenAmount": {"uiAmountString": amount},
+                                }
+                            }
+                        }
+                    }
+                }
+            ]
+        }
+
+    monkeypatch.setattr(rpc, "_request", fake_request)
+    holdings = asyncio.run(rpc.token_holdings("Wallet111"))
+
+    assert len(holdings) == 1
+    assert holdings[0].mint == "MintOwned111"
+    assert holdings[0].amount == pytest.approx(4)
 
 
 def market_quote(
@@ -604,6 +644,122 @@ def test_entry_decision_avoids_heavy_selloff() -> None:
 
     assert candidate.decision == "AVOID"
     assert candidate.decision_reason == "falling price with heavy selling"
+
+
+def test_portfolio_advisor_uses_cost_basis_for_partial_profit() -> None:
+    holding = OwnedHolding(
+        chain="solana",
+        token_address="MintOwned111",
+        symbol="OWN",
+        quantity=100,
+        entry_price=0.000001,
+        price_currency="SOL",
+        cost_amount=0.0001,
+    )
+    quote = MarketQuote(
+        mint=holding.token_address,
+        symbol=holding.symbol,
+        price_sol=0.00000135,
+        price_usd=0.0002,
+        chain="solana",
+        liquidity_usd=50_000,
+        market_cap_usd=100_000,
+        pair_address="PairOwned",
+        pair_created_at_ms=1,
+        buys_m5=20,
+        sells_m5=10,
+        volume_m5_usd=5_000,
+        price_change_m5_pct=2,
+    )
+
+    signal = PortfolioAdvisor().evaluate(holding, quote, sol_usd=150)
+
+    assert signal.decision == "TAKE PARTIAL"
+    assert signal.pnl_pct == pytest.approx(35)
+    assert signal.current_value_usd == pytest.approx(0.02)
+
+
+def test_portfolio_advisor_warns_on_momentum_reversal_without_cost_basis() -> None:
+    holding = OwnedHolding(
+        chain="solana",
+        token_address="MintRisk111",
+        symbol="RISK",
+        quantity=10,
+    )
+    quote = MarketQuote(
+        mint=holding.token_address,
+        symbol=holding.symbol,
+        price_sol=0.000001,
+        price_usd=0.00015,
+        chain="solana",
+        liquidity_usd=10_000,
+        market_cap_usd=50_000,
+        pair_address="PairRisk",
+        pair_created_at_ms=1,
+        buys_m5=5,
+        sells_m5=10,
+        volume_m5_usd=4_000,
+        price_change_m5_pct=-9,
+    )
+
+    signal = PortfolioAdvisor().evaluate(holding, quote)
+
+    assert signal.decision == "EXIT WARNING"
+    assert signal.pnl_pct is None
+    assert "seller/buyer pressure" in signal.reason
+
+
+def test_owned_holding_persists_and_dashboard_is_read_only(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(str(tmp_path / "portfolio.db"))
+    holding = OwnedHolding(
+        chain="solana",
+        token_address="MintOwned111",
+        symbol="OWN",
+        quantity=125,
+        entry_price=0.01,
+        price_currency="USD",
+        cost_amount=1.25,
+    )
+    store.save_owned_holding(holding)
+    updated = OwnedHolding(
+        chain="solana",
+        token_address="MintOwned111",
+        symbol="OWN",
+        quantity=150,
+        entry_price=0.009,
+        price_currency="USD",
+        cost_amount=1.35,
+    )
+    store.save_owned_holding(updated)
+
+    assert store.load_owned_holdings("solana") == [updated]
+    signal = PortfolioAdvisor().evaluate(updated, None)
+    output = format_portfolio_dashboard(
+        build_portfolio_snapshot(
+            [signal], wallet="Wallet111", poll_seconds=15
+        ),
+        color=False,
+    )
+    assert "MY HOLDINGS (READ-ONLY)" in output
+    assert "UNPRICED" in output
+    assert "token=MintOwned111" in output
+    store.save_portfolio_state(
+        chain="solana",
+        token_address="MintOwned111",
+        peak_price=0.02,
+        baseline_liquidity_usd=50_000,
+    )
+    assert store.load_portfolio_states() == [
+        {
+            "chain": "solana",
+            "token_address": "MintOwned111",
+            "peak_price": 0.02,
+            "baseline_liquidity_usd": 50_000.0,
+        }
+    ]
+    store.close()
 
 
 def test_phone_notifications_deduplicate_and_respect_cooldown(

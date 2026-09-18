@@ -3,7 +3,7 @@
 A safety-first Python monitor and paper trader for Solana launches and
 multichain crypto tokens.
 
-Version 0.11 **never signs or submits transactions**. It can monitor Pump.fun
+Version 0.12 **never signs or submits transactions**. It can monitor Pump.fun
 new-token events, public Solana and EVM wallet activity, HyperCore holdings and
 fills, and token profiles on Ethereum, Base, BNB Smart Chain, BOB, Monad,
 Robinhood Chain, and HyperEVM. It applies configurable gates, ranks intelligence-qualified paper
@@ -30,6 +30,9 @@ candidates, opens simulated Solana positions, and records activity in SQLite.
 - Filters official and recognizable wrapped stock tokens from recommendations.
 - Watches ERC-20 transfers for one shared public EVM address and separately
   reads HyperCore spot balances, perpetual positions, and fills.
+- Reads non-zero SPL-token balances from one public Solana wallet and opens a
+  separate holdings board with `HOLD`, `TAKE PARTIAL`, `PROTECT PROFIT`,
+  `EXIT WARNING`, or `UNPRICED` guidance.
 - Simulates take-profit and stop-loss exits using subsequent trade events.
 - Persists launches, decisions, positions, and fills in `launch_guard.db`.
 - Reconnects after WebSocket failures.
@@ -98,6 +101,7 @@ pytest
 | `DATABASE_PATH` | `launch_guard.db` | SQLite path |
 | `SOLANA_RPC_HTTP_URL` | public mainnet RPC | Transaction lookup endpoint |
 | `SOLANA_RPC_WS_URL` | public mainnet WebSocket | Wallet log subscription endpoint |
+| `SOLANA_WALLET_ADDRESS` | empty | Public Solana address used for read-only current-balance discovery |
 | `WATCHED_WALLETS` | empty | Comma-separated public wallets |
 | `PRICE_POLL_SECONDS` | `5` | Seconds between paper-position price checks |
 | `COPY_MIN_LIQUIDITY_USD` | `10000` | Minimum liquidity for a copied paper entry |
@@ -126,6 +130,9 @@ pytest
 | `PUSHOVER_MIN_SCORE` | `60` | Minimum live signal score required for phone alerts |
 | `PUSHOVER_COOLDOWN_SECONDS` | `300` | Minimum delay between different alerts for one token |
 | `COLOR_OUTPUT` | `true` | Use gold ANSI terminal output when supported |
+| `PORTFOLIO_POLL_SECONDS` | `15` | Seconds between read-only holdings checks (minimum 10) |
+| `PORTFOLIO_MIN_VALUE_USD` | `0.01` | Hide priced wallet dust below this estimated USD value |
+| `PORTFOLIO_SNAPSHOT_PATH` | `launch_guard_portfolio.json` | Local snapshot used by the holdings window |
 | `ROBINHOOD_TOKEN_ADDRESSES` | empty | Comma-separated Robinhood Chain `0x` contracts to monitor in addition to discovery |
 | `ETHEREUM_TOKEN_ADDRESSES`, `BASE_TOKEN_ADDRESSES`, `BNB_TOKEN_ADDRESSES`, `BOB_TOKEN_ADDRESSES`, `MONAD_TOKEN_ADDRESSES`, `HYPEREVM_TOKEN_ADDRESSES` | empty | Exact contracts to monitor per chain |
 | `MULTICHAIN_POLL_SECONDS` | `15` | Seconds between multichain discovery passes (minimum 15) |
@@ -241,6 +248,47 @@ visible coin uses a different color, and duplicate mints or case-insensitive
 duplicate symbols are reduced to the highest-ranked entry. It also shows the
 number of candidates still waiting for evaluation. The window closes its live
 display when the main scanner process stops.
+
+### Separate read-only holdings window
+
+Put only your public Solana address in `.env`:
+
+```dotenv
+SOLANA_WALLET_ADDRESS=YOUR_PUBLIC_SOLANA_ADDRESS
+```
+
+Then start the scanner and the dedicated holdings board:
+
+```bash
+launch-guard --mode portfolio --portfolio-window
+```
+
+This mode watches holdings only; it does not scan for new recommendations. To
+run both boards alongside every configured feed, use:
+
+```bash
+launch-guard --mode all --recommendations-window --portfolio-window
+```
+
+The holdings board reads current SPL Token and Token-2022 balances using
+Solana JSON-RPC and obtains market data from DEX Screener. It never asks for a
+seed phrase, private key, exchange login, or transaction approval. Signals are
+advisory and do not place or record a real sale.
+
+Market-risk exits can be evaluated without a cost basis. Profit/loss,
+`TAKE PARTIAL`, and cost-based stop guidance require a known entry price. For
+an existing Fomo/Solana holding, record the amount and total USD cost once:
+
+```bash
+launch-guard \
+  --import-fomo-mint ACTUAL_MINT \
+  --import-symbol SYMBOL \
+  --import-token-amount ACTUAL_QUANTITY \
+  --import-cost-usd TOTAL_USD_PAID
+```
+
+The import is a local cost-basis record; it does not connect to Fomo or move
+tokens. Wallet tokens that were not imported remain visible with `P/L=n/a`.
 
 ### Entry-price and pullback decisions
 

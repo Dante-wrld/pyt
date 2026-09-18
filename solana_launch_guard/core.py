@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Mapping, Protocol
 
 from .config import Settings
+from .portfolio import OwnedHolding
 
 
 def utc_now() -> str:
@@ -433,6 +434,40 @@ class SQLiteStore:
 
             CREATE INDEX IF NOT EXISTS idx_notification_candidate
             ON notification_events(provider, candidate_key, id DESC);
+
+            CREATE TABLE IF NOT EXISTS owned_holdings (
+                chain TEXT NOT NULL,
+                token_address TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                quantity REAL NOT NULL,
+                entry_price REAL,
+                price_currency TEXT,
+                cost_amount REAL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (chain, token_address)
+            );
+
+            CREATE TABLE IF NOT EXISTS portfolio_states (
+                chain TEXT NOT NULL,
+                token_address TEXT NOT NULL,
+                peak_price REAL NOT NULL,
+                baseline_liquidity_usd REAL NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (chain, token_address)
+            );
+
+            INSERT OR IGNORE INTO owned_holdings(
+                chain, token_address, symbol, quantity, entry_price,
+                price_currency, cost_amount, updated_at
+            )
+            SELECT
+                'solana', p.mint, p.symbol, p.quantity, p.entry_price_sol,
+                'SOL', p.cost_sol, p.opened_at
+            FROM positions p
+            WHERE EXISTS (
+                SELECT 1 FROM fills f
+                WHERE f.mint = p.mint AND f.reason = 'FOMO_MANUAL_IMPORT'
+            );
             """
         )
         self.connection.commit()
@@ -592,6 +627,109 @@ class SQLiteStore:
             )
             for row in rows
         ]
+
+    def save_owned_holding(self, holding: OwnedHolding) -> None:
+        self.connection.execute(
+            """
+            INSERT INTO owned_holdings(
+                chain, token_address, symbol, quantity, entry_price,
+                price_currency, cost_amount, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(chain, token_address) DO UPDATE SET
+                symbol = excluded.symbol,
+                quantity = excluded.quantity,
+                entry_price = excluded.entry_price,
+                price_currency = excluded.price_currency,
+                cost_amount = excluded.cost_amount,
+                updated_at = excluded.updated_at
+            """,
+            (
+                holding.chain,
+                holding.token_address,
+                holding.symbol,
+                holding.quantity,
+                holding.entry_price,
+                holding.price_currency,
+                holding.cost_amount,
+                utc_now(),
+            ),
+        )
+        self.connection.execute(
+            "DELETE FROM portfolio_states WHERE chain = ? AND token_address = ?",
+            (holding.chain, holding.token_address),
+        )
+        self.connection.commit()
+
+    def load_owned_holdings(self, chain: str | None = None) -> list[OwnedHolding]:
+        if chain is None:
+            rows = self.connection.execute(
+                "SELECT * FROM owned_holdings ORDER BY chain, symbol"
+            ).fetchall()
+        else:
+            rows = self.connection.execute(
+                "SELECT * FROM owned_holdings WHERE chain = ? ORDER BY symbol",
+                (chain,),
+            ).fetchall()
+        return [
+            OwnedHolding(
+                chain=str(row["chain"]),
+                token_address=str(row["token_address"]),
+                symbol=str(row["symbol"]),
+                quantity=float(row["quantity"]),
+                entry_price=(
+                    float(row["entry_price"])
+                    if row["entry_price"] is not None
+                    else None
+                ),
+                price_currency=(
+                    str(row["price_currency"])
+                    if row["price_currency"] is not None
+                    else None
+                ),
+                cost_amount=(
+                    float(row["cost_amount"])
+                    if row["cost_amount"] is not None
+                    else None
+                ),
+            )
+            for row in rows
+        ]
+
+    def save_portfolio_state(
+        self,
+        *,
+        chain: str,
+        token_address: str,
+        peak_price: float,
+        baseline_liquidity_usd: float,
+    ) -> None:
+        self.connection.execute(
+            """
+            INSERT INTO portfolio_states(
+                chain, token_address, peak_price,
+                baseline_liquidity_usd, updated_at
+            ) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(chain, token_address) DO UPDATE SET
+                peak_price = excluded.peak_price,
+                baseline_liquidity_usd = excluded.baseline_liquidity_usd,
+                updated_at = excluded.updated_at
+            """,
+            (
+                chain,
+                token_address,
+                peak_price,
+                baseline_liquidity_usd,
+                utc_now(),
+            ),
+        )
+        self.connection.commit()
+
+    def load_portfolio_states(self) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            "SELECT chain, token_address, peak_price, baseline_liquidity_usd "
+            "FROM portfolio_states"
+        ).fetchall()
+        return [dict(row) for row in rows]
 
     def save_wallet_trade(
         self,

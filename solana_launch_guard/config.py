@@ -97,6 +97,7 @@ class Settings:
     log_level: str
     solana_rpc_http_url: str = "https://api.mainnet-beta.solana.com"
     solana_rpc_ws_url: str = "wss://api.mainnet-beta.solana.com"
+    solana_wallet_address: str | None = None
     watched_wallets: tuple[str, ...] = ()
     price_poll_seconds: float = 5.0
     copy_min_liquidity_usd: float = 10_000.0
@@ -153,6 +154,9 @@ class Settings:
     pushover_cooldown_seconds: float = 300.0
     color_output: bool = True
     recommendation_snapshot_path: str = "launch_guard_recommendations.json"
+    portfolio_snapshot_path: str = "launch_guard_portfolio.json"
+    portfolio_poll_seconds: float = 15.0
+    portfolio_min_value_usd: float = 0.01
     ethereum_token_addresses: tuple[str, ...] = ()
     base_token_addresses: tuple[str, ...] = ()
     bnb_token_addresses: tuple[str, ...] = ()
@@ -196,6 +200,9 @@ class Settings:
             ),
             solana_rpc_ws_url=os.getenv(
                 "SOLANA_RPC_WS_URL", "wss://api.mainnet-beta.solana.com"
+            ),
+            solana_wallet_address=(
+                os.getenv("SOLANA_WALLET_ADDRESS") or None
             ),
             watched_wallets=_wallets("WATCHED_WALLETS"),
             price_poll_seconds=_float("PRICE_POLL_SECONDS", 5.0),
@@ -281,6 +288,13 @@ class Settings:
                 "RECOMMENDATION_SNAPSHOT_PATH",
                 "launch_guard_recommendations.json",
             ),
+            portfolio_snapshot_path=os.getenv(
+                "PORTFOLIO_SNAPSHOT_PATH", "launch_guard_portfolio.json"
+            ),
+            portfolio_poll_seconds=_float("PORTFOLIO_POLL_SECONDS", 15.0),
+            portfolio_min_value_usd=_float(
+                "PORTFOLIO_MIN_VALUE_USD", 0.01
+            ),
             ethereum_token_addresses=_addresses(
                 "ETHEREUM_TOKEN_ADDRESSES"
             ),
@@ -329,6 +343,10 @@ class Settings:
             raise ValueError("SOLANA_RPC_HTTP_URL must begin with http:// or https://")
         if not self.solana_rpc_ws_url.startswith(("ws://", "wss://")):
             raise ValueError("SOLANA_RPC_WS_URL must begin with ws:// or wss://")
+        if self.solana_wallet_address and re.fullmatch(
+            r"[1-9A-HJ-NP-Za-km-z]{32,44}", self.solana_wallet_address
+        ) is None:
+            raise ValueError("SOLANA_WALLET_ADDRESS must be a public Solana address")
         if self.trade_size_sol <= 0:
             raise ValueError("PAPER_TRADE_SIZE_SOL must be greater than zero")
         if self.max_open_positions < 1:
@@ -345,6 +363,8 @@ class Settings:
             raise ValueError("TAKE_PROFIT_PCT and STOP_LOSS_PCT must be positive")
         if self.price_poll_seconds < 1:
             raise ValueError("PRICE_POLL_SECONDS must be at least one")
+        if self.portfolio_poll_seconds < 10:
+            raise ValueError("PORTFOLIO_POLL_SECONDS must be at least 10")
         if self.standard_trade_size_usd <= 0 or self.moonshot_trade_size_usd <= 0:
             raise ValueError("USD position sizes must be greater than zero")
         if self.max_total_exposure_usd < max(
