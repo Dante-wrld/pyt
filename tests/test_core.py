@@ -13,7 +13,7 @@ from solana_launch_guard.core import (
     indicative_price,
 )
 from solana_launch_guard.intelligence import CoinIntelligence
-from solana_launch_guard.market import MarketQuote
+from solana_launch_guard.market import DexScreenerOracle, MarketQuote
 from solana_launch_guard.recommendations import (
     RecommendationBook,
     build_snapshot,
@@ -390,6 +390,101 @@ def test_snapshot_round_trip_and_colored_dashboard(tmp_path: Path) -> None:
     assert "Pending scans: 4" in output
     assert "mint=MintScore111" in output
     assert "\033[38;5;45m" in output
+
+
+def test_robinhood_quote_uses_usd_and_exact_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    address = "0x5d102d1E69E77591D486aa4f663B3645151BBdf6"
+    oracle = DexScreenerOracle()
+    monkeypatch.setattr(
+        oracle,
+        "_request_token",
+        lambda _address: [
+            {
+                "chainId": "robinhood",
+                "pairAddress": "0xPair",
+                "baseToken": {"address": address.lower(), "symbol": "VOLT"},
+                "quoteToken": {"address": "0xQuote", "symbol": "WETH"},
+                "priceNative": "0.0001",
+                "priceUsd": "0.25",
+                "liquidity": {"usd": 50000},
+                "marketCap": 100000,
+                "txns": {"m5": {"buys": 60, "sells": 20}},
+                "volume": {"m5": 15000},
+                "priceChange": {"m5": 15},
+                "pairCreatedAt": 1,
+            }
+        ],
+    )
+
+    quote = oracle._fetch(address, "robinhood")
+
+    assert quote is not None
+    assert quote.chain == "robinhood"
+    assert quote.price_sol == 0
+    assert quote.price_usd == pytest.approx(0.25)
+    assert quote.recommendation_key.endswith(address.lower())
+
+
+def test_robinhood_profiles_and_stock_contracts_are_discovered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    meme = "0x1111111111111111111111111111111111111111"
+    stock = "0x2222222222222222222222222222222222222222"
+    oracle = DexScreenerOracle()
+
+    def fake_request(url: str) -> object:
+        if url.endswith("/rhj/assets"):
+            return {
+                "assets": [
+                    {
+                        "deployments": [
+                            {"contractAddress": stock, "chainId": 4663}
+                        ]
+                    }
+                ]
+            }
+        return [
+            {"chainId": "robinhood", "tokenAddress": meme},
+            {"chainId": "solana", "tokenAddress": "SolMint"},
+        ]
+
+    monkeypatch.setattr(oracle, "_request_json", fake_request)
+
+    assert oracle._discover_token_profiles("robinhood") == (meme,)
+    assert oracle._robinhood_stock_token_addresses() == frozenset(
+        {stock.casefold()}
+    )
+
+
+def test_robinhood_recommendation_shows_contract_and_fomo_link() -> None:
+    address = "0x3333333333333333333333333333333333333333"
+    quote = MarketQuote(
+        mint=address,
+        symbol="RHCOIN",
+        price_sol=0,
+        price_usd=0.00025,
+        chain="robinhood",
+        liquidity_usd=50_000,
+        market_cap_usd=100_000,
+        pair_address="0xPair",
+        pair_created_at_ms=1,
+        buys_m5=60,
+        sells_m5=20,
+        volume_m5_usd=15_000,
+        price_change_m5_pct=15,
+    )
+    book = RecommendationBook(pool_size=10, ttl_seconds=60)
+    book.add(quote, CoinIntelligence().score(quote), now=0)
+    snapshot = build_snapshot(book.ranked(), pending_count=0, poll_seconds=15)
+
+    output = format_dashboard(snapshot, color=False)
+
+    assert "chain=RH" in output
+    assert f"contract={address}" in output
+    assert f"fomo=https://fomo.family/tokens/robinhood/{address}" in output
+    assert "price=$0.00025" in output
 
 
 def strategy_position() -> object:
