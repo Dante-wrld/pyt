@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -61,6 +62,16 @@ def _wallets(name: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys(item.strip() for item in raw.split(",") if item.strip()))
 
 
+def _addresses(name: str) -> tuple[str, ...]:
+    raw = os.getenv(name, "")
+    unique: dict[str, str] = {}
+    for item in raw.split(","):
+        address = item.strip()
+        if address:
+            unique.setdefault(address.casefold(), address)
+    return tuple(unique.values())
+
+
 @dataclass(frozen=True, slots=True)
 class Settings:
     ws_url: str
@@ -110,6 +121,8 @@ class Settings:
     recommendation_ttl_seconds: float = 1800.0
     color_output: bool = True
     recommendation_snapshot_path: str = "launch_guard_recommendations.json"
+    robinhood_token_addresses: tuple[str, ...] = ()
+    robinhood_poll_seconds: float = 15.0
 
     @classmethod
     def from_env(cls, dotenv_path: str = ".env") -> "Settings":
@@ -185,6 +198,10 @@ class Settings:
                 "RECOMMENDATION_SNAPSHOT_PATH",
                 "launch_guard_recommendations.json",
             ),
+            robinhood_token_addresses=_addresses(
+                "ROBINHOOD_TOKEN_ADDRESSES"
+            ),
+            robinhood_poll_seconds=_float("ROBINHOOD_POLL_SECONDS", 15.0),
         )
         settings.validate()
         return settings
@@ -244,6 +261,14 @@ class Settings:
             raise ValueError(
                 "RECOMMENDATION_TTL_SECONDS must be at least the poll interval"
             )
+        if self.robinhood_poll_seconds < 15:
+            raise ValueError("ROBINHOOD_POLL_SECONDS must be at least 15")
+        for address in self.robinhood_token_addresses:
+            if re.fullmatch(r"0x[0-9a-fA-F]{40}", address) is None:
+                raise ValueError(
+                    "ROBINHOOD_TOKEN_ADDRESSES contains an invalid EVM "
+                    f"contract: {address}"
+                )
         for wallet in self.watched_wallets:
             if not 32 <= len(wallet) <= 44:
                 raise ValueError(f"WATCHED_WALLETS contains an invalid address: {wallet}")
