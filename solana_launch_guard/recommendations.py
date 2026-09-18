@@ -10,6 +10,16 @@ from typing import Any
 from .intelligence import IntelligenceResult
 from .market import MarketQuote
 
+CHAIN_LABELS = {
+    "solana": "SOL",
+    "ethereum": "ETH",
+    "base": "BASE",
+    "bob": "BOB",
+    "monad": "MON",
+    "robinhood": "RH",
+    "hyperevm": "HEVM",
+}
+
 
 @dataclass(slots=True)
 class RecommendationCandidate:
@@ -33,7 +43,7 @@ class RecommendationCandidate:
 
     @property
     def key(self) -> str:
-        address = self.mint.lower() if self.chain == "robinhood" else self.mint
+        address = self.mint if self.chain == "solana" else self.mint.lower()
         return f"{self.chain}:{address}"
 
     @property
@@ -41,6 +51,10 @@ class RecommendationCandidate:
         if self.chain != "robinhood":
             return None
         return f"https://fomo.family/tokens/robinhood/{self.mint}"
+
+    @property
+    def market_url(self) -> str:
+        return f"https://dexscreener.com/{self.chain}/{self.mint}"
 
     @property
     def signal_score(self) -> int:
@@ -142,9 +156,9 @@ class RecommendationBook:
         for candidate in ordered:
             symbol_key = candidate.symbol.strip().casefold()
             mint_key = (
-                candidate.mint.casefold()
-                if candidate.chain == "robinhood"
-                else candidate.mint
+                candidate.mint
+                if candidate.chain == "solana"
+                else candidate.mint.casefold()
             )
             if mint_key in seen_mints or symbol_key in seen_symbols:
                 continue
@@ -183,9 +197,9 @@ def format_recommendations(
             else "unknown"
         )
         m5_change = item.price_change_m5_pct or 0.0
-        chain_label = "RH" if item.chain == "robinhood" else "SOL"
+        chain_label = CHAIN_LABELS.get(item.chain, item.chain.upper()[:5])
         price_prefix = "$" if item.price_currency == "USD" else ""
-        address_label = "contract" if item.chain == "robinhood" else "mint"
+        address_label = "mint" if item.chain == "solana" else "contract"
         lines.append(
             f"#{rank:02d} {item.symbol:<10} tier={item.tier:<8} "
             f"chain={chain_label:<3} "
@@ -196,6 +210,7 @@ def format_recommendations(
         )
         if item.fomo_url:
             lines.append(f"    fomo={item.fomo_url}")
+        lines.append(f"    market={item.market_url}")
     lines.append(reset)
     return "\n".join(lines)
 
@@ -224,6 +239,7 @@ def build_snapshot(
                 "price": candidate.current_price,
                 "price_currency": candidate.price_currency,
                 "fomo_url": candidate.fomo_url,
+                "market_url": candidate.market_url,
             }
             for rank, candidate in enumerate(candidates, start=1)
         ],
@@ -292,11 +308,11 @@ def format_dashboard(snapshot: dict[str, Any], *, color: bool = True) -> str:
             else "unknown"
         )
         chain = str(raw.get("chain") or "solana")
-        chain_label = "RH" if chain == "robinhood" else "SOL"
+        chain_label = CHAIN_LABELS.get(chain, chain.upper()[:5])
         currency = str(raw.get("price_currency") or "SOL")
         price = float(raw.get("price") or raw.get("price_sol") or 0)
         price_prefix = "$" if currency == "USD" else ""
-        address_label = "contract" if chain == "robinhood" else "mint"
+        address_label = "mint" if chain == "solana" else "contract"
         detail_lines = [
             (
                 f"{prefix}#{int(raw.get('rank') or index + 1):02d} "
@@ -319,6 +335,9 @@ def format_dashboard(snapshot: dict[str, Any], *, color: bool = True) -> str:
         fomo_url = str(raw.get("fomo_url") or "")
         if fomo_url:
             detail_lines.append(f"{prefix}    fomo={fomo_url}{reset}")
+        market_url = str(raw.get("market_url") or "")
+        if market_url:
+            detail_lines.append(f"{prefix}    market={market_url}{reset}")
         detail_lines.append("")
         lines.extend(
             detail_lines
