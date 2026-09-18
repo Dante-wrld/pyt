@@ -530,6 +530,35 @@ def test_base_recommendation_uses_generic_evm_contract_display() -> None:
     assert f"market=https://dexscreener.com/base/{address}" in output
 
 
+def test_bnb_recommendation_uses_bsc_market_slug() -> None:
+    address = "0x5555555555555555555555555555555555555555"
+    quote = MarketQuote(
+        mint=address,
+        symbol="BNBCOIN",
+        price_sol=0,
+        price_usd=0.05,
+        chain="bsc",
+        liquidity_usd=50_000,
+        market_cap_usd=100_000,
+        pair_address="0xPair",
+        pair_created_at_ms=1,
+        buys_m5=60,
+        sells_m5=20,
+        volume_m5_usd=15_000,
+        price_change_m5_pct=15,
+    )
+    book = RecommendationBook(pool_size=10, ttl_seconds=60)
+    book.add(quote, CoinIntelligence().score(quote), now=0)
+
+    output = format_dashboard(
+        build_snapshot(book.ranked(), pending_count=0, poll_seconds=15),
+        color=False,
+    )
+
+    assert "chain=BNB" in output
+    assert f"market=https://dexscreener.com/bsc/{address}" in output
+
+
 def test_evm_transfer_parser_reads_incoming_erc20(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
