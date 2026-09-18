@@ -123,6 +123,7 @@ class Settings:
     recommendation_snapshot_path: str = "launch_guard_recommendations.json"
     ethereum_token_addresses: tuple[str, ...] = ()
     base_token_addresses: tuple[str, ...] = ()
+    bnb_token_addresses: tuple[str, ...] = ()
     bob_token_addresses: tuple[str, ...] = ()
     monad_token_addresses: tuple[str, ...] = ()
     robinhood_token_addresses: tuple[str, ...] = ()
@@ -134,6 +135,7 @@ class Settings:
     evm_wallet_poll_seconds: float = 10.0
     ethereum_rpc_url: str = ""
     base_rpc_url: str = ""
+    bnb_rpc_url: str = ""
     bob_rpc_url: str = ""
     monad_rpc_url: str = ""
     robinhood_rpc_url: str = "https://rpc.mainnet.chain.robinhood.com"
@@ -217,6 +219,7 @@ class Settings:
                 "ETHEREUM_TOKEN_ADDRESSES"
             ),
             base_token_addresses=_addresses("BASE_TOKEN_ADDRESSES"),
+            bnb_token_addresses=_addresses("BNB_TOKEN_ADDRESSES"),
             bob_token_addresses=_addresses("BOB_TOKEN_ADDRESSES"),
             monad_token_addresses=_addresses("MONAD_TOKEN_ADDRESSES"),
             robinhood_token_addresses=_addresses(
@@ -239,6 +242,7 @@ class Settings:
             evm_wallet_poll_seconds=_float("EVM_WALLET_POLL_SECONDS", 10.0),
             ethereum_rpc_url=os.getenv("ETHEREUM_RPC_URL", ""),
             base_rpc_url=os.getenv("BASE_RPC_URL", ""),
+            bnb_rpc_url=os.getenv("BNB_RPC_URL", ""),
             bob_rpc_url=os.getenv("BOB_RPC_URL", ""),
             monad_rpc_url=os.getenv("MONAD_RPC_URL", ""),
             robinhood_rpc_url=os.getenv(
@@ -320,6 +324,7 @@ class Settings:
         token_groups = (
             self.ethereum_token_addresses,
             self.base_token_addresses,
+            self.bnb_token_addresses,
             self.bob_token_addresses,
             self.monad_token_addresses,
             self.robinhood_token_addresses,
@@ -354,6 +359,7 @@ class Settings:
         return {
             "ethereum": self.ethereum_rpc_url,
             "base": self.base_rpc_url,
+            "bsc": self.bnb_rpc_url,
             "bob": self.bob_rpc_url,
             "monad": self.monad_rpc_url,
             "robinhood": self.robinhood_rpc_url,
@@ -365,6 +371,7 @@ class Settings:
         return {
             "ethereum": self.ethereum_token_addresses,
             "base": self.base_token_addresses,
+            "bsc": self.bnb_token_addresses,
             "bob": self.bob_token_addresses,
             "monad": self.monad_token_addresses,
             "robinhood": self.robinhood_token_addresses,
