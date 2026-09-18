@@ -91,7 +91,7 @@ class PushoverClient:
             data=json.dumps(payload).encode(),
             headers={
                 "Content-Type": "application/json",
-                "User-Agent": "solana-launch-guard/0.9",
+                "User-Agent": "solana-launch-guard/0.10",
             },
             method="POST",
         )
@@ -150,7 +150,8 @@ class DecisionNotifier:
             if previous_decision == candidate.decision:
                 return False
             if (
-                candidate.decision not in {"BUY ZONE", "AVOID"}
+                candidate.decision
+                not in {"PULLBACK STARTED", "BUY ZONE", "AVOID"}
                 and now - previous_sent_at < self.cooldown_seconds
             ):
                 return False
@@ -195,6 +196,7 @@ def format_candidate_notification(
     presentation = {
         "BUY NOW": ("🟢", "QUALIFIED ENTRY", "magic"),
         "BUY ZONE": ("🟢", "ENTRY ZONE REACHED", "cashregister"),
+        "PULLBACK STARTED": ("🔵", "PULLBACK STARTED", "siren"),
         "WAIT FOR PULLBACK": ("🔵", "WAIT FOR PULLBACK", "pushover"),
         "WATCH": ("🟡", "WATCH", "pushover"),
         "AVOID": ("🔴", "SETUP INVALIDATED", "falling"),
