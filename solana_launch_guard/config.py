@@ -121,8 +121,23 @@ class Settings:
     recommendation_ttl_seconds: float = 1800.0
     color_output: bool = True
     recommendation_snapshot_path: str = "launch_guard_recommendations.json"
+    ethereum_token_addresses: tuple[str, ...] = ()
+    base_token_addresses: tuple[str, ...] = ()
+    bob_token_addresses: tuple[str, ...] = ()
+    monad_token_addresses: tuple[str, ...] = ()
     robinhood_token_addresses: tuple[str, ...] = ()
+    hyperevm_token_addresses: tuple[str, ...] = ()
     robinhood_poll_seconds: float = 15.0
+    multichain_poll_seconds: float = 15.0
+    evm_wallet_address: str | None = None
+    hyperliquid_address: str | None = None
+    evm_wallet_poll_seconds: float = 10.0
+    ethereum_rpc_url: str = ""
+    base_rpc_url: str = ""
+    bob_rpc_url: str = ""
+    monad_rpc_url: str = ""
+    robinhood_rpc_url: str = "https://rpc.mainnet.chain.robinhood.com"
+    hyperevm_rpc_url: str = "https://rpc.hyperliquid.xyz/evm"
 
     @classmethod
     def from_env(cls, dotenv_path: str = ".env") -> "Settings":
@@ -198,10 +213,41 @@ class Settings:
                 "RECOMMENDATION_SNAPSHOT_PATH",
                 "launch_guard_recommendations.json",
             ),
+            ethereum_token_addresses=_addresses(
+                "ETHEREUM_TOKEN_ADDRESSES"
+            ),
+            base_token_addresses=_addresses("BASE_TOKEN_ADDRESSES"),
+            bob_token_addresses=_addresses("BOB_TOKEN_ADDRESSES"),
+            monad_token_addresses=_addresses("MONAD_TOKEN_ADDRESSES"),
             robinhood_token_addresses=_addresses(
                 "ROBINHOOD_TOKEN_ADDRESSES"
             ),
+            hyperevm_token_addresses=_addresses(
+                "HYPEREVM_TOKEN_ADDRESSES"
+            ),
             robinhood_poll_seconds=_float("ROBINHOOD_POLL_SECONDS", 15.0),
+            multichain_poll_seconds=_float(
+                "MULTICHAIN_POLL_SECONDS",
+                _float("ROBINHOOD_POLL_SECONDS", 15.0),
+            ),
+            evm_wallet_address=(os.getenv("EVM_WALLET_ADDRESS") or None),
+            hyperliquid_address=(
+                os.getenv("HYPERLIQUID_ADDRESS")
+                or os.getenv("EVM_WALLET_ADDRESS")
+                or None
+            ),
+            evm_wallet_poll_seconds=_float("EVM_WALLET_POLL_SECONDS", 10.0),
+            ethereum_rpc_url=os.getenv("ETHEREUM_RPC_URL", ""),
+            base_rpc_url=os.getenv("BASE_RPC_URL", ""),
+            bob_rpc_url=os.getenv("BOB_RPC_URL", ""),
+            monad_rpc_url=os.getenv("MONAD_RPC_URL", ""),
+            robinhood_rpc_url=os.getenv(
+                "ROBINHOOD_RPC_URL",
+                "https://rpc.mainnet.chain.robinhood.com",
+            ),
+            hyperevm_rpc_url=os.getenv(
+                "HYPEREVM_RPC_URL", "https://rpc.hyperliquid.xyz/evm"
+            ),
         )
         settings.validate()
         return settings
@@ -263,12 +309,31 @@ class Settings:
             )
         if self.robinhood_poll_seconds < 15:
             raise ValueError("ROBINHOOD_POLL_SECONDS must be at least 15")
-        for address in self.robinhood_token_addresses:
-            if re.fullmatch(r"0x[0-9a-fA-F]{40}", address) is None:
+        if self.multichain_poll_seconds < 15:
+            raise ValueError("MULTICHAIN_POLL_SECONDS must be at least 15")
+        if self.evm_wallet_poll_seconds < 5:
+            raise ValueError("EVM_WALLET_POLL_SECONDS must be at least 5")
+        evm_address_pattern = r"0x[0-9a-fA-F]{40}"
+        for address in (self.evm_wallet_address, self.hyperliquid_address):
+            if address and re.fullmatch(evm_address_pattern, address) is None:
+                raise ValueError(f"invalid EVM public address: {address}")
+        token_groups = (
+            self.ethereum_token_addresses,
+            self.base_token_addresses,
+            self.bob_token_addresses,
+            self.monad_token_addresses,
+            self.robinhood_token_addresses,
+            self.hyperevm_token_addresses,
+        )
+        for address in (item for group in token_groups for item in group):
+            if re.fullmatch(evm_address_pattern, address) is None:
                 raise ValueError(
-                    "ROBINHOOD_TOKEN_ADDRESSES contains an invalid EVM "
+                    "a chain TOKEN_ADDRESSES setting contains an invalid EVM "
                     f"contract: {address}"
                 )
+        for name, url in self.evm_rpc_urls.items():
+            if url and not url.startswith(("http://", "https://")):
+                raise ValueError(f"{name} RPC URL must begin with http:// or https://")
         for wallet in self.watched_wallets:
             if not 32 <= len(wallet) <= 44:
                 raise ValueError(f"WATCHED_WALLETS contains an invalid address: {wallet}")
@@ -283,3 +348,25 @@ class Settings:
         return urlunsplit(
             (parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment)
         )
+
+    @property
+    def evm_rpc_urls(self) -> dict[str, str]:
+        return {
+            "ethereum": self.ethereum_rpc_url,
+            "base": self.base_rpc_url,
+            "bob": self.bob_rpc_url,
+            "monad": self.monad_rpc_url,
+            "robinhood": self.robinhood_rpc_url,
+            "hyperevm": self.hyperevm_rpc_url,
+        }
+
+    @property
+    def multichain_token_addresses(self) -> dict[str, tuple[str, ...]]:
+        return {
+            "ethereum": self.ethereum_token_addresses,
+            "base": self.base_token_addresses,
+            "bob": self.bob_token_addresses,
+            "monad": self.monad_token_addresses,
+            "robinhood": self.robinhood_token_addresses,
+            "hyperevm": self.hyperevm_token_addresses,
+        }
