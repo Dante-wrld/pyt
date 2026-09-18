@@ -481,6 +481,63 @@ class SQLiteStore:
                 updated_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS auto_buy_policies (
+                chain TEXT NOT NULL,
+                token_address TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                armed INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (chain, token_address)
+            );
+
+            CREATE TABLE IF NOT EXISTS auto_buy_executions (
+                event_key TEXT PRIMARY KEY,
+                chain TEXT NOT NULL,
+                token_address TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                funding_source TEXT NOT NULL,
+                status TEXT NOT NULL,
+                input_usdc_raw INTEGER NOT NULL,
+                expected_output_raw INTEGER,
+                actual_output_raw INTEGER,
+                output_decimals INTEGER,
+                signature TEXT,
+                error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS auto_buy_positions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chain TEXT NOT NULL,
+                token_address TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                status TEXT NOT NULL,
+                cost_usdc_raw INTEGER NOT NULL,
+                token_amount_raw INTEGER NOT NULL,
+                remaining_raw INTEGER NOT NULL,
+                token_decimals INTEGER NOT NULL,
+                realized_proceeds_usdc_raw INTEGER NOT NULL DEFAULT 0,
+                realized_profit_usdc_raw INTEGER NOT NULL DEFAULT 0,
+                reinvest_credit_usdc_raw INTEGER NOT NULL DEFAULT 0,
+                buy_signature TEXT NOT NULL UNIQUE,
+                opened_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS auto_buy_fund (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                seed_buys_used INTEGER NOT NULL DEFAULT 0,
+                reinvest_available_usdc_raw INTEGER NOT NULL DEFAULT 0,
+                realized_profit_usdc_raw INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL
+            );
+
+            INSERT OR IGNORE INTO auto_buy_fund(
+                id, seed_buys_used, reinvest_available_usdc_raw,
+                realized_profit_usdc_raw, updated_at
+            ) VALUES (1, 0, 0, 0, '');
+
             INSERT OR IGNORE INTO owned_holdings(
                 chain, token_address, symbol, quantity, entry_price,
                 price_currency, cost_amount, updated_at
@@ -892,6 +949,310 @@ class SQLiteStore:
             (error[:500], utc_now(), event_key),
         )
         self.connection.commit()
+
+    def arm_auto_buy(
+        self,
+        token_address: str,
+        symbol: str,
+        *,
+        chain: str = "solana",
+    ) -> None:
+        token_address = token_address.strip()
+        symbol = symbol.strip().upper()
+        if not token_address or not symbol:
+            raise ValueError("auto-buy requires a mint and symbol")
+        open_position = self.connection.execute(
+            "SELECT 1 FROM auto_buy_positions WHERE chain = ? "
+            "AND token_address = ? AND status = 'OPEN'",
+            (chain, token_address),
+        ).fetchone()
+        if open_position is not None:
+            raise ValueError("this mint already has an open bot position")
+        self.connection.execute(
+            """
+            INSERT INTO auto_buy_policies(
+                chain, token_address, symbol, armed, updated_at
+            ) VALUES (?, ?, ?, 1, ?)
+            ON CONFLICT(chain, token_address) DO UPDATE SET
+                symbol = excluded.symbol,
+                armed = 1,
+                updated_at = excluded.updated_at
+            """,
+            (chain, token_address, symbol, utc_now()),
+        )
+        self.connection.commit()
+
+    def disarm_auto_buy(
+        self, token_address: str, *, chain: str = "solana"
+    ) -> None:
+        self.connection.execute(
+            "UPDATE auto_buy_policies SET armed = 0, updated_at = ? "
+            "WHERE chain = ? AND token_address = ?",
+            (utc_now(), chain, token_address),
+        )
+        self.connection.commit()
+
+    def load_auto_buy_policy(
+        self, token_address: str, *, chain: str = "solana"
+    ) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            "SELECT * FROM auto_buy_policies "
+            "WHERE chain = ? AND token_address = ?",
+            (chain, token_address),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def preview_auto_buy_budget(
+        self,
+        *,
+        seed_size_usdc_raw: int,
+        max_seed_buys: int,
+        max_open_positions: int,
+        minimum_reinvest_usdc_raw: int = 1_000_000,
+    ) -> tuple[int, str]:
+        pending = int(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM auto_buy_executions "
+                "WHERE status = 'PENDING'"
+            ).fetchone()[0]
+        )
+        opened = int(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM auto_buy_positions WHERE status = 'OPEN'"
+            ).fetchone()[0]
+        )
+        if opened + pending >= max_open_positions:
+            raise ValueError("maximum open bot positions has been reached")
+        fund = self.connection.execute(
+            "SELECT seed_buys_used, reinvest_available_usdc_raw "
+            "FROM auto_buy_fund WHERE id = 1"
+        ).fetchone()
+        assert fund is not None
+        if int(fund["seed_buys_used"]) < max_seed_buys:
+            return seed_size_usdc_raw, "seed"
+        available = int(fund["reinvest_available_usdc_raw"])
+        amount = min(seed_size_usdc_raw, available)
+        if amount < minimum_reinvest_usdc_raw:
+            raise ValueError(
+                "reinvestment pool is below the 1.00 USDC minimum"
+            )
+        return amount, "reinvested_profit"
+
+    def begin_auto_buy_execution(
+        self,
+        *,
+        event_key: str,
+        token_address: str,
+        symbol: str,
+        funding_source: str,
+        input_usdc_raw: int,
+        expected_output_raw: int,
+        chain: str = "solana",
+    ) -> bool:
+        now = utc_now()
+        cursor = self.connection.execute(
+            """
+            INSERT OR IGNORE INTO auto_buy_executions(
+                event_key, chain, token_address, symbol, funding_source,
+                status, input_usdc_raw, expected_output_raw,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, 'PENDING', ?, ?, ?, ?)
+            """,
+            (
+                event_key,
+                chain,
+                token_address,
+                symbol,
+                funding_source,
+                input_usdc_raw,
+                expected_output_raw,
+                now,
+                now,
+            ),
+        )
+        self.connection.commit()
+        return cursor.rowcount == 1
+
+    def complete_auto_buy_execution(
+        self,
+        *,
+        event_key: str,
+        signature: str,
+        actual_output_raw: int,
+        output_decimals: int,
+    ) -> None:
+        row = self.connection.execute(
+            "SELECT * FROM auto_buy_executions "
+            "WHERE event_key = ? AND status = 'PENDING'",
+            (event_key,),
+        ).fetchone()
+        if row is None:
+            raise ValueError("auto-buy execution is not pending")
+        if actual_output_raw <= 0 or output_decimals < 0:
+            raise ValueError("confirmed auto-buy returned an invalid token amount")
+        now = utc_now()
+        with self.connection:
+            self.connection.execute(
+                "UPDATE auto_buy_executions SET status = 'CONFIRMED', "
+                "actual_output_raw = ?, output_decimals = ?, signature = ?, "
+                "updated_at = ? WHERE event_key = ?",
+                (
+                    actual_output_raw,
+                    output_decimals,
+                    signature,
+                    now,
+                    event_key,
+                ),
+            )
+            self.connection.execute(
+                """
+                INSERT INTO auto_buy_positions(
+                    chain, token_address, symbol, status, cost_usdc_raw,
+                    token_amount_raw, remaining_raw, token_decimals,
+                    buy_signature, opened_at, updated_at
+                ) VALUES (?, ?, ?, 'OPEN', ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    row["chain"],
+                    row["token_address"],
+                    row["symbol"],
+                    row["input_usdc_raw"],
+                    actual_output_raw,
+                    actual_output_raw,
+                    output_decimals,
+                    signature,
+                    now,
+                    now,
+                ),
+            )
+            if row["funding_source"] == "seed":
+                self.connection.execute(
+                    "UPDATE auto_buy_fund SET seed_buys_used = "
+                    "seed_buys_used + 1, updated_at = ? WHERE id = 1",
+                    (now,),
+                )
+            else:
+                self.connection.execute(
+                    "UPDATE auto_buy_fund SET reinvest_available_usdc_raw = "
+                    "reinvest_available_usdc_raw - ?, updated_at = ? "
+                    "WHERE id = 1 AND reinvest_available_usdc_raw >= ?",
+                    (row["input_usdc_raw"], now, row["input_usdc_raw"]),
+                )
+            self.connection.execute(
+                "UPDATE auto_buy_policies SET armed = 0, updated_at = ? "
+                "WHERE chain = ? AND token_address = ?",
+                (now, row["chain"], row["token_address"]),
+            )
+
+    def freeze_auto_buy_execution(self, *, event_key: str, error: str) -> None:
+        self.connection.execute(
+            "UPDATE auto_buy_executions SET status = 'REVIEW', error = ?, "
+            "updated_at = ? WHERE event_key = ? AND status = 'PENDING'",
+            (error[:500], utc_now(), event_key),
+        )
+        self.connection.commit()
+
+    def record_auto_buy_sale(
+        self,
+        *,
+        token_address: str,
+        sold_raw: int,
+        proceeds_usdc_raw: int,
+        reinvest_pct: float,
+        managed_complete: bool = False,
+        chain: str = "solana",
+    ) -> dict[str, int] | None:
+        row = self.connection.execute(
+            "SELECT * FROM auto_buy_positions WHERE chain = ? "
+            "AND token_address = ? AND status = 'OPEN' "
+            "ORDER BY id LIMIT 1",
+            (chain, token_address),
+        ).fetchone()
+        if row is None:
+            return None
+        applied_sold = min(max(0, sold_raw), int(row["remaining_raw"]))
+        if applied_sold <= 0:
+            return None
+        allocated_cost = round(
+            int(row["cost_usdc_raw"])
+            * applied_sold
+            / int(row["token_amount_raw"])
+        )
+        profit = proceeds_usdc_raw - allocated_cost
+        credit = max(0, round(profit * reinvest_pct / 100.0))
+        remaining = int(row["remaining_raw"]) - applied_sold
+        status = (
+            "COMPLETE"
+            if managed_complete and remaining > 0
+            else ("CLOSED" if remaining == 0 else "OPEN")
+        )
+        now = utc_now()
+        with self.connection:
+            self.connection.execute(
+                """
+                UPDATE auto_buy_positions
+                SET remaining_raw = ?, status = ?,
+                    realized_proceeds_usdc_raw = realized_proceeds_usdc_raw + ?,
+                    realized_profit_usdc_raw = realized_profit_usdc_raw + ?,
+                    reinvest_credit_usdc_raw = reinvest_credit_usdc_raw + ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    remaining,
+                    status,
+                    proceeds_usdc_raw,
+                    profit,
+                    credit,
+                    now,
+                    row["id"],
+                ),
+            )
+            self.connection.execute(
+                """
+                UPDATE auto_buy_fund
+                SET reinvest_available_usdc_raw =
+                        reinvest_available_usdc_raw + ?,
+                    realized_profit_usdc_raw =
+                        realized_profit_usdc_raw + ?,
+                    updated_at = ?
+                WHERE id = 1
+                """,
+                (credit, profit, now),
+            )
+        return {
+            "allocated_cost_usdc_raw": allocated_cost,
+            "profit_usdc_raw": profit,
+            "reinvest_credit_usdc_raw": credit,
+            "remaining_raw": remaining,
+        }
+
+    def auto_buy_status(self) -> dict[str, Any]:
+        policies = [
+            dict(row)
+            for row in self.connection.execute(
+                "SELECT chain, token_address, symbol, armed, updated_at "
+                "FROM auto_buy_policies ORDER BY symbol, token_address"
+            ).fetchall()
+        ]
+        positions = [
+            dict(row)
+            for row in self.connection.execute(
+                "SELECT chain, token_address, symbol, status, cost_usdc_raw, "
+                "token_amount_raw, remaining_raw, token_decimals, "
+                "realized_profit_usdc_raw, reinvest_credit_usdc_raw, "
+                "buy_signature, opened_at, updated_at "
+                "FROM auto_buy_positions ORDER BY id"
+            ).fetchall()
+        ]
+        fund = dict(
+            self.connection.execute(
+                "SELECT seed_buys_used, reinvest_available_usdc_raw, "
+                "realized_profit_usdc_raw, updated_at "
+                "FROM auto_buy_fund WHERE id = 1"
+            ).fetchone()
+        )
+        return {"fund": fund, "policies": policies, "positions": positions}
 
     def save_wallet_trade(
         self,

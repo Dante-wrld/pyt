@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "solana-launch-guard"
-version = "0.15.0"
-description = "Multichain token monitor with guarded Solana profit-ladder sells"
+version = "0.16.0"
+description = "Multichain token monitor with guarded Solana buys and profit-ladder sells"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }

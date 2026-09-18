@@ -8,6 +8,7 @@ from solders.keypair import Keypair
 
 from solana_launch_guard.app import (
     _is_stock_token_symbol,
+    preflight_auto_buy,
     preflight_auto_sell,
 )
 from solana_launch_guard.config import Settings
@@ -19,11 +20,15 @@ from solana_launch_guard.core import (
     indicative_price,
 )
 from solana_launch_guard.execution import (
+    BuyIntent,
     JupiterSwapClient,
+    PreparedBuy,
     PreparedSell,
     ProfitLadder,
     SellIntent,
+    SolanaAutoBuyer,
     SolanaAutoSeller,
+    USDC_MINT,
     store_fomo_solana_key,
 )
 from solana_launch_guard.intelligence import CoinIntelligence
@@ -333,6 +338,148 @@ def test_jupiter_preflight_order_excludes_rfq_router(
     assert "excludeRouters=jupiterz" in requested_url
 
 
+def test_auto_buyer_prepares_executes_and_uses_usdc() -> None:
+    class FakeSigner:
+        public_key = "Wallet111"
+
+        def sign(self, transaction_b64: str) -> str:
+            assert transaction_b64 == "unsigned-buy"
+            return "signed-buy"
+
+    class FakeClient:
+        async def order(self, **values: object) -> dict[str, object]:
+            assert values["input_mint"] == USDC_MINT
+            assert values["output_mint"] == "MintBuy111"
+            assert values["amount_raw"] == 5_000_000
+            return {
+                "inputMint": USDC_MINT,
+                "outputMint": "MintBuy111",
+                "inAmount": "5000000",
+                "outAmount": "250000000",
+                "otherAmountThreshold": "240000000",
+                "priceImpact": -0.5,
+                "transaction": "unsigned-buy",
+                "requestId": "request-buy",
+                "lastValidBlockHeight": 321,
+            }
+
+        async def execute(self, **values: object) -> dict[str, object]:
+            assert values["signed_transaction"] == "signed-buy"
+            return {
+                "status": "Success",
+                "code": 0,
+                "signature": "signature-buy",
+                "totalInputAmount": "5000000",
+                "totalOutputAmount": "249000000",
+            }
+
+    intent = BuyIntent(
+        mint="MintBuy111",
+        symbol="BUY",
+        event_key="buy-event",
+        amount_usdc_raw=5_000_000,
+        funding_source="seed",
+    )
+    buyer = SolanaAutoBuyer(client=FakeClient(), signer=FakeSigner())
+    prepared = asyncio.run(buyer.prepare(intent))
+    receipt = asyncio.run(buyer.execute(prepared))
+
+    assert isinstance(prepared, PreparedBuy)
+    assert prepared.minimum_output_raw == 240_000_000
+    assert receipt.signature == "signature-buy"
+    assert receipt.output_amount_raw == 249_000_000
+
+
+def test_auto_buyer_preflight_never_executes() -> None:
+    executed = False
+
+    class FakeSigner:
+        public_key = "Wallet111"
+
+        def sign(self, transaction_b64: str) -> str:
+            assert transaction_b64 == "unsigned-buy"
+            return "signed-buy"
+
+    class FakeClient:
+        async def order(self, **values: object) -> dict[str, object]:
+            assert values["exclude_routers"] == ("jupiterz",)
+            return {
+                "inputMint": USDC_MINT,
+                "outputMint": "MintBuy111",
+                "inAmount": "5000000",
+                "outAmount": "250000000",
+                "otherAmountThreshold": "240000000",
+                "priceImpact": 0.25,
+                "transaction": "unsigned-buy",
+                "requestId": "request-buy",
+            }
+
+        async def execute(self, **_values: object) -> dict[str, object]:
+            nonlocal executed
+            executed = True
+            raise AssertionError("buy preflight must never execute")
+
+    class FakeSimulator:
+        async def simulate_transaction(
+            self, signed_transaction_b64: str
+        ) -> dict[str, object]:
+            assert signed_transaction_b64 == "signed-buy"
+            return {"err": None, "logs": ["one"], "unitsConsumed": 99}
+
+    intent = BuyIntent(
+        mint="MintBuy111",
+        symbol="BUY",
+        event_key="buy-preflight",
+        amount_usdc_raw=5_000_000,
+        funding_source="seed",
+    )
+    buyer = SolanaAutoBuyer(client=FakeClient(), signer=FakeSigner())
+    receipt = asyncio.run(buyer.preflight(intent, FakeSimulator()))
+
+    assert receipt.broadcast is False
+    assert receipt.units_consumed == 99
+    assert receipt.log_count == 1
+    assert executed is False
+
+
+def test_auto_buyer_rejects_unsafe_price_impact() -> None:
+    class FakeSigner:
+        public_key = "Wallet111"
+
+        def sign(self, transaction_b64: str) -> str:
+            return transaction_b64
+
+    class FakeClient:
+        async def order(self, **values: object) -> dict[str, object]:
+            return {
+                "inputMint": USDC_MINT,
+                "outputMint": values["output_mint"],
+                "inAmount": str(values["amount_raw"]),
+                "outAmount": "1",
+                "otherAmountThreshold": "1",
+                "priceImpact": -5.01,
+                "transaction": "unsigned-buy",
+                "requestId": "request-buy",
+            }
+
+        async def execute(self, **_values: object) -> dict[str, object]:
+            raise AssertionError("unsafe buy must never execute")
+
+    intent = BuyIntent(
+        mint="MintBuy111",
+        symbol="BUY",
+        event_key="buy-impact",
+        amount_usdc_raw=5_000_000,
+        funding_source="seed",
+    )
+    buyer = SolanaAutoBuyer(
+        client=FakeClient(), signer=FakeSigner(), max_price_impact_pct=5
+    )
+
+    with pytest.raises(ValueError, match="price impact"):
+        asyncio.run(buyer.prepare(intent))
+
+
 def test_auto_seller_rejects_second_stage_quote_below_trigger() -> None:
     class FakeSigner:
         public_key = "Wallet111"
@@ -410,6 +557,112 @@ def test_auto_sell_store_is_armed_and_idempotent(tmp_path: Path) -> None:
         event_key="event-1", signature="signature-1", next_stage=1
     )
     assert store.load_auto_sell_policy("MintProfit111")["stage"] == 1
+    store.close()
+
+
+def test_auto_buy_store_uses_two_seed_buys_then_profit_pool(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(str(tmp_path / "auto-buy.db"))
+    store.arm_auto_buy("MintBuyOne", "ONE")
+    amount, source = store.preview_auto_buy_budget(
+        seed_size_usdc_raw=5_000_000,
+        max_seed_buys=2,
+        max_open_positions=2,
+    )
+    assert (amount, source) == (5_000_000, "seed")
+    assert store.begin_auto_buy_execution(
+        event_key="buy-one",
+        token_address="MintBuyOne",
+        symbol="ONE",
+        funding_source=source,
+        input_usdc_raw=amount,
+        expected_output_raw=1_000,
+    )
+    store.complete_auto_buy_execution(
+        event_key="buy-one",
+        signature="signature-buy-one",
+        actual_output_raw=1_000,
+        output_decimals=2,
+    )
+    realized = store.record_auto_buy_sale(
+        token_address="MintBuyOne",
+        sold_raw=1_000,
+        proceeds_usdc_raw=8_000_000,
+        reinvest_pct=50,
+    )
+    assert realized == {
+        "allocated_cost_usdc_raw": 5_000_000,
+        "profit_usdc_raw": 3_000_000,
+        "reinvest_credit_usdc_raw": 1_500_000,
+        "remaining_raw": 0,
+    }
+
+    store.arm_auto_buy("MintBuyTwo", "TWO")
+    amount, source = store.preview_auto_buy_budget(
+        seed_size_usdc_raw=5_000_000,
+        max_seed_buys=2,
+        max_open_positions=2,
+    )
+    assert source == "seed"
+    assert store.begin_auto_buy_execution(
+        event_key="buy-two",
+        token_address="MintBuyTwo",
+        symbol="TWO",
+        funding_source=source,
+        input_usdc_raw=amount,
+        expected_output_raw=2_000,
+    )
+    store.complete_auto_buy_execution(
+        event_key="buy-two",
+        signature="signature-buy-two",
+        actual_output_raw=2_000,
+        output_decimals=2,
+    )
+
+    amount, source = store.preview_auto_buy_budget(
+        seed_size_usdc_raw=5_000_000,
+        max_seed_buys=2,
+        max_open_positions=2,
+    )
+    assert (amount, source) == (1_500_000, "reinvested_profit")
+    status = store.auto_buy_status()
+    assert status["fund"]["seed_buys_used"] == 2
+    assert status["fund"]["reinvest_available_usdc_raw"] == 1_500_000
+    store.close()
+
+
+def test_auto_buy_store_blocks_third_open_position(tmp_path: Path) -> None:
+    store = SQLiteStore(str(tmp_path / "auto-buy-limit.db"))
+    for number in (1, 2):
+        mint = f"MintBuy{number}"
+        store.arm_auto_buy(mint, f"BUY{number}")
+        amount, source = store.preview_auto_buy_budget(
+            seed_size_usdc_raw=5_000_000,
+            max_seed_buys=2,
+            max_open_positions=2,
+        )
+        store.begin_auto_buy_execution(
+            event_key=f"buy-{number}",
+            token_address=mint,
+            symbol=f"BUY{number}",
+            funding_source=source,
+            input_usdc_raw=amount,
+            expected_output_raw=100,
+        )
+        store.complete_auto_buy_execution(
+            event_key=f"buy-{number}",
+            signature=f"signature-{number}",
+            actual_output_raw=100,
+            output_decimals=0,
+        )
+
+    with pytest.raises(ValueError, match="maximum open"):
+        store.preview_auto_buy_budget(
+            seed_size_usdc_raw=5_000_000,
+            max_seed_buys=2,
+            max_open_positions=2,
+        )
     store.close()
 
 
@@ -535,6 +788,96 @@ def test_preflight_command_uses_armed_balance_and_preserves_stage(
     store.close()
 
 
+def test_auto_buy_preflight_uses_seed_budget_without_broadcast(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wallet = str(Keypair().pubkey())
+    store = SQLiteStore(str(tmp_path / "buy-preflight.db"))
+    store.arm_auto_buy("MintBuy111", "BUY")
+
+    class FakeRpc:
+        def __init__(self, _url: str) -> None:
+            pass
+
+        async def token_balance(
+            self, owner: str, mint: str
+        ) -> SolanaTokenHolding:
+            assert owner == wallet
+            if mint == USDC_MINT:
+                return SolanaTokenHolding(
+                    mint=mint,
+                    amount=20,
+                    raw_amount=20_000_000,
+                    decimals=6,
+                )
+            return SolanaTokenHolding(
+                mint=mint, amount=0, raw_amount=0, decimals=6
+            )
+
+        async def mint_decimals(self, mint: str) -> int:
+            assert mint == "MintBuy111"
+            return 6
+
+        async def simulate_transaction(
+            self, signed_transaction_b64: str
+        ) -> dict[str, object]:
+            assert signed_transaction_b64 == "signed-buy"
+            return {"err": None, "logs": ["ok"], "unitsConsumed": 456}
+
+    class FakeSigner:
+        def __init__(self, *, expected_public_key: str) -> None:
+            assert expected_public_key == wallet
+            self.public_key = wallet
+
+        def sign(self, transaction_b64: str) -> str:
+            assert transaction_b64 == "unsigned-buy"
+            return "signed-buy"
+
+    class FakeClient:
+        def __init__(self, *, api_key: str) -> None:
+            assert api_key == "jupiter-key"
+
+        async def order(self, **values: object) -> dict[str, object]:
+            assert values["input_mint"] == USDC_MINT
+            assert values["output_mint"] == "MintBuy111"
+            assert values["exclude_routers"] == ("jupiterz",)
+            return {
+                "inputMint": USDC_MINT,
+                "outputMint": "MintBuy111",
+                "inAmount": "5000000",
+                "outAmount": "250000000",
+                "otherAmountThreshold": "240000000",
+                "priceImpact": -0.4,
+                "transaction": "unsigned-buy",
+                "requestId": "buy-preflight",
+            }
+
+        async def execute(self, **_values: object) -> dict[str, object]:
+            raise AssertionError("preflight must never execute")
+
+    monkeypatch.setattr("solana_launch_guard.app.SolanaRpc", FakeRpc)
+    monkeypatch.setattr("solana_launch_guard.app.KeyringSolanaSigner", FakeSigner)
+    monkeypatch.setattr("solana_launch_guard.app.JupiterSwapClient", FakeClient)
+    config = settings(
+        tmp_path / "buy-preflight.db",
+        solana_wallet_address=wallet,
+        jupiter_api_key="jupiter-key",
+        auto_buy_enabled=True,
+        auto_buy_live=False,
+    )
+
+    result = asyncio.run(preflight_auto_buy(config, store, "MintBuy111"))
+
+    assert result["result"] == "PASSED"
+    assert result["broadcast"] is False
+    assert result["funding_source"] == "seed"
+    assert result["input_usdc"] == 5
+    assert result["expected_output_tokens"] == 250
+    assert result["simulation_units_consumed"] == 456
+    assert store.auto_buy_status()["fund"]["seed_buys_used"] == 0
+    store.close()
+
+
 def test_solana_rpc_simulation_rejects_runtime_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -572,6 +915,19 @@ def settings(database_path: Path, **overrides: object) -> Settings:
     result = Settings(**values)
     result.validate()
     return result
+
+
+def test_live_auto_buy_requires_live_auto_sell(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="requires AUTO_SELL_LIVE"):
+        settings(
+            tmp_path / "settings.db",
+            solana_wallet_address=str(Keypair().pubkey()),
+            jupiter_api_key="jupiter-key",
+            auto_buy_enabled=True,
+            auto_buy_live=True,
+            auto_sell_enabled=True,
+            auto_sell_live=False,
+        )
 
 
 def launch_payload(**overrides: object) -> dict[str, object]:

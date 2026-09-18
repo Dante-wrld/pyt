@@ -591,7 +591,7 @@ def format_recommendations(
     lines = [
         (
             f"{gold}DECISION-SUPPORT WATCHLIST 1-{len(candidates)} "
-            "(read-only model signals; you decide manually)"
+            "(model signals; orders require a separate mint allow-list)"
         )
     ]
     for rank, item in enumerate(candidates, start=1):

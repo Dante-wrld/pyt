@@ -176,6 +176,13 @@ class Settings:
     auto_sell_half_profit_multiple: float = 3.0
     auto_sell_second_stage_fraction: float = 0.5
     auto_sell_max_price_impact_pct: float = 5.0
+    auto_buy_enabled: bool = False
+    auto_buy_live: bool = False
+    auto_buy_seed_size_usdc: float = 5.0
+    auto_buy_max_seed_buys: int = 2
+    auto_buy_max_open_positions: int = 2
+    auto_buy_reinvest_profit_pct: float = 50.0
+    auto_buy_max_price_impact_pct: float = 5.0
     jupiter_api_key: str | None = None
     ethereum_token_addresses: tuple[str, ...] = ()
     base_token_addresses: tuple[str, ...] = ()
@@ -343,6 +350,21 @@ class Settings:
             auto_sell_max_price_impact_pct=_float(
                 "AUTO_SELL_MAX_PRICE_IMPACT_PCT", 5.0
             ),
+            auto_buy_enabled=_bool("AUTO_BUY_ENABLED", False),
+            auto_buy_live=_bool("AUTO_BUY_LIVE", False),
+            auto_buy_seed_size_usdc=_float(
+                "AUTO_BUY_SEED_SIZE_USDC", 5.0
+            ),
+            auto_buy_max_seed_buys=_int("AUTO_BUY_MAX_SEED_BUYS", 2),
+            auto_buy_max_open_positions=_int(
+                "AUTO_BUY_MAX_OPEN_POSITIONS", 2
+            ),
+            auto_buy_reinvest_profit_pct=_float(
+                "AUTO_BUY_REINVEST_PROFIT_PCT", 50.0
+            ),
+            auto_buy_max_price_impact_pct=_float(
+                "AUTO_BUY_MAX_PRICE_IMPACT_PCT", 5.0
+            ),
             jupiter_api_key=os.getenv("JUPITER_API_KEY") or None,
             ethereum_token_addresses=_addresses(
                 "ETHEREUM_TOKEN_ADDRESSES"
@@ -440,6 +462,32 @@ class Settings:
         if self.auto_sell_live and not self.solana_wallet_address:
             raise ValueError(
                 "AUTO_SELL_LIVE requires SOLANA_WALLET_ADDRESS"
+            )
+        if self.auto_buy_seed_size_usdc < 1:
+            raise ValueError("AUTO_BUY_SEED_SIZE_USDC must be at least 1")
+        if self.auto_buy_max_seed_buys < 1:
+            raise ValueError("AUTO_BUY_MAX_SEED_BUYS must be at least one")
+        if self.auto_buy_max_open_positions < 1:
+            raise ValueError(
+                "AUTO_BUY_MAX_OPEN_POSITIONS must be at least one"
+            )
+        if not 0 <= self.auto_buy_reinvest_profit_pct <= 100:
+            raise ValueError(
+                "AUTO_BUY_REINVEST_PROFIT_PCT must be from 0 through 100"
+            )
+        if not 0 < self.auto_buy_max_price_impact_pct <= 10:
+            raise ValueError(
+                "AUTO_BUY_MAX_PRICE_IMPACT_PCT must be above 0 and at most 10"
+            )
+        if self.auto_buy_live and not self.auto_buy_enabled:
+            raise ValueError("AUTO_BUY_LIVE requires AUTO_BUY_ENABLED=true")
+        if self.auto_buy_live and not self.auto_sell_live:
+            raise ValueError("AUTO_BUY_LIVE requires AUTO_SELL_LIVE=true")
+        if self.auto_buy_live and not self.jupiter_api_key:
+            raise ValueError("AUTO_BUY_LIVE requires JUPITER_API_KEY")
+        if self.auto_buy_live and not self.solana_wallet_address:
+            raise ValueError(
+                "AUTO_BUY_LIVE requires SOLANA_WALLET_ADDRESS"
             )
         if self.standard_trade_size_usd <= 0 or self.moonshot_trade_size_usd <= 0:
             raise ValueError("USD position sizes must be greater than zero")

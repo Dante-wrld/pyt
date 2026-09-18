@@ -1,14 +1,15 @@
 # Launch Guard
 
-A safety-first Python monitor, paper trader, and opt-in Solana profit-ladder
-seller for multichain crypto tokens.
+A safety-first Python monitor, paper trader, and opt-in guarded Solana
+buyer/profit-ladder seller for multichain crypto tokens.
 
-Version 0.15 keeps every buy and recommendation feature in paper mode. Its
-explicitly enabled, per-token-armed seller for eligible SPL tokens now includes
-a non-broadcasting preflight that builds, locally signs, and RPC-simulates the
-next ladder transaction before live mode is enabled. Live sells are routed
-directly on-chain through Jupiter; Launch Guard does not log in to or automate
-Fomo.
+Version 0.16 adds an off-by-default, per-mint-allow-listed Solana buyer. It can
+use at most two $5 USDC seed purchases, hold at most two actively managed bot
+positions, and credit 50% of confirmed positive realized profit to a separate
+reinvestment pool. Both buy and sell paths include a non-broadcasting
+preflight that builds, locally signs, and RPC-simulates the transaction. Direct
+on-chain swaps use Jupiter; Launch Guard does not log in to or control Fomo's
+app or website.
 
 ## What it does
 
@@ -40,18 +41,23 @@ Fomo.
   recover the original USD principal at 2x, then sell half the remainder at 3x.
 - Can preflight the next sale for one armed mint by building and locally
   signing the real Jupiter transaction, then simulating it without broadcasting.
+- Can allow-list one Solana mint at a time for a confirmed `BUY NOW` or
+  `BUY ZONE` signal, preflight a fixed-USDC purchase, and optionally execute it.
+- Separates two $5 seed buys from a reinvestment pool containing only 50% of
+  positive realized profit from bot-managed positions.
 - Simulates take-profit and stop-loss exits using subsequent trade events.
 - Persists launches, decisions, positions, fills, and sell execution state in
   `launch_guard.db`.
 - Reconnects after WebSocket failures.
-- Never automatically buys, sells SOL/stablecoins, or lets advisory
+- Never uses SOL as an automated buy input and never lets advisory
   `TAKE PARTIAL`, `PROTECT PROFIT`, or `EXIT WARNING` states place orders.
 
 ## Requirements
 
 - Python 3.11 or newer
 - A PumpPortal API key if their current access policy requires one
-- A Jupiter API key and operating-system keychain only when live selling is used
+- A Jupiter API key and operating-system keychain when preflighting or executing
+  guarded swaps
 
 PumpPortal's current documentation describes `subscribeNewToken` as the new-token stream and `subscribeTokenTrade` as the per-token trade stream. The endpoint and key are configuration values so they can be changed without editing the code.
 
@@ -152,6 +158,13 @@ pytest
 | `AUTO_SELL_HALF_PROFIT_MULTIPLE` | `3.0` | Entry-price multiple that triggers the second stage |
 | `AUTO_SELL_SECOND_STAGE_FRACTION` | `0.5` | Fraction of the remaining token balance sold at the second stage |
 | `AUTO_SELL_MAX_PRICE_IMPACT_PCT` | `5.0` | Reject a Jupiter order above this reported price impact |
+| `AUTO_BUY_ENABLED` | `false` | Evaluate allow-listed Solana candidates; remains dry-run unless live mode is also enabled |
+| `AUTO_BUY_LIVE` | `false` | Permit locally signed Jupiter USDC purchases; requires live auto-selling |
+| `AUTO_BUY_SEED_SIZE_USDC` | `5.0` | Maximum USDC principal for each initial seed purchase |
+| `AUTO_BUY_MAX_SEED_BUYS` | `2` | Lifetime number of principal-funded purchases before only profit may be reused |
+| `AUTO_BUY_MAX_OPEN_POSITIONS` | `2` | Maximum actively managed bot positions, including pending purchases |
+| `AUTO_BUY_REINVEST_PROFIT_PCT` | `50.0` | Positive realized-profit share credited to the reinvestment pool |
+| `AUTO_BUY_MAX_PRICE_IMPACT_PCT` | `5.0` | Reject a Jupiter buy order above this reported price impact |
 | `JUPITER_API_KEY` | empty | Private Jupiter API key required for live order and execution requests |
 | `ROBINHOOD_TOKEN_ADDRESSES` | empty | Comma-separated Robinhood Chain `0x` contracts to monitor in addition to discovery |
 | `ETHEREUM_TOKEN_ADDRESSES`, `BASE_TOKEN_ADDRESSES`, `BNB_TOKEN_ADDRESSES`, `BOB_TOKEN_ADDRESSES`, `MONAD_TOKEN_ADDRESSES`, `HYPEREVM_TOKEN_ADDRESSES` | empty | Exact contracts to monitor per chain |
@@ -162,8 +175,8 @@ pytest
 | `*_RPC_URL` | varies | Read-only JSON-RPC endpoint for each EVM network |
 
 The defaults are engineering examples, **not financial recommendations**.
-Keep automated selling in dry-run while validating cost bases, quotes, and
-trigger behavior.
+Keep automated buying and selling in dry-run while validating mints, cost
+bases, quotes, and trigger behavior.
 
 ## Price model
 
@@ -433,16 +446,81 @@ running monitor reloads the armed policy on each poll. To stop all execution,
 press Control-C. Changing `AUTO_SELL_LIVE=false` takes effect after the process
 is restarted.
 
-Current [Fomo Terms](https://fomo.family/terms) prohibit automated scripts or
-bots from executing trades or controlling activity on Fomo's services. Launch
-Guard therefore does not automate the Fomo app, call a Fomo trading endpoint,
-or reuse a Fomo login session. It signs direct on-chain Jupiter transactions
-from the same self-custodied Solana wallet. You remain responsible for deciding
-whether that setup is appropriate for your account and jurisdiction.
+### Guarded automated buys
+
+The buyer is independent from Fomo's user interface. It watches Launch Guard's
+existing Solana recommendation candidates and considers a purchase only when
+all of the following are true:
+
+- the exact mint was manually allow-listed;
+- the candidate has a confirmed `BUY NOW` or `BUY ZONE` state;
+- fewer than two bot-managed positions are open or pending;
+- the wallet does not already hold that mint, preventing mixed cost bases;
+- the wallet has enough USDC and Jupiter reports price impact within the cap;
+- the transaction passes the same signer and execution gates as the seller.
+
+The first two confirmed purchases use at most 5 USDC each. Those are the only
+principal-funded purchases. Afterward, a purchase can use only the accumulated
+reinvestment pool, up to 5 USDC and only when at least 1 USDC is available.
+For a bot-managed token sale:
+
+```text
+allocated cost = original USDC cost × sold tokens / originally bought tokens
+realized profit = confirmed USDC received − allocated cost
+reinvestment credit = max(realized profit, 0) × 50%
+```
+
+Returned principal, unrealized gains, and losses never increase the pool. After
+the second profit-ladder stage, the managed position is marked complete so a
+new slot can open; the ladder's final token remainder stays in the wallet and
+is not counted as an active bot-managed position.
+
+Configure dry-run buying first:
+
+```dotenv
+AUTO_BUY_ENABLED=true
+AUTO_BUY_LIVE=false
+AUTO_BUY_SEED_SIZE_USDC=5.0
+AUTO_BUY_MAX_SEED_BUYS=2
+AUTO_BUY_MAX_OPEN_POSITIONS=2
+AUTO_BUY_REINVEST_PROFIT_PCT=50.0
+AUTO_BUY_MAX_PRICE_IMPACT_PCT=5.0
+```
+
+Allow-list and preflight an exact mint:
+
+```bash
+launch-guard --arm-auto-buy-mint TOKEN_MINT --buy-symbol SYMBOL
+launch-guard --auto-buy-status
+launch-guard --preflight-auto-buy-mint TOKEN_MINT
+```
+
+Require `"result": "PASSED"` and `"broadcast": false`. Preflight does not
+consume a seed buy, debit the profit pool, open a position, or disarm the mint.
+Live buying cannot be enabled unless both `AUTO_SELL_ENABLED=true` and
+`AUTO_SELL_LIVE=true`, ensuring a confirmed purchase is automatically imported
+with its exact USDC cost basis and armed for the 2x/3x sell ladder. After both
+buy and sell preflights have been reviewed, live mode is started with:
+
+```bash
+caffeinate -i launch-guard --mode all --recommendations-window --portfolio-window
+```
+
+Each allow-list entry permits one confirmed purchase and is automatically
+disarmed afterward. Use `--disarm-auto-buy-mint TOKEN_MINT` as the per-mint kill
+switch and set `AUTO_BUY_LIVE=false` before restarting to disable all purchases.
+
+The current [Fomo Terms](https://fomo.family/terms) prohibit automated scripts
+or bots from executing trades or controlling account activity on Fomo's
+services. Launch Guard does not automate the Fomo app, call a Fomo endpoint, or
+reuse a Fomo login session; it submits direct on-chain Jupiter transactions
+from the exported self-custodied wallet. The Terms do not expressly confirm
+whether Fomo considers that separate activity permissible, so obtain written
+clarification from Fomo if continued account compatibility matters.
 
 ### Entry-price and pullback decisions
 
-The board is a read-only decision-support system:
+Without `AUTO_BUY_ENABLED`, the board is a read-only decision-support system:
 
 ```text
 DISCOVER → SCORE → WAIT → CONFIRM → BUY ZONE → ALERT → YOU DECIDE
@@ -477,15 +555,16 @@ replica of, or strategy endorsed by, any particular author. Requiring repeated
 evidence reduces one-poll signal flips but cannot prevent a market from
 reversing after a confirmed entry.
 
-When an entry becomes confirmed, the board anchors a paper-only entry, stop,
+When an entry becomes confirmed, the board anchors a reference entry, stop,
 and first objective. The objective is never below the configured minimum
 reward-to-risk multiple. These levels are a consistency framework rather than
 a forecast; Launch Guard does not place the stop or target on any exchange.
 
 These states are deterministic heuristics based on incomplete market data—not
-predictions or instructions to trade. They never trigger an order. The optional
-profit-ladder seller uses its own exact 2x/3x policy and never requests a Fomo
-login or Robinhood credentials.
+predictions or instructions to trade. They trigger an order only when the
+Solana mint is separately allow-listed and both auto-buy switches are enabled.
+The optional profit-ladder seller uses its own exact 2x/3x policy and neither
+path requests a Fomo login or Robinhood credentials.
 
 ### Optional phone alerts with Pushover
 
@@ -603,8 +682,9 @@ classification system.
 
 DEX Screener discovery does not prove that Fomo currently exposes or permits a
 trade for every contract. Verify the chain, contract, quote, slippage, and fees
-inside Fomo before taking any manual action. The bot does not log in to Fomo
-and does not buy anything.
+inside Fomo before taking any manual action. The bot does not log in to Fomo;
+automated buying is limited to separately allow-listed Solana mints and never
+applies to the EVM discovery feeds.
 
 Review stored EVM and HyperCore activity with:
 
