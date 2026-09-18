@@ -1510,6 +1510,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="show armed tokens and completed profit-ladder stages",
     )
     parser.add_argument(
+        "--preflight-auto-sell-mint",
+        metavar="MINT",
+        help=(
+            "build, locally sign, and RPC-simulate the next ladder sale for "
+            "one armed mint without broadcasting it"
+        ),
+    )
+    parser.add_argument(
         "--recommendations-display",
         action="store_true",
         help=argparse.SUPPRESS,
@@ -1530,6 +1538,81 @@ def build_parser() -> argparse.ArgumentParser:
         help=argparse.SUPPRESS,
     )
     return parser
+
+
+async def preflight_auto_sell(
+    settings: Settings, store: SQLiteStore, mint: str
+) -> dict[str, Any]:
+    if not settings.solana_wallet_address:
+        raise ValueError(
+            "auto-sell preflight requires SOLANA_WALLET_ADDRESS"
+        )
+    if not settings.jupiter_api_key:
+        raise ValueError("auto-sell preflight requires JUPITER_API_KEY")
+
+    policy = store.load_auto_sell_policy(mint)
+    if policy is None or not bool(policy["armed"]):
+        raise ValueError("auto-sell preflight requires an armed token mint")
+    holding = next(
+        (
+            item
+            for item in store.load_owned_holdings("solana")
+            if item.token_address == mint
+        ),
+        None,
+    )
+    if holding is None:
+        raise ValueError("import the holding and USD cost basis before preflight")
+
+    rpc = SolanaRpc(settings.solana_rpc_http_url)
+    balances = await rpc.token_holdings(settings.solana_wallet_address)
+    balance = next((item for item in balances if item.mint == mint), None)
+    if balance is None or balance.raw_amount <= 0:
+        raise ValueError("the configured wallet has no balance for this mint")
+
+    ladder = ProfitLadder(
+        principal_trigger_multiple=settings.auto_sell_principal_multiple,
+        half_profit_trigger_multiple=settings.auto_sell_half_profit_multiple,
+        second_stage_fraction=settings.auto_sell_second_stage_fraction,
+    )
+    intent = ladder.preflight_plan(
+        mint=mint,
+        symbol=holding.symbol,
+        stage=int(policy["stage"]),
+        balance_raw=balance.raw_amount,
+        decimals=balance.decimals,
+        entry_price_usd=holding.entry_price,
+        original_cost_usd=holding.cost_amount,
+    )
+    signer = KeyringSolanaSigner(
+        expected_public_key=settings.solana_wallet_address
+    )
+    seller = SolanaAutoSeller(
+        client=JupiterSwapClient(api_key=settings.jupiter_api_key),
+        signer=signer,
+        max_price_impact_pct=settings.auto_sell_max_price_impact_pct,
+    )
+    receipt = await seller.preflight(intent, rpc)
+    prepared = receipt.prepared
+    return {
+        "result": "PASSED",
+        "broadcast": receipt.broadcast,
+        "wallet": signer.public_key,
+        "mint": mint,
+        "symbol": holding.symbol,
+        "stage": int(policy["stage"]),
+        "input_amount_raw": prepared.input_amount_raw,
+        "input_tokens": prepared.input_amount_raw / (10**balance.decimals),
+        "expected_output_usdc": prepared.expected_output_raw / 1_000_000,
+        "minimum_output_usdc": prepared.minimum_output_raw / 1_000_000,
+        "price_impact_pct": prepared.price_impact_pct,
+        "router": prepared.router,
+        "mode": prepared.mode,
+        "slippage_bps": prepared.slippage_bps,
+        "fee_bps": prepared.fee_bps,
+        "simulation_units_consumed": receipt.units_consumed,
+        "simulation_log_count": receipt.log_count,
+    }
 
 
 def _process_exists(pid: int) -> bool:
@@ -1708,6 +1791,17 @@ def main() -> None:
             LOGGER.info("Auto-sell disarmed for %s", args.disarm_auto_sell_mint)
         elif args.auto_sell_status:
             print(json.dumps(store.auto_sell_status(), indent=2))
+        elif args.preflight_auto_sell_mint:
+            try:
+                result = asyncio.run(
+                    preflight_auto_sell(
+                        settings, store, args.preflight_auto_sell_mint
+                    )
+                )
+            except (ConnectionError, RuntimeError) as exc:
+                raise ValueError(f"auto-sell preflight failed: {exc}") from exc
+            print("AUTO-SELL PREFLIGHT PASSED — NO TRANSACTION BROADCAST")
+            print(json.dumps(result, indent=2))
         else:
             guard = LaunchGuard(settings, store)
 

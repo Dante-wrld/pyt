@@ -96,7 +96,7 @@ class PushoverClient:
             data=json.dumps(payload).encode(),
             headers={
                 "Content-Type": "application/json",
-                "User-Agent": "solana-launch-guard/0.14",
+                "User-Agent": "solana-launch-guard/0.15",
             },
             method="POST",
         )
