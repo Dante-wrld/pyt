@@ -99,18 +99,28 @@ class RiskEngine:
         self.settings = settings
 
     def evaluate(self, launch: Launch, portfolio: PortfolioView) -> RiskDecision:
+        return self._evaluate(launch, portfolio)
+
+    def evaluate_candidate(self, launch: Launch) -> RiskDecision:
+        """Apply launch-data gates without portfolio-capacity restrictions."""
+        return self._evaluate(launch, None)
+
+    def _evaluate(
+        self, launch: Launch, portfolio: PortfolioView | None
+    ) -> RiskDecision:
         reasons: list[str] = []
         deductions = 0
 
-        if portfolio.has_position(launch.mint):
-            reasons.append("position already exists for mint")
+        if portfolio is not None:
+            if portfolio.has_position(launch.mint):
+                reasons.append("position already exists for mint")
 
-        if portfolio.open_count >= self.settings.max_open_positions:
-            reasons.append("maximum open positions reached")
+            if portfolio.open_count >= self.settings.max_open_positions:
+                reasons.append("maximum open positions reached")
 
-        projected = portfolio.exposure_sol + self.settings.trade_size_sol
-        if projected > self.settings.max_total_exposure_sol + 1e-12:
-            reasons.append("maximum total exposure would be exceeded")
+            projected = portfolio.exposure_sol + self.settings.trade_size_sol
+            if projected > self.settings.max_total_exposure_sol + 1e-12:
+                reasons.append("maximum total exposure would be exceeded")
 
         if launch.price_sol is None:
             deductions += 35
