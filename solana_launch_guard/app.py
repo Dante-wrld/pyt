@@ -54,6 +54,8 @@ class LaunchGuard:
             ),
         )
         self.candidate_tasks: set[asyncio.Task[Any]] = set()
+        self.robinhood_pending_count = 0
+        self.robinhood_last_result: dict[str, tuple[str, int]] = {}
         self.recommendation_console_output = True
         self.recommendations = RecommendationBook(
             pool_size=settings.recommendation_pool_size,
@@ -554,16 +556,21 @@ class LaunchGuard:
             semaphore = asyncio.Semaphore(5)
 
             async def refresh(
-                mint: str, limiter: asyncio.Semaphore = semaphore
+                mint: str,
+                chain: str,
+                limiter: asyncio.Semaphore = semaphore,
             ) -> None:
                 async with limiter:
-                    quote = await self.oracle.quote(mint)
+                    quote = await self.oracle.quote(mint, chain=chain)
                 if quote is not None:
                     self.recommendations.update(quote)
 
             if candidates:
                 await asyncio.gather(
-                    *(refresh(candidate.mint) for candidate in candidates)
+                    *(
+                        refresh(candidate.mint, candidate.chain)
+                        for candidate in candidates
+                    )
                 )
                 ranked = self.recommendations.ranked(
                     self.settings.recommendation_limit
@@ -577,7 +584,9 @@ class LaunchGuard:
             )
             snapshot = build_snapshot(
                 ranked,
-                pending_count=len(self.candidate_tasks),
+                pending_count=(
+                    len(self.candidate_tasks) + self.robinhood_pending_count
+                ),
                 poll_seconds=self.settings.recommendation_poll_seconds,
             )
             try:
@@ -589,15 +598,97 @@ class LaunchGuard:
 
             await asyncio.sleep(self.settings.recommendation_poll_seconds)
 
+    async def run_robinhood_feed(self) -> None:
+        LOGGER.info(
+            "Robinhood Chain paper-recommendation feed active "
+            "(chain ID 4663; no automatic orders)"
+        )
+        while True:
+            discovered, stock_tokens = await asyncio.gather(
+                self.oracle.discover_token_profiles("robinhood"),
+                self.oracle.robinhood_stock_token_addresses(),
+            )
+            if stock_tokens is None:
+                LOGGER.warning(
+                    "Robinhood Stock Token registry unavailable; "
+                    "skipping this discovery pass"
+                )
+                await asyncio.sleep(self.settings.robinhood_poll_seconds)
+                continue
+            addresses: dict[str, str] = {
+                address.casefold(): address
+                for address in self.settings.robinhood_token_addresses
+            }
+            for address in discovered:
+                addresses.setdefault(address.casefold(), address)
+
+            eligible = [
+                address
+                for key, address in addresses.items()
+                if key not in stock_tokens
+            ]
+            self.robinhood_pending_count = len(eligible)
+            semaphore = asyncio.Semaphore(5)
+
+            async def fetch(
+                address: str, limiter: asyncio.Semaphore = semaphore
+            ) -> tuple[str, MarketQuote | None]:
+                async with limiter:
+                    quote = await self.oracle.quote(
+                        address, chain="robinhood"
+                    )
+                return address, quote
+
+            try:
+                quotes = await asyncio.gather(*(fetch(item) for item in eligible))
+                for address, quote in quotes:
+                    result = self.intelligence.score(quote)
+                    symbol = quote.symbol if quote else address[:10]
+                    result_key = address.casefold()
+                    current_result = (result.tier, result.total_score)
+                    previous_result = self.robinhood_last_result.get(result_key)
+                    if current_result != previous_result:
+                        LOGGER.info(
+                            "RH %-9s %-10s score=%d contract=%s %s",
+                            result.tier,
+                            symbol,
+                            result.total_score,
+                            address,
+                            "; ".join(result.reasons),
+                        )
+                        self.robinhood_last_result[result_key] = current_result
+
+                    if quote is None or not result.accepted:
+                        continue
+                    self.store.save_intelligence_score(
+                        mint=address,
+                        symbol=symbol,
+                        tier=result.tier,
+                        total_score=result.total_score,
+                        safety_score=result.safety_score,
+                        momentum_score=result.momentum_score,
+                        reasons=result.reasons,
+                    )
+                    self.recommendations.add(quote, result)
+            finally:
+                self.robinhood_pending_count = 0
+
+            await asyncio.sleep(self.settings.robinhood_poll_seconds)
+
     async def run(self, mode: str) -> None:
         tasks: list[asyncio.Task[Any]] = [
             asyncio.create_task(self.run_price_monitor())
         ]
-        if mode in {"launches", "both"}:
+        if mode in {"launches", "both", "all"}:
             tasks.append(asyncio.create_task(self.run_launch_feed()))
+
+        if mode in {"robinhood", "all"}:
+            tasks.append(asyncio.create_task(self.run_robinhood_feed()))
+
+        if mode in {"launches", "both", "robinhood", "all"}:
             tasks.append(asyncio.create_task(self.run_recommendation_monitor()))
 
-        if mode in {"copy", "both"}:
+        if mode in {"copy", "both", "all"}:
             if not self.settings.watched_wallets:
                 if mode == "copy":
                     raise ValueError(
@@ -677,9 +768,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--mode",
-        choices=("launches", "copy", "both"),
+        choices=("launches", "copy", "both", "robinhood", "all"),
         default="launches",
-        help="strategy feed to run (default: launches)",
+        help=(
+            "feed to run: Solana launches, wallet copy, both Solana feeds, "
+            "Robinhood Chain recommendations, or all feeds"
+        ),
     )
     parser.add_argument(
         "--demo",
@@ -835,9 +929,9 @@ def main() -> None:
             asyncio.run(run_demo(guard))
         else:
             if args.recommendations_window:
-                if args.mode not in {"launches", "both"}:
+                if args.mode not in {"launches", "both", "robinhood", "all"}:
                     raise ValueError(
-                        "--recommendations-window requires --mode launches or both"
+                        "--recommendations-window requires a recommendation mode"
                     )
                 write_snapshot(
                     settings.recommendation_snapshot_path,
