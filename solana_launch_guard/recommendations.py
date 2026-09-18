@@ -14,6 +14,7 @@ CHAIN_LABELS = {
     "solana": "SOL",
     "ethereum": "ETH",
     "base": "BASE",
+    "bsc": "BNB",
     "bob": "BOB",
     "monad": "MON",
     "robinhood": "RH",
