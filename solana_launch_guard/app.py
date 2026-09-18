@@ -4,8 +4,12 @@ import argparse
 import asyncio
 import json
 import logging
+import os
+import shlex
 import ssl
+import subprocess
 import sys
+import time
 from collections.abc import Mapping
 from typing import Any
 
@@ -16,7 +20,14 @@ from .config import Settings
 from .core import Launch, PaperBroker, RiskEngine, SQLiteStore
 from .intelligence import CoinIntelligence
 from .market import DexScreenerOracle, MarketQuote
-from .recommendations import RecommendationBook, format_recommendations
+from .recommendations import (
+    RecommendationBook,
+    build_snapshot,
+    format_dashboard,
+    format_recommendations,
+    read_snapshot,
+    write_snapshot,
+)
 from .strategy import AdaptiveStrategy
 from .wallet import SolanaRpc, WalletTrade, WalletWatcher
 
@@ -43,6 +54,7 @@ class LaunchGuard:
             ),
         )
         self.candidate_tasks: set[asyncio.Task[Any]] = set()
+        self.recommendation_console_output = True
         self.recommendations = RecommendationBook(
             pool_size=settings.recommendation_pool_size,
             ttl_seconds=settings.recommendation_ttl_seconds,
@@ -556,9 +568,24 @@ class LaunchGuard:
                 ranked = self.recommendations.ranked(
                     self.settings.recommendation_limit
                 )
-                if ranked:
+                if ranked and self.recommendation_console_output:
                     use_color = self.settings.color_output and sys.stderr.isatty()
                     LOGGER.info("\n%s", format_recommendations(ranked, color=use_color))
+
+            ranked = self.recommendations.ranked(
+                self.settings.recommendation_limit
+            )
+            snapshot = build_snapshot(
+                ranked,
+                pending_count=len(self.candidate_tasks),
+                poll_seconds=self.settings.recommendation_poll_seconds,
+            )
+            try:
+                write_snapshot(
+                    self.settings.recommendation_snapshot_path, snapshot
+                )
+            except OSError as exc:
+                LOGGER.warning("Could not update recommendation window: %s", exc)
 
             await asyncio.sleep(self.settings.recommendation_poll_seconds)
 
@@ -689,7 +716,84 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         help="total USD cost basis of the currently held tokens",
     )
+    parser.add_argument(
+        "--recommendations-window",
+        action="store_true",
+        help="open a separate macOS Terminal with the live ranked watchlist",
+    )
+    parser.add_argument(
+        "--recommendations-display",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--recommendations-parent-pid",
+        type=int,
+        help=argparse.SUPPRESS,
+    )
     return parser
+
+
+def _process_exists(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def run_recommendation_display(
+    snapshot_path: str, parent_pid: int | None = None
+) -> None:
+    try:
+        while parent_pid is None or _process_exists(parent_pid):
+            snapshot = read_snapshot(snapshot_path) or {
+                "generated_at": 0,
+                "pending_count": 0,
+                "poll_seconds": 15,
+                "candidates": [],
+            }
+            print("\033[2J\033[H", end="")
+            print(format_dashboard(snapshot, color=sys.stdout.isatty()), flush=True)
+            time.sleep(1)
+    except KeyboardInterrupt:
+        pass
+
+
+def open_recommendation_terminal(snapshot_path: str) -> None:
+    if sys.platform != "darwin":
+        raise ValueError(
+            "--recommendations-window currently requires macOS Terminal"
+        )
+    command_parts = [
+        sys.executable,
+        "-m",
+        "solana_launch_guard.app",
+        "--recommendations-display",
+        "--recommendations-parent-pid",
+        str(os.getpid()),
+    ]
+    command = "cd {} && {}".format(
+        shlex.quote(os.getcwd()),
+        " ".join(shlex.quote(part) for part in command_parts),
+    )
+    script = (
+        'tell application "Terminal"\n'
+        "activate\n"
+        f"do script {json.dumps(command)}\n"
+        "end tell"
+    )
+    try:
+        subprocess.run(
+            ["osascript", "-e", script],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise ValueError(f"could not open recommendation Terminal: {exc}") from exc
 
 
 def main() -> None:
@@ -699,6 +803,13 @@ def main() -> None:
         level=getattr(logging, settings.log_level, logging.INFO),
         format="%(asctime)s %(levelname)s %(message)s",
     )
+
+    if args.recommendations_display:
+        run_recommendation_display(
+            settings.recommendation_snapshot_path,
+            args.recommendations_parent_pid,
+        )
+        return
 
     store = SQLiteStore(settings.database_path)
     guard = LaunchGuard(settings, store)
@@ -723,6 +834,23 @@ def main() -> None:
         elif args.demo:
             asyncio.run(run_demo(guard))
         else:
+            if args.recommendations_window:
+                if args.mode not in {"launches", "both"}:
+                    raise ValueError(
+                        "--recommendations-window requires --mode launches or both"
+                    )
+                write_snapshot(
+                    settings.recommendation_snapshot_path,
+                    build_snapshot(
+                        [],
+                        pending_count=0,
+                        poll_seconds=settings.recommendation_poll_seconds,
+                    ),
+                )
+                open_recommendation_terminal(
+                    settings.recommendation_snapshot_path
+                )
+                guard.recommendation_console_output = False
             asyncio.run(guard.run(args.mode))
     except KeyboardInterrupt:
         LOGGER.info("Stopped by user")
