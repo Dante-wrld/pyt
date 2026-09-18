@@ -846,9 +846,32 @@ class SQLiteStore:
         self, token_address: str, *, chain: str = "solana"
     ) -> None:
         self.connection.execute(
-            "UPDATE auto_sell_policies SET armed = 0, updated_at = ? "
-            "WHERE chain = ? AND token_address = ?",
-            (utc_now(), chain, token_address),
+            """
+            INSERT INTO auto_sell_policies(
+                chain, token_address, armed, stage, updated_at
+            ) VALUES (?, ?, 0, 0, ?)
+            ON CONFLICT(chain, token_address) DO UPDATE SET
+                armed = 0,
+                updated_at = excluded.updated_at
+            """,
+            (chain, token_address, utc_now()),
+        )
+        self.connection.commit()
+
+    def allow_auto_sell_signals(
+        self, token_address: str, *, chain: str = "solana"
+    ) -> None:
+        """Remove a per-mint block for wallet-wide portfolio-signal exits."""
+        self.connection.execute(
+            """
+            INSERT INTO auto_sell_policies(
+                chain, token_address, armed, stage, updated_at
+            ) VALUES (?, ?, 1, 0, ?)
+            ON CONFLICT(chain, token_address) DO UPDATE SET
+                armed = 1,
+                updated_at = excluded.updated_at
+            """,
+            (chain, token_address, utc_now()),
         )
         self.connection.commit()
 

@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from pathlib import Path
 
 import pytest
 from solders.keypair import Keypair
 
 from solana_launch_guard.app import (
+    LaunchGuard,
     _is_stock_token_symbol,
+    auto_buy_discovery_rejection,
     preflight_auto_buy,
     preflight_auto_sell,
+    preflight_owned_auto_sell,
 )
 from solana_launch_guard.config import Settings
 from solana_launch_guard.core import (
@@ -20,15 +24,16 @@ from solana_launch_guard.core import (
     indicative_price,
 )
 from solana_launch_guard.execution import (
+    USDC_MINT,
     BuyIntent,
     JupiterSwapClient,
+    PortfolioSignalExitPlanner,
     PreparedBuy,
     PreparedSell,
     ProfitLadder,
     SellIntent,
     SolanaAutoBuyer,
     SolanaAutoSeller,
-    USDC_MINT,
     store_fomo_solana_key,
 )
 from solana_launch_guard.intelligence import CoinIntelligence
@@ -43,6 +48,7 @@ from solana_launch_guard.notifications import (
 from solana_launch_guard.portfolio import (
     OwnedHolding,
     PortfolioAdvisor,
+    PortfolioSignal,
     build_portfolio_snapshot,
     format_portfolio_dashboard,
 )
@@ -122,6 +128,46 @@ def test_profit_ladder_requires_trigger_and_cost_basis() -> None:
     values["current_price_usd"] = 2.1
     values["original_cost_usd"] = None
     assert ladder.plan(**values) is None
+
+
+def test_portfolio_signal_exit_planner_uses_configured_fractions() -> None:
+    planner = PortfolioSignalExitPlanner(
+        take_partial_fraction=0.5,
+        protect_profit_fraction=0.75,
+        exit_warning_fraction=1.0,
+    )
+
+    partial = planner.plan(
+        mint="MintOwned111",
+        symbol="OWN",
+        decision="TAKE PARTIAL",
+        reason="profit target reached",
+        balance_raw=101,
+        decimals=6,
+    )
+    exit_all = planner.plan(
+        mint="MintOwned111",
+        symbol="OWN",
+        decision="EXIT WARNING",
+        reason="momentum reversal",
+        balance_raw=101,
+        decimals=6,
+    )
+
+    assert partial is not None
+    assert partial.amount_raw == 50
+    assert partial.target_output_raw is None
+    assert partial.event_key.endswith("portfolio-signal:take-partial")
+    assert exit_all is not None
+    assert exit_all.amount_raw == 101
+    assert planner.plan(
+        mint="MintOwned111",
+        symbol="OWN",
+        decision="HOLD",
+        reason="inside limits",
+        balance_raw=101,
+        decimals=6,
+    ) is None
 
 
 def test_profit_ladder_preflight_uses_next_stage_amount_without_target() -> None:
@@ -312,6 +358,51 @@ def test_auto_seller_rejects_adverse_negative_price_impact() -> None:
         asyncio.run(seller.prepare(intent))
 
 
+def test_auto_seller_rejects_quote_above_slippage_limit() -> None:
+    class FakeSigner:
+        public_key = "Wallet111"
+
+        def sign(self, transaction_b64: str) -> str:
+            return transaction_b64
+
+    class FakeClient:
+        async def order(self, **values: object) -> dict[str, object]:
+            return {
+                "inputMint": values["input_mint"],
+                "outputMint": USDC_MINT,
+                "inAmount": str(values["amount_raw"]),
+                "outAmount": "10000000",
+                "otherAmountThreshold": "8000000",
+                "priceImpact": 1.0,
+                "slippageBps": 2000,
+                "transaction": "unsigned",
+                "requestId": "request-sell",
+            }
+
+        async def execute(self, **_values: object) -> dict[str, object]:
+            raise AssertionError("unsafe sell must never execute")
+
+    intent = SellIntent(
+        mint="MintOwned111",
+        symbol="OWN",
+        stage=12,
+        event_key="signal-exit",
+        amount_raw=100_000_000,
+        balance_raw=100_000_000,
+        decimals=6,
+        trigger_multiple=0,
+        current_multiple=0,
+        target_output_raw=None,
+        reason="exit warning",
+    )
+    seller = SolanaAutoSeller(
+        client=FakeClient(), signer=FakeSigner(), max_slippage_bps=500
+    )
+
+    with pytest.raises(ValueError, match="slippage 2000 bps"):
+        asyncio.run(seller.prepare(intent))
+
+
 def test_jupiter_preflight_order_excludes_rfq_router(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -480,6 +571,45 @@ def test_auto_buyer_rejects_unsafe_price_impact() -> None:
         asyncio.run(buyer.prepare(intent))
 
 
+def test_auto_buyer_rejects_jupiter_twenty_percent_slippage() -> None:
+    class FakeSigner:
+        public_key = "Wallet111"
+
+        def sign(self, transaction_b64: str) -> str:
+            return transaction_b64
+
+    class FakeClient:
+        async def order(self, **values: object) -> dict[str, object]:
+            return {
+                "inputMint": USDC_MINT,
+                "outputMint": values["output_mint"],
+                "inAmount": str(values["amount_raw"]),
+                "outAmount": "250000000",
+                "otherAmountThreshold": "200000000",
+                "priceImpact": -2.7,
+                "slippageBps": 2000,
+                "transaction": "unsigned-buy",
+                "requestId": "request-buy",
+            }
+
+        async def execute(self, **_values: object) -> dict[str, object]:
+            raise AssertionError("unsafe buy must never execute")
+
+    intent = BuyIntent(
+        mint="MintBuy111",
+        symbol="BUY",
+        event_key="buy-slippage",
+        amount_usdc_raw=5_000_000,
+        funding_source="seed",
+    )
+    buyer = SolanaAutoBuyer(
+        client=FakeClient(), signer=FakeSigner(), max_slippage_bps=500
+    )
+
+    with pytest.raises(ValueError, match="slippage 2000 bps"):
+        asyncio.run(buyer.prepare(intent))
+
+
 def test_auto_seller_rejects_second_stage_quote_below_trigger() -> None:
     class FakeSigner:
         public_key = "Wallet111"
@@ -557,6 +687,22 @@ def test_auto_sell_store_is_armed_and_idempotent(tmp_path: Path) -> None:
         event_key="event-1", signature="signature-1", next_stage=1
     )
     assert store.load_auto_sell_policy("MintProfit111")["stage"] == 1
+    store.close()
+
+
+def test_auto_sell_per_mint_block_works_without_cost_basis(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(str(tmp_path / "auto-sell-block.db"))
+    store.disarm_auto_sell("MintUnknown111")
+    policy = store.load_auto_sell_policy("MintUnknown111")
+    assert policy is not None
+    assert policy["armed"] == 0
+
+    store.allow_auto_sell_signals("MintUnknown111")
+    policy = store.load_auto_sell_policy("MintUnknown111")
+    assert policy is not None
+    assert policy["armed"] == 1
     store.close()
 
 
@@ -785,6 +931,89 @@ def test_preflight_command_uses_armed_balance_and_preserves_stage(
     policy = store.load_auto_sell_policy("MintProfit111")
     assert policy is not None
     assert policy["stage"] == 0
+    store.close()
+
+
+def test_owned_auto_sell_preflight_never_broadcasts_without_cost_basis(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wallet = str(Keypair().pubkey())
+    store = SQLiteStore(str(tmp_path / "owned-preflight.db"))
+
+    class FakeRpc:
+        def __init__(self, _url: str) -> None:
+            pass
+
+        async def token_holdings(
+            self, owner: str
+        ) -> tuple[SolanaTokenHolding, ...]:
+            assert owner == wallet
+            return (
+                SolanaTokenHolding(
+                    mint="MintUnknown111",
+                    amount=100,
+                    raw_amount=100_000_000,
+                    decimals=6,
+                ),
+            )
+
+        async def simulate_transaction(
+            self, signed_transaction_b64: str
+        ) -> dict[str, object]:
+            assert signed_transaction_b64 == "signed"
+            return {"err": None, "logs": ["ok"], "unitsConsumed": 321}
+
+    class FakeSigner:
+        def __init__(self, *, expected_public_key: str) -> None:
+            assert expected_public_key == wallet
+            self.public_key = wallet
+
+        def sign(self, transaction_b64: str) -> str:
+            assert transaction_b64 == "unsigned"
+            return "signed"
+
+    class FakeClient:
+        def __init__(self, *, api_key: str) -> None:
+            assert api_key == "jupiter-key"
+
+        async def order(self, **values: object) -> dict[str, object]:
+            assert values["amount_raw"] == 50_000_000
+            return {
+                "inputMint": "MintUnknown111",
+                "outputMint": USDC_MINT,
+                "inAmount": "50000000",
+                "outAmount": "10000000",
+                "otherAmountThreshold": "9500000",
+                "priceImpact": 0.5,
+                "slippageBps": 500,
+                "transaction": "unsigned",
+                "requestId": "owned-preflight",
+            }
+
+        async def execute(self, **_values: object) -> dict[str, object]:
+            raise AssertionError("preflight must never execute")
+
+    monkeypatch.setattr("solana_launch_guard.app.SolanaRpc", FakeRpc)
+    monkeypatch.setattr("solana_launch_guard.app.KeyringSolanaSigner", FakeSigner)
+    monkeypatch.setattr("solana_launch_guard.app.JupiterSwapClient", FakeClient)
+    config = settings(
+        tmp_path / "owned-preflight.db",
+        solana_wallet_address=wallet,
+        jupiter_api_key="jupiter-key",
+        auto_sell_enabled=True,
+        auto_sell_portfolio_signals=True,
+    )
+
+    result = asyncio.run(
+        preflight_owned_auto_sell(config, store, "MintUnknown111")
+    )
+
+    assert result["result"] == "PASSED"
+    assert result["broadcast"] is False
+    assert result["configured_fraction"] == 0.5
+    assert result["input_tokens"] == 50
+    assert result["slippage_bps"] == 500
+    assert result["simulation_units_consumed"] == 321
     store.close()
 
 
@@ -1444,6 +1673,84 @@ def test_entry_requires_three_consecutive_confirmations() -> None:
     assert candidate.planned_reward_risk_ratio == pytest.approx(2)
 
 
+def test_auto_buy_discovery_requires_confirmed_fresh_liquid_signal(
+    tmp_path: Path,
+) -> None:
+    quote = market_quote(
+        liquidity=60_000,
+        market_cap=100_000,
+        buys=60,
+        sells=20,
+        volume=15_000,
+        change=5,
+    )
+    book = RecommendationBook(pool_size=10, ttl_seconds=60)
+    candidate = book.add(quote, CoinIntelligence().score(quote), now=0)
+    assert candidate is not None
+    book.update(quote, now=5)
+    book.update(quote, now=10)
+    assert candidate.decision == "BUY NOW"
+
+    config = settings(
+        tmp_path / "discovery.db",
+        auto_buy_enabled=True,
+        auto_buy_discovery=True,
+        auto_buy_discovery_min_score=70,
+        auto_buy_discovery_min_liquidity_usd=50_000,
+        auto_buy_signal_max_age_seconds=30,
+    )
+    assert auto_buy_discovery_rejection(
+        candidate, config, now=20
+    ) is None
+    assert auto_buy_discovery_rejection(
+        candidate, config, now=41
+    ) == "signal is stale"
+
+    candidate.liquidity_usd = 49_999
+    assert auto_buy_discovery_rejection(
+        candidate, config, now=20
+    ) == "liquidity is below the automatic-discovery minimum"
+
+
+def test_auto_buy_discovery_arms_a_new_qualified_mint(
+    tmp_path: Path,
+) -> None:
+    quote = market_quote(
+        liquidity=60_000,
+        market_cap=100_000,
+        buys=60,
+        sells=20,
+        volume=15_000,
+        change=5,
+    )
+    now = 1_000.0
+    book = RecommendationBook(pool_size=10, ttl_seconds=60)
+    candidate = book.add(quote, CoinIntelligence().score(quote), now=now)
+    assert candidate is not None
+    book.update(quote, now=now + 5)
+    book.update(quote, now=now + 10)
+    candidate.updated_at = time.time()
+    assert candidate.decision == "BUY NOW"
+
+    store = SQLiteStore(str(tmp_path / "discovery-arm.db"))
+    config = settings(
+        tmp_path / "discovery-arm.db",
+        auto_buy_enabled=True,
+        auto_buy_discovery=True,
+        auto_buy_discovery_min_score=70,
+        auto_buy_discovery_min_liquidity_usd=50_000,
+        auto_buy_signal_max_age_seconds=30,
+    )
+    guard = LaunchGuard(config, store)
+    asyncio.run(guard._maybe_auto_buy(candidate))
+
+    policy = store.load_auto_buy_policy(candidate.mint)
+    assert policy is not None
+    assert policy["armed"] == 1
+    assert policy["symbol"] == candidate.symbol
+    store.close()
+
+
 def test_falling_volume_blocks_entry_confirmation() -> None:
     initial = market_quote(
         liquidity=50_000,
@@ -1512,6 +1819,52 @@ def test_entry_decision_avoids_heavy_selloff() -> None:
 
     assert candidate.decision == "AVOID"
     assert candidate.decision_reason == "falling price with heavy selling"
+
+
+def test_owned_portfolio_exit_can_trigger_without_cost_basis(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(str(tmp_path / "owned-exit.db"))
+    config = settings(
+        tmp_path / "owned-exit.db",
+        auto_sell_enabled=True,
+        auto_sell_live=False,
+        auto_sell_portfolio_signals=True,
+        auto_sell_min_value_usd=1.0,
+    )
+    guard = LaunchGuard(config, store)
+    signal = PortfolioSignal(
+        chain="solana",
+        token_address="MintOwned111",
+        symbol="OWN",
+        quantity=100,
+        current_price=0.1,
+        price_currency="USD",
+        current_value_usd=10.0,
+        pnl_pct=None,
+        decision="EXIT WARNING",
+        reason="momentum reversal",
+        price_change_m5_pct=-10,
+        buys_m5=2,
+        sells_m5=8,
+        liquidity_usd=20_000,
+        entry_price=None,
+        peak_price=0.12,
+    )
+    balance = SolanaTokenHolding(
+        mint="MintOwned111",
+        amount=100,
+        raw_amount=100_000_000,
+        decimals=6,
+    )
+
+    asyncio.run(guard._maybe_auto_sell(signal, balance))
+
+    assert (
+        "solana:MintOwned111:portfolio-signal:exit-warning"
+        in guard.auto_sell_dry_run_seen
+    )
+    store.close()
 
 
 def test_portfolio_advisor_uses_cost_basis_for_partial_profit() -> None:
