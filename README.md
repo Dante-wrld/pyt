@@ -3,7 +3,7 @@
 A safety-first Python monitor and paper trader for Solana launches and
 multichain crypto tokens.
 
-Version 0.8 **never signs or submits transactions**. It can monitor Pump.fun
+Version 0.9 **never signs or submits transactions**. It can monitor Pump.fun
 new-token events, public Solana and EVM wallet activity, HyperCore holdings and
 fills, and token profiles on Ethereum, Base, BNB Smart Chain, BOB, Monad,
 Robinhood Chain, and HyperEVM. It applies configurable gates, ranks intelligence-qualified paper
@@ -21,6 +21,8 @@ candidates, opens simulated Solana positions, and records activity in SQLite.
 - Prints a gold top-10 paper watchlist and continuously re-ranks it using bounded live price momentum.
 - Classifies qualified tokens as `BUY NOW`, `WAIT FOR PULLBACK`, `BUY ZONE`,
   `WATCH`, or `AVOID` and alerts when an anchored entry zone is reached.
+- Optionally sends explainable, state-change-deduplicated Pushover alerts to
+  your phone without connecting to a trading account.
 - Discovers crypto-token profiles across seven EVM networks and prints the chain,
   USD price, exact `0x` contract, and DEX Screener market link.
 - Filters official and recognizable wrapped stock tokens from recommendations.
@@ -108,6 +110,13 @@ pytest
 | `BUY_NOW_MIN_RATIO` | `1.2` | Minimum five-minute buyer/seller ratio for `BUY NOW` |
 | `AVOID_ENTRY_MOMENTUM_PCT` | `-8` | Falling five-minute move used by the adverse-entry gate |
 | `AVOID_ENTRY_SELL_PRESSURE_RATIO` | `2` | Seller/buyer pressure required with falling momentum for `AVOID` |
+| `PUSHOVER_ENABLED` | `false` | Enable optional phone notifications |
+| `PUSHOVER_APP_TOKEN` | empty | Private 30-character token for your Pushover application |
+| `PUSHOVER_USER_KEY` | empty | Private 30-character Pushover user key |
+| `PUSHOVER_DEVICE` | empty | Optional device name; empty sends to all your Pushover devices |
+| `PUSHOVER_ALERT_DECISIONS` | `BUY NOW,BUY ZONE,WAIT FOR PULLBACK,AVOID` | Decision changes that may notify |
+| `PUSHOVER_MIN_SCORE` | `60` | Minimum live signal score required for phone alerts |
+| `PUSHOVER_COOLDOWN_SECONDS` | `300` | Minimum delay between different alerts for one token |
 | `COLOR_OUTPUT` | `true` | Use gold ANSI terminal output when supported |
 | `ROBINHOOD_TOKEN_ADDRESSES` | empty | Comma-separated Robinhood Chain `0x` contracts to monitor in addition to discovery |
 | `ETHEREUM_TOKEN_ADDRESSES`, `BASE_TOKEN_ADDRESSES`, `BNB_TOKEN_ADDRESSES`, `BOB_TOKEN_ADDRESSES`, `MONAD_TOKEN_ADDRESSES`, `HYPEREVM_TOKEN_ADDRESSES` | empty | Exact contracts to monitor per chain |
@@ -162,6 +171,7 @@ Official references:
 - [Monad network information](https://docs.monad.xyz/developer-essentials/network-information)
 - [Hyperliquid HyperEVM](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/hyperevm)
 - [Hyperliquid Info endpoint](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint)
+- [Pushover Message API](https://pushover.net/api)
 
 
 ## Intelligent launch filter
@@ -254,6 +264,45 @@ one-time alert for that transition.
 These states are deterministic heuristics based on incomplete market data—not
 predictions or instructions to trade. Launch Guard still never requests a
 wallet key, Fomo login, Robinhood credentials, or permission to place orders.
+
+### Optional phone alerts with Pushover
+
+Phone notifications use Pushover's HTTPS Message API and remain separate from
+every exchange or wallet. Create a Pushover account, install its phone app,
+register a Launch Guard application, and copy the application token and your
+user key into your local `.env`:
+
+```dotenv
+PUSHOVER_ENABLED=true
+PUSHOVER_APP_TOKEN=YOUR_30_CHARACTER_APP_TOKEN
+PUSHOVER_USER_KEY=YOUR_30_CHARACTER_USER_KEY
+PUSHOVER_DEVICE=
+PUSHOVER_ALERT_DECISIONS=BUY NOW,BUY ZONE,WAIT FOR PULLBACK,AVOID
+PUSHOVER_MIN_SCORE=60
+PUSHOVER_COOLDOWN_SECONDS=300
+```
+
+Never commit the token or user key to GitHub. They are notification credentials,
+not trading credentials, but they should still be kept private.
+
+Verify the connection before starting the scanner:
+
+```bash
+launch-guard --test-notification
+```
+
+When monitoring is active, Launch Guard sends only configured decision states
+that meet the minimum score. It stores successful sends in SQLite, so restarting
+the program does not repeat the same state for the same token. A later state
+change can notify after the cooldown. Time-sensitive `BUY ZONE` and safety
+`AVOID` transitions bypass the cooldown but are still deduplicated. `AVOID`
+also bypasses the minimum-score filter so an invalidation is not hidden after
+the score falls. Each message includes the chain, score,
+price, anchored entry zone when available, momentum, liquidity, volume trend,
+risk, decision reason, and a DEX Screener link.
+
+`WATCH` is intentionally excluded from the default phone list to reduce noise.
+Add it to `PUSHOVER_ALERT_DECISIONS` if you want those notifications too.
 
 ### Fomo multichain recommendations and wallet monitoring
 
