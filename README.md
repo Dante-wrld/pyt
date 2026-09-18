@@ -2,13 +2,14 @@
 
 A safety-first Python monitor and paper trader for newly created Pump.fun tokens.
 
-Version 0.2 **never signs or submits transactions**. It can monitor new-token events or a public Solana trader wallet, apply configurable gates, open simulated positions, follow prices through a public market-data endpoint, and record decisions and P&L in SQLite.
+Version 0.5 **never signs or submits transactions**. It can monitor new-token events or a public Solana trader wallet, apply configurable gates, rank intelligence-qualified paper candidates, open simulated positions, follow prices through a public market-data endpoint, and record decisions and P&L in SQLite.
 
 ## What it does
 
 - Receives real-time new-token events from PumpPortal.\n- Watches public trader wallets through Solana RPC without requiring wallet credentials.\n- Records wallet buys/sells and can paper-copy qualifying buys.
 - Rejects launches that lack enough pricing data or violate configured limits.
 - Scores observed launches with separate safety and momentum components.\n- Uses a CORE tier for stronger setups and a $5 MOONSHOT tier for higher-risk setups.\n- Limits position size, concurrent positions, and total exposure.
+- Prints a gold top-10 paper watchlist and continuously re-ranks it using bounded live price momentum.
 - Simulates take-profit and stop-loss exits using subsequent trade events.
 - Persists launches, decisions, positions, and fills in `launch_guard.db`.
 - Reconnects after WebSocket failures.
@@ -81,6 +82,11 @@ pytest
 | `PRICE_POLL_SECONDS` | `5` | Seconds between paper-position price checks |
 | `COPY_MIN_LIQUIDITY_USD` | `10000` | Minimum liquidity for a copied paper entry |
 | `REJECT_UNKNOWN_PRICE` | `true` | Reject launches without a calculable price |
+| `RECOMMENDATION_LIMIT` | `10` | Number of ranked paper candidates shown, from 1 through 10 |
+| `RECOMMENDATION_POOL_SIZE` | `30` | Qualified candidates retained for live ranking |
+| `RECOMMENDATION_POLL_SECONDS` | `15` | Seconds between quote refreshes and ranking updates |
+| `RECOMMENDATION_TTL_SECONDS` | `1800` | Seconds before a candidate ages out of the watchlist |
+| `COLOR_OUTPUT` | `true` | Use gold ANSI terminal output when supported |
 
 The defaults are engineering examples, **not financial recommendations**. They should be evaluated in paper mode over a meaningful sample before any live-execution module is considered.
 
@@ -141,6 +147,29 @@ transactions, and the possibility of a total loss.
 Each scoring result is stored in the `intelligence_scores` SQLite table with
 its component scores and reasons, allowing thresholds to be calibrated from
 paper results instead of intuition.
+
+### Live recommended-paper-buy watchlist
+
+When launch monitoring is active, every CORE or MOONSHOT result enters an
+in-memory watchlist even when the paper portfolio already has three open
+positions. Every 15 seconds the bot refreshes current quotes and prints up to
+10 gold rows with the rank, tier, signal score, price rise since qualification,
+five-minute change, liquidity, current price, and exact mint.
+
+The live signal score keeps the original intelligence score as the main input.
+The rise-since-observation and five-minute price inputs are capped before they
+are added, so a brief extreme pump cannot dominate the ranking solely because
+of its percentage increase. The list expires candidates after 30 minutes by
+default and starts fresh when the process restarts.
+
+Use both launch scanning and public-wallet monitoring together:
+
+```bash
+launch-guard --mode both
+```
+
+The label is a paper-trading model signal, not a statement that a token will
+rise. Rankings can reverse quickly, and the bot does not submit a real order.
 
 
 ## Adaptive exits and re-entry

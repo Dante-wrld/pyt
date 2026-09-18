@@ -5,11 +5,6 @@ from pathlib import Path
 import pytest
 
 from solana_launch_guard.config import Settings
-from solana_launch_guard.intelligence import CoinIntelligence
-from solana_launch_guard.market import MarketQuote
-from solana_launch_guard.strategy import AdaptiveStrategy
-from solana_launch_guard.wallet import parse_wallet_trades
-
 from solana_launch_guard.core import (
     Launch,
     PaperBroker,
@@ -17,6 +12,14 @@ from solana_launch_guard.core import (
     SQLiteStore,
     indicative_price,
 )
+from solana_launch_guard.intelligence import CoinIntelligence
+from solana_launch_guard.market import MarketQuote
+from solana_launch_guard.recommendations import (
+    RecommendationBook,
+    format_recommendations,
+)
+from solana_launch_guard.strategy import AdaptiveStrategy
+from solana_launch_guard.wallet import parse_wallet_trades
 
 
 def settings(database_path: Path, **overrides: object) -> Settings:
@@ -91,6 +94,22 @@ def test_risk_engine_rejects_large_creator_buy(tmp_path: Path) -> None:
 
     assert decision.accepted is False
     assert any("creator buy" in reason for reason in decision.reasons)
+    store.close()
+
+
+def test_candidate_risk_ignores_full_paper_portfolio(tmp_path: Path) -> None:
+    config = settings(
+        tmp_path / "test.db",
+        max_open_positions=1,
+        max_total_exposure_sol=0.02,
+    )
+    store = SQLiteStore(config.database_path)
+    broker = PaperBroker(config, store)
+    broker.open(Launch.from_payload(launch_payload(mint="MintOne")))
+
+    candidate = Launch.from_payload(launch_payload(mint="MintTwo"))
+    assert RiskEngine(config).evaluate(candidate, broker).accepted is False
+    assert RiskEngine(config).evaluate_candidate(candidate).accepted is True
     store.close()
 
 
@@ -240,6 +259,73 @@ def test_intelligence_hard_rejects_thin_liquidity() -> None:
 
     assert result.tier == "REJECT"
     assert result.total_score == 0
+
+
+def test_recommendations_rank_with_bounded_live_momentum() -> None:
+    intelligence = CoinIntelligence()
+    quote_a = market_quote(
+        liquidity=50_000,
+        market_cap=100_000,
+        buys=60,
+        sells=20,
+        volume=15_000,
+        change=15,
+    )
+    quote_b = MarketQuote(
+        mint="MintScore222",
+        symbol="FAST",
+        price_sol=0.000001,
+        liquidity_usd=50_000,
+        market_cap_usd=100_000,
+        pair_address="Pair222",
+        pair_created_at_ms=1,
+        buys_m5=60,
+        sells_m5=20,
+        volume_m5_usd=15_000,
+        price_change_m5_pct=15,
+    )
+    book = RecommendationBook(pool_size=10, ttl_seconds=60)
+    book.add(quote_a, intelligence.score(quote_a), now=0)
+    book.add(quote_b, intelligence.score(quote_b), now=0)
+    book.update(
+        MarketQuote(
+            mint=quote_b.mint,
+            symbol=quote_b.symbol,
+            price_sol=0.0000012,
+            liquidity_usd=quote_b.liquidity_usd,
+            market_cap_usd=quote_b.market_cap_usd,
+            pair_address=quote_b.pair_address,
+            pair_created_at_ms=quote_b.pair_created_at_ms,
+            buys_m5=quote_b.buys_m5,
+            sells_m5=quote_b.sells_m5,
+            volume_m5_usd=quote_b.volume_m5_usd,
+            price_change_m5_pct=20,
+        ),
+        now=5,
+    )
+
+    ranked = book.ranked()
+
+    assert ranked[0].mint == "MintScore222"
+    assert ranked[0].rise_pct == pytest.approx(20)
+    output = format_recommendations(ranked, color=True)
+    assert "\033[38;5;220m" in output
+    assert "mint=MintScore222" in output
+
+
+def test_recommendations_expire_old_candidates() -> None:
+    quote = market_quote(
+        liquidity=50_000,
+        market_cap=100_000,
+        buys=60,
+        sells=20,
+        volume=15_000,
+        change=15,
+    )
+    book = RecommendationBook(pool_size=10, ttl_seconds=10)
+    book.add(quote, CoinIntelligence().score(quote), now=0)
+    book.expire(now=11)
+    assert book.ranked() == []
 
 
 def strategy_position() -> object:
