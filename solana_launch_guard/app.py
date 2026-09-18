@@ -29,6 +29,14 @@ from .multichain import (
     HyperCoreWatcher,
 )
 from .notifications import DecisionNotifier, PushoverClient
+from .portfolio import (
+    OwnedHolding,
+    PortfolioAdvisor,
+    build_portfolio_snapshot,
+    format_portfolio_dashboard,
+    read_portfolio_snapshot,
+    write_portfolio_snapshot,
+)
 from .recommendations import (
     RecommendationBook,
     build_snapshot,
@@ -81,12 +89,30 @@ class LaunchGuard:
         self.multichain_pending_count = 0
         self.multichain_last_result: dict[str, tuple[str, int]] = {}
         self.recommendation_console_output = True
+        self.portfolio_monitor_enabled = False
+        self.portfolio_last_decisions: dict[str, str] = {}
         self.recommendations = RecommendationBook(
             pool_size=settings.recommendation_pool_size,
             ttl_seconds=settings.recommendation_ttl_seconds,
             pullback_trigger_pct=settings.pullback_trigger_pct,
             pullback_zone_min_pct=settings.pullback_zone_min_pct,
             pullback_zone_max_pct=settings.pullback_zone_max_pct,
+            pullback_started_pct=settings.pullback_started_pct,
+            entry_confirmation_polls=settings.entry_confirmation_polls,
+            entry_min_signal_score=settings.entry_min_signal_score,
+            entry_min_liquidity_retention_pct=(
+                settings.entry_min_liquidity_retention_pct
+            ),
+            entry_require_nonfalling_volume=(
+                settings.entry_require_nonfalling_volume
+            ),
+            core_stop_loss_pct=settings.stop_loss_pct,
+            core_take_profit_pct=settings.take_profit_pct,
+            moonshot_stop_loss_pct=settings.moonshot_stop_loss_pct,
+            moonshot_take_profit_pct=settings.moonshot_take_profit_pct,
+            min_entry_reward_risk_ratio=(
+                settings.min_entry_reward_risk_ratio
+            ),
             buy_now_min_ratio=settings.buy_now_min_ratio,
             avoid_momentum_pct=settings.avoid_entry_momentum_pct,
             avoid_sell_pressure_ratio=(
@@ -120,6 +146,24 @@ class LaunchGuard:
             reentry_buy_sell_ratio=settings.reentry_buy_sell_ratio,
             max_reentries=settings.max_reentries,
         )
+        self.portfolio_advisor = PortfolioAdvisor(
+            take_partial_pct=settings.take_profit_pct,
+            stop_loss_pct=settings.stop_loss_pct,
+            trailing_activation_pct=settings.trailing_activation_pct,
+            trailing_stop_pct=settings.trailing_stop_pct,
+            momentum_exit_pct=settings.momentum_exit_pct,
+            sell_pressure_ratio=settings.sell_pressure_ratio,
+            liquidity_drop_pct=settings.liquidity_drop_pct,
+        )
+        for state in store.load_portfolio_states():
+            self.portfolio_advisor.restore_state(
+                chain=str(state["chain"]),
+                token_address=str(state["token_address"]),
+                peak_price=float(state["peak_price"]),
+                baseline_liquidity_usd=float(
+                    state["baseline_liquidity_usd"]
+                ),
+            )
 
     async def handle_launch(self, payload: Mapping[str, Any]) -> None:
         try:
@@ -546,8 +590,6 @@ class LaunchGuard:
     ) -> None:
         if token_amount <= 0 or cost_usd <= 0:
             raise ValueError("token amount and cost USD must be positive")
-        if self.broker.has_position(mint):
-            raise ValueError("an open paper position already exists for this mint")
 
         quote, sol_usd = await asyncio.gather(
             self.oracle.quote(mint),
@@ -574,14 +616,27 @@ class LaunchGuard:
             received_at="",
             raw={"source": "fomo_manual_import"},
         )
-        position = self.broker.open(
-            launch,
-            reason="FOMO_MANUAL_IMPORT",
-            cost_sol=cost_usd / sol_usd,
+        position = self.broker.positions.get(mint)
+        if position is None or position.status != "OPEN":
+            position = self.broker.open(
+                launch,
+                reason="FOMO_MANUAL_IMPORT",
+                cost_sol=cost_usd / sol_usd,
+            )
+            self.strategy.register_open(position, quote, "IMPORTED")
+        self.store.save_owned_holding(
+            OwnedHolding(
+                chain="solana",
+                token_address=mint,
+                symbol=symbol,
+                quantity=token_amount,
+                entry_price=entry_price_usd,
+                price_currency="USD",
+                cost_amount=cost_usd,
+            )
         )
-        self.strategy.register_open(position, quote, "IMPORTED")
         LOGGER.info(
-            "IMPORTED FOMO POSITION %-10s mint=%s tokens=%.8g "
+            "SAVED READ-ONLY HOLDING %-10s mint=%s tokens=%.8g "
             "cost=$%.2f entry=$%.12g current=$%.12g",
             symbol,
             mint,
@@ -590,6 +645,122 @@ class LaunchGuard:
             entry_price_usd,
             quote.price_sol * sol_usd,
         )
+
+    async def run_portfolio_monitor(self) -> None:
+        wallet = self.settings.solana_wallet_address
+        rpc = SolanaRpc(self.settings.solana_rpc_http_url)
+        LOGGER.info(
+            "Read-only holdings monitor active%s (refresh %.0fs)",
+            f" for {wallet}" if wallet else " for imported holdings",
+            self.settings.portfolio_poll_seconds,
+        )
+        backoff = 1.0
+        while True:
+            try:
+                saved = {
+                    item.token_address: item
+                    for item in self.store.load_owned_holdings("solana")
+                }
+                if wallet:
+                    balances = await rpc.token_holdings(wallet)
+                    holdings = []
+                    for balance in balances:
+                        basis = saved.get(balance.mint)
+                        holdings.append(
+                            OwnedHolding(
+                                chain="solana",
+                                token_address=balance.mint,
+                                symbol=(
+                                    basis.symbol
+                                    if basis is not None
+                                    else balance.mint[:8]
+                                ),
+                                quantity=balance.amount,
+                                entry_price=(
+                                    basis.entry_price if basis is not None else None
+                                ),
+                                price_currency=(
+                                    basis.price_currency if basis is not None else None
+                                ),
+                                cost_amount=(
+                                    basis.cost_amount if basis is not None else None
+                                ),
+                            )
+                        )
+                else:
+                    holdings = list(saved.values())
+
+                semaphore = asyncio.Semaphore(5)
+
+                async def evaluate(holding: OwnedHolding):
+                    async with semaphore:
+                        quote = await self.oracle.quote(
+                            holding.token_address, chain=holding.chain
+                        )
+                    return holding, quote
+
+                results = await asyncio.gather(
+                    *(evaluate(holding) for holding in holdings)
+                )
+                sol_usd = await self.oracle.sol_usd_price() if results else None
+                signals = [
+                    self.portfolio_advisor.evaluate(
+                        holding, quote, sol_usd=sol_usd
+                    )
+                    for holding, quote in results
+                ]
+                for signal in signals:
+                    state = self.portfolio_advisor.state_for(
+                        signal.chain, signal.token_address
+                    )
+                    if state is not None:
+                        peak_price, baseline_liquidity = state
+                        self.store.save_portfolio_state(
+                            chain=signal.chain,
+                            token_address=signal.token_address,
+                            peak_price=peak_price,
+                            baseline_liquidity_usd=baseline_liquidity,
+                        )
+                signals = [
+                    signal
+                    for signal in signals
+                    if signal.current_value_usd is None
+                    or signal.current_value_usd
+                    >= self.settings.portfolio_min_value_usd
+                ]
+                for signal in signals:
+                    key = f"{signal.chain}:{signal.token_address.casefold()}"
+                    previous = self.portfolio_last_decisions.get(key)
+                    if previous != signal.decision:
+                        LOGGER.info(
+                            "PORTFOLIO %-14s %-10s mint=%s reason=%s",
+                            signal.decision,
+                            signal.symbol,
+                            signal.token_address,
+                            signal.reason,
+                        )
+                        self.portfolio_last_decisions[key] = signal.decision
+
+                write_portfolio_snapshot(
+                    self.settings.portfolio_snapshot_path,
+                    build_portfolio_snapshot(
+                        signals,
+                        wallet=wallet,
+                        poll_seconds=self.settings.portfolio_poll_seconds,
+                    ),
+                )
+                backoff = 1.0
+                await asyncio.sleep(self.settings.portfolio_poll_seconds)
+            except asyncio.CancelledError:
+                raise
+            except (ConnectionError, OSError, ValueError) as exc:
+                LOGGER.warning(
+                    "Portfolio monitor unavailable (%s); retrying in %.0fs",
+                    exc,
+                    backoff,
+                )
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 30)
 
     async def run_recommendation_monitor(self) -> None:
         LOGGER.info(
@@ -650,12 +821,16 @@ class LaunchGuard:
                             candidate.signal_score,
                         )
 
-            alerts = self.recommendations.pop_buy_zone_alerts()
+            alerts = (
+                self.recommendations.pop_pullback_alerts()
+                + self.recommendations.pop_buy_zone_alerts()
+            )
             for candidate in alerts:
                 price_prefix = "$" if candidate.price_currency == "USD" else ""
                 LOGGER.info(
-                    "BUY ZONE ALERT %s chain=%s current=%s%.12g "
+                    "%s ALERT %s chain=%s current=%s%.12g "
                     "entry=%s%.12g-%s%.12g",
+                    candidate.decision,
                     candidate.symbol,
                     candidate.chain,
                     price_prefix,
@@ -892,9 +1067,11 @@ class LaunchGuard:
         return tasks
 
     async def run(self, mode: str) -> None:
-        tasks: list[asyncio.Task[Any]] = [
-            asyncio.create_task(self.run_price_monitor())
-        ]
+        tasks: list[asyncio.Task[Any]] = []
+        if mode != "portfolio":
+            tasks.append(asyncio.create_task(self.run_price_monitor()))
+        if self.portfolio_monitor_enabled:
+            tasks.append(asyncio.create_task(self.run_portfolio_monitor()))
         if mode in {"launches", "both", "all"}:
             tasks.append(asyncio.create_task(self.run_launch_feed()))
 
@@ -1016,11 +1193,13 @@ def build_parser() -> argparse.ArgumentParser:
             "robinhood",
             "multichain",
             "all",
+            "portfolio",
         ),
         default="launches",
         help=(
             "feed to run: Solana launches, wallet copy, both Solana feeds, "
-            "Robinhood-only, all configured chains, or every feed"
+            "Robinhood-only, all configured chains, every feed, or only "
+            "your read-only holdings"
         ),
     )
     parser.add_argument(
@@ -1074,12 +1253,30 @@ def build_parser() -> argparse.ArgumentParser:
         help="open a separate macOS Terminal with the live ranked watchlist",
     )
     parser.add_argument(
+        "--portfolio-window",
+        action="store_true",
+        help=(
+            "open a separate macOS Terminal with read-only sell guidance "
+            "for current holdings"
+        ),
+    )
+    parser.add_argument(
         "--recommendations-display",
         action="store_true",
         help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--recommendations-parent-pid",
+        type=int,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--portfolio-display",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--portfolio-parent-pid",
         type=int,
         help=argparse.SUPPRESS,
     )
@@ -1109,6 +1306,29 @@ def run_recommendation_display(
             }
             print("\033[2J\033[H", end="")
             print(format_dashboard(snapshot, color=sys.stdout.isatty()), flush=True)
+            time.sleep(1)
+    except KeyboardInterrupt:
+        pass
+
+
+def run_portfolio_display(
+    snapshot_path: str, parent_pid: int | None = None
+) -> None:
+    try:
+        while parent_pid is None or _process_exists(parent_pid):
+            snapshot = read_portfolio_snapshot(snapshot_path) or {
+                "generated_at": 0,
+                "wallet": None,
+                "poll_seconds": 15,
+                "signals": [],
+            }
+            print("\033[2J\033[H", end="")
+            print(
+                format_portfolio_dashboard(
+                    snapshot, color=sys.stdout.isatty()
+                ),
+                flush=True,
+            )
             time.sleep(1)
     except KeyboardInterrupt:
         pass
@@ -1148,6 +1368,38 @@ def open_recommendation_terminal(snapshot_path: str) -> None:
         raise ValueError(f"could not open recommendation Terminal: {exc}") from exc
 
 
+def open_portfolio_terminal(snapshot_path: str) -> None:
+    if sys.platform != "darwin":
+        raise ValueError("--portfolio-window currently requires macOS Terminal")
+    command_parts = [
+        sys.executable,
+        "-m",
+        "solana_launch_guard.app",
+        "--portfolio-display",
+        "--portfolio-parent-pid",
+        str(os.getpid()),
+    ]
+    command = "cd {} && {}".format(
+        shlex.quote(os.getcwd()),
+        " ".join(shlex.quote(part) for part in command_parts),
+    )
+    script = (
+        'tell application "Terminal"\n'
+        "activate\n"
+        f"do script {json.dumps(command)}\n"
+        "end tell"
+    )
+    try:
+        subprocess.run(
+            ["osascript", "-e", script],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise ValueError(f"could not open portfolio Terminal: {exc}") from exc
+
+
 def main() -> None:
     args = build_parser().parse_args()
     settings = Settings.from_env()
@@ -1160,6 +1412,12 @@ def main() -> None:
         run_recommendation_display(
             settings.recommendation_snapshot_path,
             args.recommendations_parent_pid,
+        )
+        return
+    if args.portfolio_display:
+        run_portfolio_display(
+            settings.portfolio_snapshot_path,
+            args.portfolio_parent_pid,
         )
         return
 
@@ -1200,6 +1458,16 @@ def main() -> None:
         elif args.demo:
             asyncio.run(run_demo(guard))
         else:
+            if args.mode == "portfolio":
+                if (
+                    not settings.solana_wallet_address
+                    and not store.load_owned_holdings("solana")
+                ):
+                    raise ValueError(
+                        "portfolio mode requires SOLANA_WALLET_ADDRESS "
+                        "or an imported holding"
+                    )
+                guard.portfolio_monitor_enabled = True
             if args.recommendations_window:
                 if args.mode not in {
                     "launches",
@@ -1223,6 +1491,25 @@ def main() -> None:
                     settings.recommendation_snapshot_path
                 )
                 guard.recommendation_console_output = False
+            if args.portfolio_window:
+                if (
+                    not settings.solana_wallet_address
+                    and not store.load_owned_holdings("solana")
+                ):
+                    raise ValueError(
+                        "--portfolio-window requires SOLANA_WALLET_ADDRESS "
+                        "or an imported holding"
+                    )
+                write_portfolio_snapshot(
+                    settings.portfolio_snapshot_path,
+                    build_portfolio_snapshot(
+                        [],
+                        wallet=settings.solana_wallet_address,
+                        poll_seconds=settings.portfolio_poll_seconds,
+                    ),
+                )
+                open_portfolio_terminal(settings.portfolio_snapshot_path)
+                guard.portfolio_monitor_enabled = True
             asyncio.run(guard.run(args.mode))
     except KeyboardInterrupt:
         LOGGER.info("Stopped by user")

@@ -97,6 +97,7 @@ class Settings:
     log_level: str
     solana_rpc_http_url: str = "https://api.mainnet-beta.solana.com"
     solana_rpc_ws_url: str = "wss://api.mainnet-beta.solana.com"
+    solana_wallet_address: str | None = None
     watched_wallets: tuple[str, ...] = ()
     price_poll_seconds: float = 5.0
     copy_min_liquidity_usd: float = 10_000.0
@@ -129,6 +130,12 @@ class Settings:
     pullback_trigger_pct: float = 8.0
     pullback_zone_min_pct: float = 4.0
     pullback_zone_max_pct: float = 6.0
+    pullback_started_pct: float = 2.0
+    entry_confirmation_polls: int = 3
+    entry_min_signal_score: int = 65
+    entry_min_liquidity_retention_pct: float = 80.0
+    entry_require_nonfalling_volume: bool = True
+    min_entry_reward_risk_ratio: float = 2.0
     buy_now_min_ratio: float = 1.2
     avoid_entry_momentum_pct: float = -8.0
     avoid_entry_sell_pressure_ratio: float = 2.0
@@ -139,6 +146,7 @@ class Settings:
     pushover_alert_decisions: tuple[str, ...] = (
         "BUY NOW",
         "BUY ZONE",
+        "PULLBACK STARTED",
         "WAIT FOR PULLBACK",
         "AVOID",
     )
@@ -146,6 +154,9 @@ class Settings:
     pushover_cooldown_seconds: float = 300.0
     color_output: bool = True
     recommendation_snapshot_path: str = "launch_guard_recommendations.json"
+    portfolio_snapshot_path: str = "launch_guard_portfolio.json"
+    portfolio_poll_seconds: float = 15.0
+    portfolio_min_value_usd: float = 0.01
     ethereum_token_addresses: tuple[str, ...] = ()
     base_token_addresses: tuple[str, ...] = ()
     bnb_token_addresses: tuple[str, ...] = ()
@@ -189,6 +200,9 @@ class Settings:
             ),
             solana_rpc_ws_url=os.getenv(
                 "SOLANA_RPC_WS_URL", "wss://api.mainnet-beta.solana.com"
+            ),
+            solana_wallet_address=(
+                os.getenv("SOLANA_WALLET_ADDRESS") or None
             ),
             watched_wallets=_wallets("WATCHED_WALLETS"),
             price_poll_seconds=_float("PRICE_POLL_SECONDS", 5.0),
@@ -238,6 +252,18 @@ class Settings:
             pullback_trigger_pct=_float("PULLBACK_TRIGGER_PCT", 8.0),
             pullback_zone_min_pct=_float("PULLBACK_ZONE_MIN_PCT", 4.0),
             pullback_zone_max_pct=_float("PULLBACK_ZONE_MAX_PCT", 6.0),
+            pullback_started_pct=_float("PULLBACK_STARTED_PCT", 2.0),
+            entry_confirmation_polls=_int("ENTRY_CONFIRMATION_POLLS", 3),
+            entry_min_signal_score=_int("ENTRY_MIN_SIGNAL_SCORE", 65),
+            entry_min_liquidity_retention_pct=_float(
+                "ENTRY_MIN_LIQUIDITY_RETENTION_PCT", 80.0
+            ),
+            entry_require_nonfalling_volume=_bool(
+                "ENTRY_REQUIRE_NONFALLING_VOLUME", True
+            ),
+            min_entry_reward_risk_ratio=_float(
+                "MIN_ENTRY_REWARD_RISK_RATIO", 2.0
+            ),
             buy_now_min_ratio=_float("BUY_NOW_MIN_RATIO", 1.2),
             avoid_entry_momentum_pct=float(
                 os.getenv("AVOID_ENTRY_MOMENTUM_PCT", "-8")
@@ -251,7 +277,7 @@ class Settings:
             pushover_device=os.getenv("PUSHOVER_DEVICE") or None,
             pushover_alert_decisions=_csv_upper(
                 "PUSHOVER_ALERT_DECISIONS",
-                "BUY NOW,BUY ZONE,WAIT FOR PULLBACK,AVOID",
+                "BUY NOW,BUY ZONE,PULLBACK STARTED,WAIT FOR PULLBACK,AVOID",
             ),
             pushover_min_score=_int("PUSHOVER_MIN_SCORE", 60),
             pushover_cooldown_seconds=_float(
@@ -261,6 +287,13 @@ class Settings:
             recommendation_snapshot_path=os.getenv(
                 "RECOMMENDATION_SNAPSHOT_PATH",
                 "launch_guard_recommendations.json",
+            ),
+            portfolio_snapshot_path=os.getenv(
+                "PORTFOLIO_SNAPSHOT_PATH", "launch_guard_portfolio.json"
+            ),
+            portfolio_poll_seconds=_float("PORTFOLIO_POLL_SECONDS", 15.0),
+            portfolio_min_value_usd=_float(
+                "PORTFOLIO_MIN_VALUE_USD", 0.01
             ),
             ethereum_token_addresses=_addresses(
                 "ETHEREUM_TOKEN_ADDRESSES"
@@ -310,6 +343,10 @@ class Settings:
             raise ValueError("SOLANA_RPC_HTTP_URL must begin with http:// or https://")
         if not self.solana_rpc_ws_url.startswith(("ws://", "wss://")):
             raise ValueError("SOLANA_RPC_WS_URL must begin with ws:// or wss://")
+        if self.solana_wallet_address and re.fullmatch(
+            r"[1-9A-HJ-NP-Za-km-z]{32,44}", self.solana_wallet_address
+        ) is None:
+            raise ValueError("SOLANA_WALLET_ADDRESS must be a public Solana address")
         if self.trade_size_sol <= 0:
             raise ValueError("PAPER_TRADE_SIZE_SOL must be greater than zero")
         if self.max_open_positions < 1:
@@ -326,6 +363,8 @@ class Settings:
             raise ValueError("TAKE_PROFIT_PCT and STOP_LOSS_PCT must be positive")
         if self.price_poll_seconds < 1:
             raise ValueError("PRICE_POLL_SECONDS must be at least one")
+        if self.portfolio_poll_seconds < 10:
+            raise ValueError("PORTFOLIO_POLL_SECONDS must be at least 10")
         if self.standard_trade_size_usd <= 0 or self.moonshot_trade_size_usd <= 0:
             raise ValueError("USD position sizes must be greater than zero")
         if self.max_total_exposure_usd < max(
@@ -364,6 +403,24 @@ class Settings:
             raise ValueError(
                 "PULLBACK_ZONE_MAX_PCT must exceed the minimum and be below 100"
             )
+        if not 0 < self.pullback_started_pct < self.pullback_zone_min_pct:
+            raise ValueError(
+                "PULLBACK_STARTED_PCT must be positive and below "
+                "PULLBACK_ZONE_MIN_PCT"
+            )
+        if self.entry_confirmation_polls < 2:
+            raise ValueError("ENTRY_CONFIRMATION_POLLS must be at least 2")
+        if not 0 <= self.entry_min_signal_score <= 100:
+            raise ValueError("ENTRY_MIN_SIGNAL_SCORE must be 0 through 100")
+        if not 0 < self.entry_min_liquidity_retention_pct <= 100:
+            raise ValueError(
+                "ENTRY_MIN_LIQUIDITY_RETENTION_PCT must be above 0 and at "
+                "most 100"
+            )
+        if self.min_entry_reward_risk_ratio < 1:
+            raise ValueError(
+                "MIN_ENTRY_REWARD_RISK_RATIO must be at least 1"
+            )
         if self.pullback_trigger_pct <= 0:
             raise ValueError("PULLBACK_TRIGGER_PCT must be positive")
         if self.buy_now_min_ratio <= 0:
@@ -377,6 +434,8 @@ class Settings:
         allowed_alerts = {
             "BUY NOW",
             "BUY ZONE",
+            "ENTRY PENDING",
+            "PULLBACK STARTED",
             "WAIT FOR PULLBACK",
             "WATCH",
             "AVOID",

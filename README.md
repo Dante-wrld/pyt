@@ -3,7 +3,7 @@
 A safety-first Python monitor and paper trader for Solana launches and
 multichain crypto tokens.
 
-Version 0.9 **never signs or submits transactions**. It can monitor Pump.fun
+Version 0.12 **never signs or submits transactions**. It can monitor Pump.fun
 new-token events, public Solana and EVM wallet activity, HyperCore holdings and
 fills, and token profiles on Ethereum, Base, BNB Smart Chain, BOB, Monad,
 Robinhood Chain, and HyperEVM. It applies configurable gates, ranks intelligence-qualified paper
@@ -19,8 +19,10 @@ candidates, opens simulated Solana positions, and records activity in SQLite.
 - Uses a CORE tier for stronger setups and a $5 MOONSHOT tier for higher-risk setups.
 - Limits position size, concurrent positions, and total exposure.
 - Prints a gold top-10 paper watchlist and continuously re-ranks it using bounded live price momentum.
-- Classifies qualified tokens as `BUY NOW`, `WAIT FOR PULLBACK`, `BUY ZONE`,
-  `WATCH`, or `AVOID` and alerts when an anchored entry zone is reached.
+- Classifies qualified tokens as `ENTRY PENDING`, `BUY NOW`,
+  `WAIT FOR PULLBACK`, `PULLBACK STARTED`, `BUY ZONE`, `WATCH`, or `AVOID`.
+- Requires repeated entry confirmation and blocks entries when live score,
+  liquidity retention, or volume quality deteriorates.
 - Optionally sends explainable, state-change-deduplicated Pushover alerts to
   your phone without connecting to a trading account.
 - Discovers crypto-token profiles across seven EVM networks and prints the chain,
@@ -28,6 +30,9 @@ candidates, opens simulated Solana positions, and records activity in SQLite.
 - Filters official and recognizable wrapped stock tokens from recommendations.
 - Watches ERC-20 transfers for one shared public EVM address and separately
   reads HyperCore spot balances, perpetual positions, and fills.
+- Reads non-zero SPL-token balances from one public Solana wallet and opens a
+  separate holdings board with `HOLD`, `TAKE PARTIAL`, `PROTECT PROFIT`,
+  `EXIT WARNING`, or `UNPRICED` guidance.
 - Simulates take-profit and stop-loss exits using subsequent trade events.
 - Persists launches, decisions, positions, and fills in `launch_guard.db`.
 - Reconnects after WebSocket failures.
@@ -96,6 +101,7 @@ pytest
 | `DATABASE_PATH` | `launch_guard.db` | SQLite path |
 | `SOLANA_RPC_HTTP_URL` | public mainnet RPC | Transaction lookup endpoint |
 | `SOLANA_RPC_WS_URL` | public mainnet WebSocket | Wallet log subscription endpoint |
+| `SOLANA_WALLET_ADDRESS` | empty | Public Solana address used for read-only current-balance discovery |
 | `WATCHED_WALLETS` | empty | Comma-separated public wallets |
 | `PRICE_POLL_SECONDS` | `5` | Seconds between paper-position price checks |
 | `COPY_MIN_LIQUIDITY_USD` | `10000` | Minimum liquidity for a copied paper entry |
@@ -107,6 +113,12 @@ pytest
 | `PULLBACK_TRIGGER_PCT` | `8` | Rise or five-minute move that anchors a pullback zone |
 | `PULLBACK_ZONE_MIN_PCT` | `4` | Shallow edge of the preferred pullback range |
 | `PULLBACK_ZONE_MAX_PCT` | `6` | Deep edge of the preferred pullback range |
+| `PULLBACK_STARTED_PCT` | `2` | Drop from the tracked peak that changes the state to `PULLBACK STARTED` |
+| `ENTRY_CONFIRMATION_POLLS` | `3` | Consecutive qualifying polls required before a final entry signal |
+| `ENTRY_MIN_SIGNAL_SCORE` | `65` | Minimum live score during entry confirmation |
+| `ENTRY_MIN_LIQUIDITY_RETENTION_PCT` | `80` | Minimum percentage of observed liquidity that must remain |
+| `ENTRY_REQUIRE_NONFALLING_VOLUME` | `true` | Block final entry signals while five-minute volume is falling |
+| `MIN_ENTRY_REWARD_RISK_RATIO` | `2` | Minimum paper objective relative to the configured stop distance |
 | `BUY_NOW_MIN_RATIO` | `1.2` | Minimum five-minute buyer/seller ratio for `BUY NOW` |
 | `AVOID_ENTRY_MOMENTUM_PCT` | `-8` | Falling five-minute move used by the adverse-entry gate |
 | `AVOID_ENTRY_SELL_PRESSURE_RATIO` | `2` | Seller/buyer pressure required with falling momentum for `AVOID` |
@@ -114,10 +126,13 @@ pytest
 | `PUSHOVER_APP_TOKEN` | empty | Private 30-character token for your Pushover application |
 | `PUSHOVER_USER_KEY` | empty | Private 30-character Pushover user key |
 | `PUSHOVER_DEVICE` | empty | Optional device name; empty sends to all your Pushover devices |
-| `PUSHOVER_ALERT_DECISIONS` | `BUY NOW,BUY ZONE,WAIT FOR PULLBACK,AVOID` | Decision changes that may notify |
+| `PUSHOVER_ALERT_DECISIONS` | `BUY NOW,BUY ZONE,PULLBACK STARTED,WAIT FOR PULLBACK,AVOID` | Decision changes that may notify |
 | `PUSHOVER_MIN_SCORE` | `60` | Minimum live signal score required for phone alerts |
 | `PUSHOVER_COOLDOWN_SECONDS` | `300` | Minimum delay between different alerts for one token |
 | `COLOR_OUTPUT` | `true` | Use gold ANSI terminal output when supported |
+| `PORTFOLIO_POLL_SECONDS` | `15` | Seconds between read-only holdings checks (minimum 10) |
+| `PORTFOLIO_MIN_VALUE_USD` | `0.01` | Hide priced wallet dust below this estimated USD value |
+| `PORTFOLIO_SNAPSHOT_PATH` | `launch_guard_portfolio.json` | Local snapshot used by the holdings window |
 | `ROBINHOOD_TOKEN_ADDRESSES` | empty | Comma-separated Robinhood Chain `0x` contracts to monitor in addition to discovery |
 | `ETHEREUM_TOKEN_ADDRESSES`, `BASE_TOKEN_ADDRESSES`, `BNB_TOKEN_ADDRESSES`, `BOB_TOKEN_ADDRESSES`, `MONAD_TOKEN_ADDRESSES`, `HYPEREVM_TOKEN_ADDRESSES` | empty | Exact contracts to monitor per chain |
 | `MULTICHAIN_POLL_SECONDS` | `15` | Seconds between multichain discovery passes (minimum 15) |
@@ -234,23 +249,68 @@ duplicate symbols are reduced to the highest-ranked entry. It also shows the
 number of candidates still waiting for evaluation. The window closes its live
 display when the main scanner process stops.
 
+### Separate read-only holdings window
+
+Put only your public Solana address in `.env`:
+
+```dotenv
+SOLANA_WALLET_ADDRESS=YOUR_PUBLIC_SOLANA_ADDRESS
+```
+
+Then start the scanner and the dedicated holdings board:
+
+```bash
+launch-guard --mode portfolio --portfolio-window
+```
+
+This mode watches holdings only; it does not scan for new recommendations. To
+run both boards alongside every configured feed, use:
+
+```bash
+launch-guard --mode all --recommendations-window --portfolio-window
+```
+
+The holdings board reads current SPL Token and Token-2022 balances using
+Solana JSON-RPC and obtains market data from DEX Screener. It never asks for a
+seed phrase, private key, exchange login, or transaction approval. Signals are
+advisory and do not place or record a real sale.
+
+Market-risk exits can be evaluated without a cost basis. Profit/loss,
+`TAKE PARTIAL`, and cost-based stop guidance require a known entry price. For
+an existing Fomo/Solana holding, record the amount and total USD cost once:
+
+```bash
+launch-guard \
+  --import-fomo-mint ACTUAL_MINT \
+  --import-symbol SYMBOL \
+  --import-token-amount ACTUAL_QUANTITY \
+  --import-cost-usd TOTAL_USD_PAID
+```
+
+The import is a local cost-basis record; it does not connect to Fomo or move
+tokens. Wallet tokens that were not imported remain visible with `P/L=n/a`.
+
 ### Entry-price and pullback decisions
 
 The board is a read-only decision-support system:
 
 ```text
-DISCOVER → SCORE → WAIT / BUY ZONE → ALERT → YOU BUY MANUALLY
+DISCOVER → SCORE → WAIT → CONFIRM → BUY ZONE → ALERT → YOU DECIDE
 ```
 
-Each qualified token receives one of five states:
+Each qualified token receives one of seven states:
 
-- `BUY NOW`: the setup passed the intelligence gates, recent price change is
-  non-negative, buyer flow is sufficient, and the move is not extended;
+- `ENTRY PENDING`: entry conditions are present but have not yet survived the
+  configured number of consecutive checks;
+- `BUY NOW`: an unextended setup passed all entry gates for three consecutive
+  checks by default;
 - `WAIT FOR PULLBACK`: price or five-minute momentum crossed the configured
   extension threshold, so Launch Guard anchors a preferred entry zone 4–6%
   below that price;
-- `BUY ZONE`: price entered the anchored zone with non-negative five-minute
-  movement and buyers at least matching sellers;
+- `PULLBACK STARTED`: price has fallen at least the configured amount from its
+  tracked peak but remains above the anchored entry zone;
+- `BUY ZONE`: price entered the anchored zone and passed the score, liquidity,
+  volume, momentum, and buyer-flow gates for the required consecutive checks;
 - `WATCH`: confirmation is incomplete or price fell through the entry zone;
 - `AVOID`: liquidity fell below the safety floor, liquidity collapsed by more
   than 35%, or falling momentum coincides with heavy sell pressure.
@@ -258,8 +318,19 @@ Each qualified token receives one of five states:
 The pullback zone remains fixed after it is created. It does not recalculate
 from every lower quote. The separate Terminal displays current price, preferred
 entry range, remaining pullback, momentum, liquidity, volume direction, risk,
-and the reason for the current state. A transition into `BUY ZONE` produces a
-one-time alert for that transition.
+and the reason for the current state. Transitions into `PULLBACK STARTED` and
+`BUY ZONE` produce one-time alerts for those transitions.
+
+The entry process is inspired by general risk-discipline and probabilistic
+thinking principles commonly discussed in trading literature. It is not a
+replica of, or strategy endorsed by, any particular author. Requiring repeated
+evidence reduces one-poll signal flips but cannot prevent a market from
+reversing after a confirmed entry.
+
+When an entry becomes confirmed, the board anchors a paper-only entry, stop,
+and first objective. The objective is never below the configured minimum
+reward-to-risk multiple. These levels are a consistency framework rather than
+a forecast; Launch Guard does not place the stop or target on any exchange.
 
 These states are deterministic heuristics based on incomplete market data—not
 predictions or instructions to trade. Launch Guard still never requests a
@@ -277,7 +348,7 @@ PUSHOVER_ENABLED=true
 PUSHOVER_APP_TOKEN=YOUR_30_CHARACTER_APP_TOKEN
 PUSHOVER_USER_KEY=YOUR_30_CHARACTER_USER_KEY
 PUSHOVER_DEVICE=
-PUSHOVER_ALERT_DECISIONS=BUY NOW,BUY ZONE,WAIT FOR PULLBACK,AVOID
+PUSHOVER_ALERT_DECISIONS=BUY NOW,BUY ZONE,PULLBACK STARTED,WAIT FOR PULLBACK,AVOID
 PUSHOVER_MIN_SCORE=60
 PUSHOVER_COOLDOWN_SECONDS=300
 ```
@@ -294,8 +365,9 @@ launch-guard --test-notification
 When monitoring is active, Launch Guard sends only configured decision states
 that meet the minimum score. It stores successful sends in SQLite, so restarting
 the program does not repeat the same state for the same token. A later state
-change can notify after the cooldown. Time-sensitive `BUY ZONE` and safety
-`AVOID` transitions bypass the cooldown but are still deduplicated. `AVOID`
+change can notify after the cooldown. Time-sensitive `PULLBACK STARTED` and
+`BUY ZONE` transitions and safety `AVOID` transitions bypass the cooldown but
+are still deduplicated. `AVOID`
 also bypasses the minimum-score filter so an invalidation is not hidden after
 the score falls. Each message includes the chain, score,
 price, anchored entry zone when available, momentum, liquidity, volume trend,

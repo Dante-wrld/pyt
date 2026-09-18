@@ -21,6 +21,12 @@ from solana_launch_guard.notifications import (
     DecisionNotifier,
     format_candidate_notification,
 )
+from solana_launch_guard.portfolio import (
+    OwnedHolding,
+    PortfolioAdvisor,
+    build_portfolio_snapshot,
+    format_portfolio_dashboard,
+)
 from solana_launch_guard.recommendations import (
     RecommendationBook,
     build_snapshot,
@@ -30,7 +36,7 @@ from solana_launch_guard.recommendations import (
     write_snapshot,
 )
 from solana_launch_guard.strategy import AdaptiveStrategy
-from solana_launch_guard.wallet import parse_wallet_trades
+from solana_launch_guard.wallet import SolanaRpc, parse_wallet_trades
 
 
 def settings(database_path: Path, **overrides: object) -> Settings:
@@ -197,6 +203,40 @@ def test_wallet_transaction_parser_detects_token_buy() -> None:
     assert trades[0].mint == mint
     assert trades[0].token_delta == pytest.approx(50)
     assert trades[0].native_sol_delta == pytest.approx(-0.100005)
+
+
+def test_solana_rpc_reads_and_aggregates_owned_token_balances(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rpc = SolanaRpc("https://example.invalid")
+
+    def fake_request(_method: str, params: list[object]) -> object:
+        options = params[1] if isinstance(params[1], dict) else {}
+        program = str(options.get("programId"))
+        amount = "1.5" if program.startswith("Tokenkeg") else "2.5"
+        return {
+            "value": [
+                {
+                    "account": {
+                        "data": {
+                            "parsed": {
+                                "info": {
+                                    "mint": "MintOwned111",
+                                    "tokenAmount": {"uiAmountString": amount},
+                                }
+                            }
+                        }
+                    }
+                }
+            ]
+        }
+
+    monkeypatch.setattr(rpc, "_request", fake_request)
+    holdings = asyncio.run(rpc.token_holdings("Wallet111"))
+
+    assert len(holdings) == 1
+    assert holdings[0].mint == "MintOwned111"
+    assert holdings[0].amount == pytest.approx(4)
 
 
 def market_quote(
@@ -410,7 +450,9 @@ def test_pullback_zone_is_anchored_and_alerts_once() -> None:
         volume=15_000,
         change=15,
     )
-    book = RecommendationBook(pool_size=10, ttl_seconds=60)
+    book = RecommendationBook(
+        pool_size=10, ttl_seconds=60, entry_confirmation_polls=1
+    )
     candidate = book.add(initial, CoinIntelligence().score(initial), now=0)
 
     assert candidate is not None
@@ -452,6 +494,123 @@ def test_pullback_zone_is_anchored_and_alerts_once() -> None:
     assert "decision=BUY ZONE" in output
 
 
+def test_pullback_started_is_detected_and_alerted_once() -> None:
+    initial = market_quote(
+        liquidity=50_000,
+        market_cap=100_000,
+        buys=60,
+        sells=20,
+        volume=15_000,
+        change=15,
+    )
+    book = RecommendationBook(
+        pool_size=10,
+        ttl_seconds=60,
+        pullback_started_pct=2,
+    )
+    candidate = book.add(initial, CoinIntelligence().score(initial), now=0)
+    assert candidate is not None
+    assert candidate.decision == "WAIT FOR PULLBACK"
+
+    pullback = MarketQuote(
+        mint=initial.mint,
+        symbol=initial.symbol,
+        price_sol=initial.price_sol * 0.97,
+        liquidity_usd=initial.liquidity_usd,
+        market_cap_usd=initial.market_cap_usd,
+        pair_address=initial.pair_address,
+        pair_created_at_ms=initial.pair_created_at_ms,
+        buys_m5=35,
+        sells_m5=20,
+        volume_m5_usd=16_000,
+        price_change_m5_pct=-1,
+    )
+    book.update(pullback, now=5)
+
+    assert candidate.decision == "PULLBACK STARTED"
+    assert candidate.pullback_from_peak_pct == pytest.approx(3)
+    alerts = book.pop_pullback_alerts()
+    assert alerts == [candidate]
+    assert book.pop_pullback_alerts() == []
+
+    output = format_dashboard(
+        build_snapshot(
+            book.ranked(),
+            pending_count=0,
+            poll_seconds=15,
+            alerts=alerts,
+        ),
+        color=False,
+    )
+    assert "PULLBACK STARTED ALERT" in output
+    assert "decision=PULLBACK STARTED" in output
+
+
+def test_entry_requires_three_consecutive_confirmations() -> None:
+    quote = market_quote(
+        liquidity=50_000,
+        market_cap=100_000,
+        buys=60,
+        sells=20,
+        volume=15_000,
+        change=5,
+    )
+    book = RecommendationBook(pool_size=10, ttl_seconds=60)
+    candidate = book.add(quote, CoinIntelligence().score(quote), now=0)
+
+    assert candidate is not None
+    assert candidate.decision == "ENTRY PENDING"
+    assert candidate.entry_confirmation_count == 1
+
+    book.update(quote, now=5)
+    assert candidate.decision == "ENTRY PENDING"
+    assert candidate.entry_confirmation_count == 2
+
+    book.update(quote, now=10)
+    assert candidate.decision == "BUY NOW"
+    assert candidate.entry_confirmation_count == 3
+    assert "confirmed for 3 consecutive checks" in candidate.decision_reason
+    assert candidate.planned_entry_price == pytest.approx(quote.price_sol)
+    assert candidate.planned_stop_price == pytest.approx(quote.price_sol * 0.8)
+    assert candidate.planned_target_price == pytest.approx(quote.price_sol * 1.4)
+    assert candidate.planned_reward_risk_ratio == pytest.approx(2)
+
+
+def test_falling_volume_blocks_entry_confirmation() -> None:
+    initial = market_quote(
+        liquidity=50_000,
+        market_cap=100_000,
+        buys=60,
+        sells=20,
+        volume=15_000,
+        change=15,
+    )
+    book = RecommendationBook(pool_size=10, ttl_seconds=60)
+    candidate = book.add(initial, CoinIntelligence().score(initial), now=0)
+    assert candidate is not None
+    assert candidate.decision == "WAIT FOR PULLBACK"
+
+    weak_pullback = MarketQuote(
+        mint=initial.mint,
+        symbol=initial.symbol,
+        price_sol=initial.price_sol * 0.95,
+        liquidity_usd=initial.liquidity_usd,
+        market_cap_usd=initial.market_cap_usd,
+        pair_address=initial.pair_address,
+        pair_created_at_ms=initial.pair_created_at_ms,
+        buys_m5=40,
+        sells_m5=20,
+        volume_m5_usd=5_000,
+        price_change_m5_pct=2,
+    )
+    book.update(weak_pullback, now=5)
+
+    assert candidate.volume_label == "FALLING"
+    assert candidate.decision == "WATCH"
+    assert candidate.decision_reason == "entry blocked: five-minute volume is falling"
+    assert candidate.entry_confirmation_count == 0
+
+
 def test_entry_decision_avoids_heavy_selloff() -> None:
     initial = market_quote(
         liquidity=50_000,
@@ -461,7 +620,9 @@ def test_entry_decision_avoids_heavy_selloff() -> None:
         volume=15_000,
         change=5,
     )
-    book = RecommendationBook(pool_size=10, ttl_seconds=60)
+    book = RecommendationBook(
+        pool_size=10, ttl_seconds=60, entry_confirmation_polls=1
+    )
     candidate = book.add(initial, CoinIntelligence().score(initial), now=0)
     assert candidate is not None
     assert candidate.decision == "BUY NOW"
@@ -485,6 +646,122 @@ def test_entry_decision_avoids_heavy_selloff() -> None:
     assert candidate.decision_reason == "falling price with heavy selling"
 
 
+def test_portfolio_advisor_uses_cost_basis_for_partial_profit() -> None:
+    holding = OwnedHolding(
+        chain="solana",
+        token_address="MintOwned111",
+        symbol="OWN",
+        quantity=100,
+        entry_price=0.000001,
+        price_currency="SOL",
+        cost_amount=0.0001,
+    )
+    quote = MarketQuote(
+        mint=holding.token_address,
+        symbol=holding.symbol,
+        price_sol=0.00000135,
+        price_usd=0.0002,
+        chain="solana",
+        liquidity_usd=50_000,
+        market_cap_usd=100_000,
+        pair_address="PairOwned",
+        pair_created_at_ms=1,
+        buys_m5=20,
+        sells_m5=10,
+        volume_m5_usd=5_000,
+        price_change_m5_pct=2,
+    )
+
+    signal = PortfolioAdvisor().evaluate(holding, quote, sol_usd=150)
+
+    assert signal.decision == "TAKE PARTIAL"
+    assert signal.pnl_pct == pytest.approx(35)
+    assert signal.current_value_usd == pytest.approx(0.02)
+
+
+def test_portfolio_advisor_warns_on_momentum_reversal_without_cost_basis() -> None:
+    holding = OwnedHolding(
+        chain="solana",
+        token_address="MintRisk111",
+        symbol="RISK",
+        quantity=10,
+    )
+    quote = MarketQuote(
+        mint=holding.token_address,
+        symbol=holding.symbol,
+        price_sol=0.000001,
+        price_usd=0.00015,
+        chain="solana",
+        liquidity_usd=10_000,
+        market_cap_usd=50_000,
+        pair_address="PairRisk",
+        pair_created_at_ms=1,
+        buys_m5=5,
+        sells_m5=10,
+        volume_m5_usd=4_000,
+        price_change_m5_pct=-9,
+    )
+
+    signal = PortfolioAdvisor().evaluate(holding, quote)
+
+    assert signal.decision == "EXIT WARNING"
+    assert signal.pnl_pct is None
+    assert "seller/buyer pressure" in signal.reason
+
+
+def test_owned_holding_persists_and_dashboard_is_read_only(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(str(tmp_path / "portfolio.db"))
+    holding = OwnedHolding(
+        chain="solana",
+        token_address="MintOwned111",
+        symbol="OWN",
+        quantity=125,
+        entry_price=0.01,
+        price_currency="USD",
+        cost_amount=1.25,
+    )
+    store.save_owned_holding(holding)
+    updated = OwnedHolding(
+        chain="solana",
+        token_address="MintOwned111",
+        symbol="OWN",
+        quantity=150,
+        entry_price=0.009,
+        price_currency="USD",
+        cost_amount=1.35,
+    )
+    store.save_owned_holding(updated)
+
+    assert store.load_owned_holdings("solana") == [updated]
+    signal = PortfolioAdvisor().evaluate(updated, None)
+    output = format_portfolio_dashboard(
+        build_portfolio_snapshot(
+            [signal], wallet="Wallet111", poll_seconds=15
+        ),
+        color=False,
+    )
+    assert "MY HOLDINGS (READ-ONLY)" in output
+    assert "UNPRICED" in output
+    assert "token=MintOwned111" in output
+    store.save_portfolio_state(
+        chain="solana",
+        token_address="MintOwned111",
+        peak_price=0.02,
+        baseline_liquidity_usd=50_000,
+    )
+    assert store.load_portfolio_states() == [
+        {
+            "chain": "solana",
+            "token_address": "MintOwned111",
+            "peak_price": 0.02,
+            "baseline_liquidity_usd": 50_000.0,
+        }
+    ]
+    store.close()
+
+
 def test_phone_notifications_deduplicate_and_respect_cooldown(
     tmp_path: Path,
 ) -> None:
@@ -504,7 +781,9 @@ def test_phone_notifications_deduplicate_and_respect_cooldown(
         volume=15_000,
         change=15,
     )
-    book = RecommendationBook(pool_size=10, ttl_seconds=60)
+    book = RecommendationBook(
+        pool_size=10, ttl_seconds=60, entry_confirmation_polls=1
+    )
     candidate = book.add(initial, CoinIntelligence().score(initial), now=0)
     assert candidate is not None
     assert candidate.decision == "WAIT FOR PULLBACK"
