@@ -28,7 +28,7 @@ from .multichain import (
     HyperCoreState,
     HyperCoreWatcher,
 )
-from .notifications import DecisionNotifier, PushoverClient
+from .notifications import DecisionNotifier, PortfolioNotifier, PushoverClient
 from .portfolio import (
     OwnedHolding,
     PortfolioAdvisor,
@@ -121,19 +121,35 @@ class LaunchGuard:
             min_liquidity_usd=settings.intelligence_min_liquidity_usd,
         )
         self.notifier: DecisionNotifier | None = None
+        self.portfolio_notifier: PortfolioNotifier | None = None
         if settings.pushover_enabled:
             if not settings.pushover_app_token or not settings.pushover_user_key:
                 raise ValueError("Pushover is enabled but credentials are missing")
+            pushover_client = PushoverClient(
+                app_token=settings.pushover_app_token,
+                user_key=settings.pushover_user_key,
+                device=settings.pushover_device,
+            )
             self.notifier = DecisionNotifier(
-                client=PushoverClient(
-                    app_token=settings.pushover_app_token,
-                    user_key=settings.pushover_user_key,
-                    device=settings.pushover_device,
-                ),
+                client=pushover_client,
                 store=store,
                 decisions=settings.pushover_alert_decisions,
                 min_score=settings.pushover_min_score,
                 cooldown_seconds=settings.pushover_cooldown_seconds,
+                high_priority_decisions=(
+                    settings.pushover_high_priority_decisions
+                ),
+            )
+            self.portfolio_notifier = PortfolioNotifier(
+                client=pushover_client,
+                store=store,
+                decisions=settings.pushover_portfolio_alert_decisions,
+                high_priority_decisions=(
+                    settings.pushover_high_priority_decisions
+                ),
+                cooldown_seconds=(
+                    settings.pushover_portfolio_cooldown_seconds
+                ),
             )
         self.strategy = AdaptiveStrategy(
             trailing_activation_pct=settings.trailing_activation_pct,
@@ -741,6 +757,26 @@ class LaunchGuard:
                         )
                         self.portfolio_last_decisions[key] = signal.decision
 
+                    if self.portfolio_notifier is not None:
+                        try:
+                            sent = await self.portfolio_notifier.maybe_send(
+                                signal
+                            )
+                        except ConnectionError as exc:
+                            LOGGER.warning(
+                                "Portfolio phone alert unavailable for %s (%s)",
+                                signal.symbol,
+                                exc,
+                            )
+                        else:
+                            if sent:
+                                LOGGER.info(
+                                    "HIGH PRIORITY PHONE ALERT %s "
+                                    "decision=%s",
+                                    signal.symbol,
+                                    signal.decision,
+                                )
+
                 write_portfolio_snapshot(
                     self.settings.portfolio_snapshot_path,
                     build_portfolio_snapshot(
@@ -1218,6 +1254,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="send one Pushover test notification and exit",
     )
     parser.add_argument(
+        "--test-high-priority-notification",
+        action="store_true",
+        help="send one high-priority Pushover test and exit",
+    )
+    parser.add_argument(
         "--trader-info",
         metavar="WALLET",
         help="show stored activity for a watched public wallet and exit",
@@ -1453,6 +1494,14 @@ def main() -> None:
                 )
             asyncio.run(guard.notifier.send_test())
             LOGGER.info("Pushover test notification sent")
+        elif args.test_high_priority_notification:
+            if guard.notifier is None:
+                raise ValueError(
+                    "Pushover is disabled; set PUSHOVER_ENABLED=true and "
+                    "add your app token and user key"
+                )
+            asyncio.run(guard.notifier.send_high_priority_test())
+            LOGGER.info("High-priority Pushover test notification sent")
         elif args.summary:
             print(json.dumps(store.summary(), indent=2))
         elif args.demo:

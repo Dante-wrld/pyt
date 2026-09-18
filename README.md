@@ -3,7 +3,7 @@
 A safety-first Python monitor and paper trader for Solana launches and
 multichain crypto tokens.
 
-Version 0.12 **never signs or submits transactions**. It can monitor Pump.fun
+Version 0.13 **never signs or submits transactions**. It can monitor Pump.fun
 new-token events, public Solana and EVM wallet activity, HyperCore holdings and
 fills, and token profiles on Ethereum, Base, BNB Smart Chain, BOB, Monad,
 Robinhood Chain, and HyperEVM. It applies configurable gates, ranks intelligence-qualified paper
@@ -33,6 +33,8 @@ candidates, opens simulated Solana positions, and records activity in SQLite.
 - Reads non-zero SPL-token balances from one public Solana wallet and opens a
   separate holdings board with `HOLD`, `TAKE PARTIAL`, `PROTECT PROFIT`,
   `EXIT WARNING`, or `UNPRICED` guidance.
+- Sends optional state-change-deduplicated, high-priority Pushover alerts for
+  confirmed entries and configured profit-protection/exit states.
 - Simulates take-profit and stop-loss exits using subsequent trade events.
 - Persists launches, decisions, positions, and fills in `launch_guard.db`.
 - Reconnects after WebSocket failures.
@@ -129,6 +131,9 @@ pytest
 | `PUSHOVER_ALERT_DECISIONS` | `BUY NOW,BUY ZONE,PULLBACK STARTED,WAIT FOR PULLBACK,AVOID` | Decision changes that may notify |
 | `PUSHOVER_MIN_SCORE` | `60` | Minimum live signal score required for phone alerts |
 | `PUSHOVER_COOLDOWN_SECONDS` | `300` | Minimum delay between different alerts for one token |
+| `PUSHOVER_PORTFOLIO_ALERT_DECISIONS` | `TAKE PARTIAL,PROTECT PROFIT,EXIT WARNING` | Owned-holding states that may notify |
+| `PUSHOVER_HIGH_PRIORITY_DECISIONS` | `BUY NOW,BUY ZONE,TAKE PARTIAL,PROTECT PROFIT,EXIT WARNING` | States sent with Pushover priority 1 |
+| `PUSHOVER_PORTFOLIO_COOLDOWN_SECONDS` | `300` | Minimum delay between holding alerts for one token |
 | `COLOR_OUTPUT` | `true` | Use gold ANSI terminal output when supported |
 | `PORTFOLIO_POLL_SECONDS` | `15` | Seconds between read-only holdings checks (minimum 10) |
 | `PORTFOLIO_MIN_VALUE_USD` | `0.01` | Hide priced wallet dust below this estimated USD value |
@@ -351,6 +356,9 @@ PUSHOVER_DEVICE=
 PUSHOVER_ALERT_DECISIONS=BUY NOW,BUY ZONE,PULLBACK STARTED,WAIT FOR PULLBACK,AVOID
 PUSHOVER_MIN_SCORE=60
 PUSHOVER_COOLDOWN_SECONDS=300
+PUSHOVER_PORTFOLIO_ALERT_DECISIONS=TAKE PARTIAL,PROTECT PROFIT,EXIT WARNING
+PUSHOVER_HIGH_PRIORITY_DECISIONS=BUY NOW,BUY ZONE,TAKE PARTIAL,PROTECT PROFIT,EXIT WARNING
+PUSHOVER_PORTFOLIO_COOLDOWN_SECONDS=300
 ```
 
 Never commit the token or user key to GitHub. They are notification credentials,
@@ -360,6 +368,7 @@ Verify the connection before starting the scanner:
 
 ```bash
 launch-guard --test-notification
+launch-guard --test-high-priority-notification
 ```
 
 When monitoring is active, Launch Guard sends only configured decision states
@@ -372,6 +381,13 @@ also bypasses the minimum-score filter so an invalidation is not hidden after
 the score falls. Each message includes the chain, score,
 price, anchored entry zone when available, momentum, liquidity, volume trend,
 risk, decision reason, and a DEX Screener link.
+
+Pushover priority `1` is used for the states in
+`PUSHOVER_HIGH_PRIORITY_DECISIONS`. Pushover documents that priority `1`
+bypasses quiet hours, plays a sound, and highlights the message in red. Launch
+Guard does not use emergency priority `2`, so alerts do not repeat until
+acknowledged. Holding alerts are emitted only when a token changes into a
+configured sell/profit-protection state and are rate-limited per token.
 
 `WATCH` is intentionally excluded from the default phone list to reduce noise.
 Add it to `PUSHOVER_ALERT_DECISIONS` if you want those notifications too.
