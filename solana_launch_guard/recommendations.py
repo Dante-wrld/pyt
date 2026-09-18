@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Any
 
 from .intelligence import IntelligenceResult
 from .market import MarketQuote
@@ -106,7 +110,7 @@ class RecommendationBook:
             del self.candidates[mint]
 
     def ranked(self, limit: int = 10) -> list[RecommendationCandidate]:
-        return sorted(
+        ordered = sorted(
             self.candidates.values(),
             key=lambda item: (
                 item.signal_score,
@@ -114,7 +118,20 @@ class RecommendationBook:
                 item.intelligence_score,
             ),
             reverse=True,
-        )[:limit]
+        )
+        unique: list[RecommendationCandidate] = []
+        seen_mints: set[str] = set()
+        seen_symbols: set[str] = set()
+        for candidate in ordered:
+            symbol_key = candidate.symbol.strip().casefold()
+            if candidate.mint in seen_mints or symbol_key in seen_symbols:
+                continue
+            unique.append(candidate)
+            seen_mints.add(candidate.mint)
+            seen_symbols.add(symbol_key)
+            if len(unique) >= limit:
+                break
+        return unique
 
     def _trim(self) -> None:
         if len(self.candidates) <= self.pool_size:
@@ -152,3 +169,110 @@ def format_recommendations(
         )
     lines.append(reset)
     return "\n".join(lines)
+
+
+def build_snapshot(
+    candidates: list[RecommendationCandidate],
+    *,
+    pending_count: int,
+    poll_seconds: float,
+) -> dict[str, Any]:
+    return {
+        "generated_at": time.time(),
+        "pending_count": pending_count,
+        "poll_seconds": poll_seconds,
+        "candidates": [
+            {
+                "rank": rank,
+                "mint": candidate.mint,
+                "symbol": candidate.symbol,
+                "tier": candidate.tier,
+                "signal_score": candidate.signal_score,
+                "rise_pct": candidate.rise_pct,
+                "price_change_m5_pct": candidate.price_change_m5_pct or 0.0,
+                "liquidity_usd": candidate.liquidity_usd,
+                "price_sol": candidate.current_price_sol,
+            }
+            for rank, candidate in enumerate(candidates, start=1)
+        ],
+    }
+
+
+def write_snapshot(path: str | Path, snapshot: dict[str, Any]) -> None:
+    target = Path(path).expanduser().resolve()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_name(f".{target.name}.tmp")
+    temporary.write_text(
+        json.dumps(snapshot, separators=(",", ":")), encoding="utf-8"
+    )
+    temporary.replace(target)
+
+
+def read_snapshot(path: str | Path) -> dict[str, Any] | None:
+    try:
+        payload = json.loads(Path(path).expanduser().read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def format_dashboard(snapshot: dict[str, Any], *, color: bool = True) -> str:
+    palette = (45, 220, 82, 213, 208, 117, 226, 141, 51, 203)
+    reset = "\033[0m" if color else ""
+    bold = "\033[1m" if color else ""
+    dim = "\033[2m" if color else ""
+    generated_at = float(snapshot.get("generated_at") or 0.0)
+    poll_seconds = float(snapshot.get("poll_seconds") or 15.0)
+    age = max(0.0, time.time() - generated_at)
+    stale = age > poll_seconds * 2 + 5
+    updated = (
+        datetime.fromtimestamp(generated_at).strftime("%Y-%m-%d %H:%M:%S")
+        if generated_at
+        else "waiting"
+    )
+    pending = int(snapshot.get("pending_count") or 0)
+    raw_candidates = snapshot.get("candidates")
+    candidates = raw_candidates if isinstance(raw_candidates, list) else []
+
+    status = "STALE — scanner is not updating" if stale else "LIVE"
+    lines = [
+        f"{bold}LAUNCH GUARD — PAPER BUY WATCHLIST{reset}",
+        f"Status: {status} | Updated: {updated} | Pending scans: {pending}",
+        "Ranked model signals only; no profit guarantee and no automatic purchase.",
+        "",
+    ]
+    if not candidates:
+        lines.append(
+            f"{dim}Waiting for a coin to pass the CORE or MOONSHOT filters...{reset}"
+        )
+        return "\n".join(lines)
+
+    for index, raw in enumerate(candidates):
+        if not isinstance(raw, dict):
+            continue
+        prefix = f"\033[38;5;{palette[index % len(palette)]}m" if color else ""
+        liquidity_raw = raw.get("liquidity_usd")
+        liquidity = (
+            f"${float(liquidity_raw):,.0f}"
+            if liquidity_raw is not None
+            else "unknown"
+        )
+        lines.extend(
+            [
+                (
+                    f"{prefix}#{int(raw.get('rank') or index + 1):02d} "
+                    f"{str(raw.get('symbol') or 'UNKNOWN'):<12} "
+                    f"tier={str(raw.get('tier') or 'UNKNOWN'):<8} "
+                    f"signal={int(raw.get('signal_score') or 0):3d}{reset}"
+                ),
+                (
+                    f"{prefix}    rise={float(raw.get('rise_pct') or 0):+8.2f}% "
+                    f"m5={float(raw.get('price_change_m5_pct') or 0):+8.2f}% "
+                    f"liquidity={liquidity} "
+                    f"price={float(raw.get('price_sol') or 0):.12g}{reset}"
+                ),
+                f"{prefix}    mint={str(raw.get('mint') or '')}{reset}",
+                "",
+            ]
+        )
+    return "\n".join(lines).rstrip()
