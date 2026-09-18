@@ -40,7 +40,7 @@ class MarketQuote:
 
     @property
     def recommendation_currency(self) -> str:
-        return "SOL" if self.chain == "solana" else "USD"
+        return "USD" if self.price_usd is not None else "SOL"
 
     @property
     def recommendation_key(self) -> str:
