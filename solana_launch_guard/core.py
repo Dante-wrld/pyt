@@ -492,11 +492,23 @@ class SQLiteStore:
                 target_raw INTEGER NOT NULL,
                 full_exit INTEGER NOT NULL DEFAULT 0,
                 sold_raw INTEGER NOT NULL DEFAULT 0,
+                proceeds_usdc_raw INTEGER NOT NULL DEFAULT 0,
                 next_chunk_index INTEGER NOT NULL DEFAULT 0,
                 last_signature TEXT,
                 error TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS auto_sell_signal_confirmations (
+                chain TEXT NOT NULL,
+                token_address TEXT NOT NULL,
+                decision TEXT NOT NULL,
+                consecutive_polls INTEGER NOT NULL DEFAULT 0,
+                reason TEXT NOT NULL,
+                last_seen_epoch REAL NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (chain, token_address)
             );
 
             CREATE TABLE IF NOT EXISTS auto_buy_policies (
@@ -551,6 +563,29 @@ class SQLiteStore:
                 updated_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS auto_rebuy_watches (
+                chain TEXT NOT NULL,
+                token_address TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                status TEXT NOT NULL,
+                completed_rebuys INTEGER NOT NULL DEFAULT 0,
+                cycle INTEGER NOT NULL DEFAULT 1,
+                sell_signature TEXT NOT NULL,
+                exit_price_usd REAL NOT NULL,
+                exit_liquidity_usd REAL,
+                lowest_price_usd REAL NOT NULL,
+                last_price_usd REAL,
+                confirmation_count INTEGER NOT NULL DEFAULT 0,
+                sale_proceeds_usdc_raw INTEGER NOT NULL,
+                sold_at_epoch REAL NOT NULL,
+                last_seen_at_epoch REAL,
+                buy_signature TEXT,
+                last_reason TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (chain, token_address)
+            );
+
             INSERT OR IGNORE INTO auto_buy_fund(
                 id, seed_buys_used, reinvest_available_usdc_raw,
                 realized_profit_usdc_raw, updated_at
@@ -580,6 +615,17 @@ class SQLiteStore:
             self.connection.execute(
                 "ALTER TABLE auto_sell_executions "
                 "ADD COLUMN balance_before_raw INTEGER"
+            )
+        batch_columns = {
+            str(row["name"])
+            for row in self.connection.execute(
+                "PRAGMA table_info(auto_sell_batches)"
+            ).fetchall()
+        }
+        if "proceeds_usdc_raw" not in batch_columns:
+            self.connection.execute(
+                "ALTER TABLE auto_sell_batches "
+                "ADD COLUMN proceeds_usdc_raw INTEGER NOT NULL DEFAULT 0"
             )
         self.connection.commit()
 
@@ -842,7 +888,13 @@ class SQLiteStore:
         ).fetchall()
         return [dict(row) for row in rows]
 
-    def arm_auto_sell(self, token_address: str, *, chain: str = "solana") -> None:
+    def arm_auto_sell(
+        self,
+        token_address: str,
+        *,
+        chain: str = "solana",
+        reset_stage: bool = False,
+    ) -> None:
         holding = self.connection.execute(
             "SELECT entry_price, price_currency, cost_amount "
             "FROM owned_holdings WHERE chain = ? AND token_address = ?",
@@ -865,9 +917,21 @@ class SQLiteStore:
             ) VALUES (?, ?, 1, 0, ?)
             ON CONFLICT(chain, token_address) DO UPDATE SET
                 armed = 1,
+                stage = CASE
+                    WHEN ? THEN 0 ELSE auto_sell_policies.stage
+                END,
+                last_signature = CASE
+                    WHEN ? THEN NULL ELSE auto_sell_policies.last_signature
+                END,
                 updated_at = excluded.updated_at
             """,
-            (chain, token_address, utc_now()),
+            (
+                chain,
+                token_address,
+                utc_now(),
+                int(reset_stage),
+                int(reset_stage),
+            ),
         )
         self.connection.commit()
 
@@ -914,6 +978,82 @@ class SQLiteStore:
         ).fetchone()
         return dict(row) if row is not None else None
 
+    def record_auto_sell_signal_confirmation(
+        self,
+        *,
+        token_address: str,
+        decision: str,
+        reason: str,
+        observed_at_epoch: float,
+        max_gap_seconds: float,
+        chain: str = "solana",
+    ) -> dict[str, Any]:
+        row = self.connection.execute(
+            "SELECT * FROM auto_sell_signal_confirmations "
+            "WHERE chain = ? AND token_address = ?",
+            (chain, token_address),
+        ).fetchone()
+        consecutive = 1
+        if (
+            row is not None
+            and str(row["decision"]) == decision
+            and observed_at_epoch >= float(row["last_seen_epoch"])
+            and observed_at_epoch - float(row["last_seen_epoch"])
+            <= max_gap_seconds
+        ):
+            consecutive = int(row["consecutive_polls"]) + 1
+        self.connection.execute(
+            """
+            INSERT INTO auto_sell_signal_confirmations(
+                chain, token_address, decision, consecutive_polls, reason,
+                last_seen_epoch, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(chain, token_address) DO UPDATE SET
+                decision = excluded.decision,
+                consecutive_polls = excluded.consecutive_polls,
+                reason = excluded.reason,
+                last_seen_epoch = excluded.last_seen_epoch,
+                updated_at = excluded.updated_at
+            """,
+            (
+                chain,
+                token_address,
+                decision,
+                consecutive,
+                reason,
+                observed_at_epoch,
+                utc_now(),
+            ),
+        )
+        self.connection.commit()
+        confirmed = self.connection.execute(
+            "SELECT * FROM auto_sell_signal_confirmations "
+            "WHERE chain = ? AND token_address = ?",
+            (chain, token_address),
+        ).fetchone()
+        assert confirmed is not None
+        return dict(confirmed)
+
+    def clear_auto_sell_signal_confirmation(
+        self, token_address: str, *, chain: str = "solana"
+    ) -> None:
+        self.connection.execute(
+            "DELETE FROM auto_sell_signal_confirmations "
+            "WHERE chain = ? AND token_address = ?",
+            (chain, token_address),
+        )
+        self.connection.commit()
+
+    def auto_sell_cycle(
+        self, token_address: str, *, chain: str = "solana"
+    ) -> int:
+        row = self.connection.execute(
+            "SELECT completed_rebuys FROM auto_rebuy_watches "
+            "WHERE chain = ? AND token_address = ?",
+            (chain, token_address),
+        ).fetchone()
+        return int(row["completed_rebuys"]) if row is not None else 0
+
     def auto_sell_status(self) -> list[dict[str, Any]]:
         rows = self.connection.execute(
             """
@@ -931,7 +1071,8 @@ class SQLiteStore:
         batches = self.connection.execute(
             """
             SELECT batch_key, chain, token_address, symbol, stage, status,
-                   target_raw, full_exit, sold_raw, next_chunk_index,
+                   target_raw, full_exit, sold_raw, proceeds_usdc_raw,
+                   next_chunk_index,
                    last_signature, error, created_at, updated_at
             FROM auto_sell_batches
             WHERE status IN ('REVIEW', 'PAUSED')
@@ -1150,9 +1291,12 @@ class SQLiteStore:
         event_key: str,
         signature: str,
         sold_raw: int,
+        output_usdc_raw: int = 0,
     ) -> bool:
         if sold_raw <= 0:
             raise ValueError("confirmed auto-sell chunk must be positive")
+        if output_usdc_raw < 0:
+            raise ValueError("confirmed auto-sell output cannot be negative")
         execution = self.connection.execute(
             "SELECT status FROM auto_sell_executions WHERE event_key = ?",
             (event_key,),
@@ -1179,13 +1323,15 @@ class SQLiteStore:
             self.connection.execute(
                 """
                 UPDATE auto_sell_batches
-                SET status = ?, sold_raw = ?, next_chunk_index = ?,
-                    last_signature = ?, updated_at = ?
+                SET status = ?, sold_raw = ?,
+                    proceeds_usdc_raw = proceeds_usdc_raw + ?,
+                    next_chunk_index = ?, last_signature = ?, updated_at = ?
                 WHERE batch_key = ? AND status = 'ACTIVE'
                 """,
                 (
                     "CONFIRMED" if completed else "ACTIVE",
                     total_sold,
+                    output_usdc_raw,
                     int(batch["next_chunk_index"]) + 1,
                     signature,
                     now,
@@ -1193,6 +1339,13 @@ class SQLiteStore:
                 ),
             )
         return completed
+
+    def load_auto_sell_batch(self, batch_key: str) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            "SELECT * FROM auto_sell_batches WHERE batch_key = ?",
+            (batch_key,),
+        ).fetchone()
+        return dict(row) if row is not None else None
 
     def freeze_auto_sell_chunk(
         self,
@@ -1546,6 +1699,294 @@ class SQLiteStore:
             "profit_usdc_raw": profit,
             "reinvest_credit_usdc_raw": credit,
             "remaining_raw": remaining,
+        }
+
+    def start_auto_rebuy_watch(
+        self,
+        *,
+        token_address: str,
+        symbol: str,
+        sell_signature: str,
+        exit_price_usd: float,
+        exit_liquidity_usd: float | None,
+        sale_proceeds_usdc_raw: int,
+        sold_at_epoch: float,
+        max_rebuys: int,
+        chain: str = "solana",
+    ) -> dict[str, Any] | None:
+        if exit_price_usd <= 0 or sale_proceeds_usdc_raw <= 0:
+            raise ValueError("auto-rebuy watch requires a confirmed sale price")
+        existing = self.connection.execute(
+            "SELECT * FROM auto_rebuy_watches "
+            "WHERE chain = ? AND token_address = ?",
+            (chain, token_address),
+        ).fetchone()
+        if (
+            existing is not None
+            and str(existing["sell_signature"]) == sell_signature
+        ):
+            return dict(existing)
+        completed = (
+            int(existing["completed_rebuys"])
+            if existing is not None
+            else 0
+        )
+        if completed >= max_rebuys:
+            return None
+        now = utc_now()
+        self.connection.execute(
+            """
+            INSERT INTO auto_rebuy_watches(
+                chain, token_address, symbol, status, completed_rebuys,
+                cycle, sell_signature, exit_price_usd,
+                exit_liquidity_usd, lowest_price_usd, last_price_usd,
+                confirmation_count, sale_proceeds_usdc_raw, sold_at_epoch,
+                last_seen_at_epoch, buy_signature, last_reason,
+                created_at, updated_at
+            ) VALUES (
+                ?, ?, ?, 'WATCHING', ?, ?, ?, ?, ?, ?, NULL, 0, ?, ?,
+                NULL, NULL, 'waiting for a confirmed recovery', ?, ?
+            )
+            ON CONFLICT(chain, token_address) DO UPDATE SET
+                symbol = excluded.symbol,
+                status = 'WATCHING',
+                cycle = excluded.cycle,
+                sell_signature = excluded.sell_signature,
+                exit_price_usd = excluded.exit_price_usd,
+                exit_liquidity_usd = excluded.exit_liquidity_usd,
+                lowest_price_usd = excluded.lowest_price_usd,
+                last_price_usd = NULL,
+                confirmation_count = 0,
+                sale_proceeds_usdc_raw = excluded.sale_proceeds_usdc_raw,
+                sold_at_epoch = excluded.sold_at_epoch,
+                last_seen_at_epoch = NULL,
+                buy_signature = NULL,
+                last_reason = excluded.last_reason,
+                created_at = excluded.created_at,
+                updated_at = excluded.updated_at
+            """,
+            (
+                chain,
+                token_address,
+                symbol,
+                completed,
+                completed + 1,
+                sell_signature,
+                exit_price_usd,
+                exit_liquidity_usd,
+                exit_price_usd,
+                sale_proceeds_usdc_raw,
+                sold_at_epoch,
+                now,
+                now,
+            ),
+        )
+        self.connection.commit()
+        return self.load_auto_rebuy_watch(token_address, chain=chain)
+
+    def load_auto_rebuy_watch(
+        self, token_address: str, *, chain: str = "solana"
+    ) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            "SELECT * FROM auto_rebuy_watches "
+            "WHERE chain = ? AND token_address = ?",
+            (chain, token_address),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def active_auto_rebuy_watches(self) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            "SELECT * FROM auto_rebuy_watches "
+            "WHERE status IN ('WATCHING', 'READY') "
+            "ORDER BY sold_at_epoch, token_address"
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def record_auto_rebuy_observation(
+        self,
+        *,
+        token_address: str,
+        current_price_usd: float,
+        observed_at_epoch: float,
+        qualifying: bool,
+        confirmation_required: int,
+        reason: str,
+        chain: str = "solana",
+    ) -> dict[str, Any]:
+        watch = self.load_auto_rebuy_watch(token_address, chain=chain)
+        if watch is None or watch["status"] not in {"WATCHING", "READY"}:
+            raise ValueError("auto-rebuy watch is not active")
+        if current_price_usd <= 0:
+            raise ValueError("auto-rebuy observation price must be positive")
+        lowest = min(float(watch["lowest_price_usd"]), current_price_usd)
+        confirmations = (
+            int(watch["confirmation_count"]) + 1 if qualifying else 0
+        )
+        status = (
+            "READY"
+            if qualifying and confirmations >= confirmation_required
+            else "WATCHING"
+        )
+        self.connection.execute(
+            """
+            UPDATE auto_rebuy_watches
+            SET status = ?, lowest_price_usd = ?, last_price_usd = ?,
+                confirmation_count = ?, last_seen_at_epoch = ?,
+                last_reason = ?, updated_at = ?
+            WHERE chain = ? AND token_address = ?
+              AND status IN ('WATCHING', 'READY')
+            """,
+            (
+                status,
+                lowest,
+                current_price_usd,
+                confirmations,
+                observed_at_epoch,
+                reason[:500],
+                utc_now(),
+                chain,
+                token_address,
+            ),
+        )
+        self.connection.commit()
+        updated = self.load_auto_rebuy_watch(token_address, chain=chain)
+        assert updated is not None
+        return updated
+
+    def reset_auto_rebuy_confirmation(
+        self,
+        *,
+        token_address: str,
+        reason: str,
+        chain: str = "solana",
+    ) -> None:
+        self.connection.execute(
+            "UPDATE auto_rebuy_watches SET status = 'WATCHING', "
+            "confirmation_count = 0, last_reason = ?, updated_at = ? "
+            "WHERE chain = ? AND token_address = ? "
+            "AND status IN ('WATCHING', 'READY')",
+            (reason[:500], utc_now(), chain, token_address),
+        )
+        self.connection.commit()
+
+    def expire_auto_rebuy_watch(
+        self,
+        *,
+        token_address: str,
+        reason: str,
+        chain: str = "solana",
+    ) -> None:
+        self.connection.execute(
+            "UPDATE auto_rebuy_watches SET status = 'EXPIRED', "
+            "confirmation_count = 0, last_reason = ?, updated_at = ? "
+            "WHERE chain = ? AND token_address = ? "
+            "AND status IN ('WATCHING', 'READY')",
+            (reason[:500], utc_now(), chain, token_address),
+        )
+        self.connection.commit()
+
+    def cancel_auto_rebuy(
+        self, token_address: str, *, chain: str = "solana"
+    ) -> bool:
+        cursor = self.connection.execute(
+            "UPDATE auto_rebuy_watches SET status = 'CANCELLED', "
+            "confirmation_count = 0, last_reason = 'cancelled by operator', "
+            "updated_at = ? WHERE chain = ? AND token_address = ? "
+            "AND status IN ('WATCHING', 'READY', 'REVIEW')",
+            (utc_now(), chain, token_address),
+        )
+        self.connection.commit()
+        return cursor.rowcount == 1
+
+    def freeze_auto_rebuy(
+        self,
+        *,
+        token_address: str,
+        error: str,
+        chain: str = "solana",
+    ) -> None:
+        self.connection.execute(
+            "UPDATE auto_rebuy_watches SET status = 'REVIEW', "
+            "last_reason = ?, updated_at = ? "
+            "WHERE chain = ? AND token_address = ? "
+            "AND status IN ('WATCHING', 'READY')",
+            (error[:500], utc_now(), chain, token_address),
+        )
+        self.connection.commit()
+
+    def complete_auto_rebuy(
+        self,
+        *,
+        token_address: str,
+        buy_signature: str,
+        reset_auto_sell: bool = False,
+        chain: str = "solana",
+    ) -> dict[str, Any]:
+        if reset_auto_sell:
+            holding = self.connection.execute(
+                "SELECT entry_price, price_currency, cost_amount "
+                "FROM owned_holdings WHERE chain = ? AND token_address = ?",
+                (chain, token_address),
+            ).fetchone()
+            if (
+                holding is None
+                or holding["price_currency"] != "USD"
+                or float(holding["entry_price"] or 0) <= 0
+                or float(holding["cost_amount"] or 0) <= 0
+            ):
+                raise ValueError(
+                    "auto-rebuy cannot reset selling without a USD cost basis"
+                )
+        now = utc_now()
+        with self.connection:
+            cursor = self.connection.execute(
+                """
+                UPDATE auto_rebuy_watches
+                SET status = 'BOUGHT',
+                    completed_rebuys = completed_rebuys + 1,
+                    buy_signature = ?, confirmation_count = 0,
+                    last_reason = 'recovery buy confirmed', updated_at = ?
+                WHERE chain = ? AND token_address = ?
+                  AND status IN ('WATCHING', 'READY')
+                """,
+                (buy_signature, now, chain, token_address),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("auto-rebuy watch is not active")
+            if reset_auto_sell:
+                self.connection.execute(
+                    """
+                    INSERT INTO auto_sell_policies(
+                        chain, token_address, armed, stage,
+                        last_signature, updated_at
+                    ) VALUES (?, ?, 1, 0, NULL, ?)
+                    ON CONFLICT(chain, token_address) DO UPDATE SET
+                        armed = 1,
+                        stage = 0,
+                        last_signature = NULL,
+                        updated_at = excluded.updated_at
+                    """,
+                    (chain, token_address, now),
+                )
+        updated = self.load_auto_rebuy_watch(token_address, chain=chain)
+        assert updated is not None
+        return updated
+
+    def auto_rebuy_status(self) -> dict[str, list[dict[str, Any]]]:
+        watches = self.connection.execute(
+            "SELECT * FROM auto_rebuy_watches "
+            "ORDER BY updated_at DESC, token_address"
+        ).fetchall()
+        executions = self.connection.execute(
+            "SELECT event_key, chain, token_address, symbol, funding_source, "
+            "status, input_usdc_raw, expected_output_raw, actual_output_raw, "
+            "output_decimals, signature, error, created_at, updated_at "
+            "FROM auto_buy_executions WHERE event_key LIKE '%:auto-rebuy:%' "
+            "ORDER BY updated_at DESC"
+        ).fetchall()
+        return {
+            "watches": [dict(row) for row in watches],
+            "executions": [dict(row) for row in executions],
         }
 
     def auto_buy_status(self) -> dict[str, Any]:

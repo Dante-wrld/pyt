@@ -98,6 +98,107 @@ def auto_buy_discovery_rejection(
     return None
 
 
+def auto_rebuy_recovery_assessment(
+    watch: Mapping[str, Any],
+    quote: MarketQuote | None,
+    settings: Settings,
+    *,
+    now: float | None = None,
+) -> tuple[bool, str, dict[str, float]]:
+    """Evaluate an opt-in post-sale recovery without predicting a rebound."""
+    observed_at = time.time() if now is None else now
+    age = observed_at - float(watch["sold_at_epoch"])
+    if age < settings.auto_rebuy_cooldown_seconds:
+        remaining = settings.auto_rebuy_cooldown_seconds - age
+        return False, f"cooldown has {remaining:.0f}s remaining", {}
+    if age > settings.auto_rebuy_max_watch_seconds:
+        return False, "recovery watch expired", {"age_seconds": age}
+    if quote is None or quote.price_usd is None or quote.price_usd <= 0:
+        return False, "USD market quote unavailable", {}
+
+    price = quote.price_usd
+    exit_price = float(watch["exit_price_usd"])
+    low = min(float(watch["lowest_price_usd"]), price)
+    drop_pct = max(0.0, (1 - low / exit_price) * 100)
+    rebound_pct = max(0.0, (price / low - 1) * 100)
+    discount_pct = (1 - price / exit_price) * 100
+    momentum_pct = quote.price_change_m5_pct or 0.0
+    ratio = quote.buy_sell_ratio
+    liquidity = quote.liquidity_usd or 0.0
+    exit_liquidity = float(watch["exit_liquidity_usd"] or 0.0)
+    retention_pct = (
+        liquidity / exit_liquidity * 100 if exit_liquidity > 0 else 100.0
+    )
+    previous_price = watch.get("last_price_usd")
+    rising = previous_price is not None and price > float(previous_price)
+    metrics = {
+        "age_seconds": age,
+        "price_usd": price,
+        "lowest_price_usd": low,
+        "drop_pct": drop_pct,
+        "rebound_pct": rebound_pct,
+        "entry_discount_pct": discount_pct,
+        "momentum_pct": momentum_pct,
+        "buy_sell_ratio": ratio,
+        "liquidity_usd": liquidity,
+        "liquidity_retention_pct": retention_pct,
+    }
+
+    rejections: list[str] = []
+    if drop_pct < settings.auto_rebuy_min_drop_pct:
+        rejections.append(
+            f"drop {drop_pct:.1f}% is below "
+            f"{settings.auto_rebuy_min_drop_pct:.1f}%"
+        )
+    if rebound_pct < settings.auto_rebuy_min_rebound_pct:
+        rejections.append(
+            f"rebound {rebound_pct:.1f}% is below "
+            f"{settings.auto_rebuy_min_rebound_pct:.1f}%"
+        )
+    if discount_pct < settings.auto_rebuy_min_entry_discount_pct:
+        rejections.append(
+            f"entry discount {discount_pct:.1f}% is below "
+            f"{settings.auto_rebuy_min_entry_discount_pct:.1f}%"
+        )
+    if momentum_pct < settings.auto_rebuy_min_momentum_pct:
+        rejections.append(
+            f"5m momentum {momentum_pct:.1f}% is below "
+            f"{settings.auto_rebuy_min_momentum_pct:.1f}%"
+        )
+    if ratio < settings.auto_rebuy_min_buy_sell_ratio:
+        rejections.append(
+            f"buyer/seller ratio {ratio:.2f}x is below "
+            f"{settings.auto_rebuy_min_buy_sell_ratio:.2f}x"
+        )
+    if quote.buys_m5 < settings.auto_rebuy_min_buys_m5:
+        rejections.append(
+            f"5m buys {quote.buys_m5} are below "
+            f"{settings.auto_rebuy_min_buys_m5}"
+        )
+    if liquidity < settings.auto_rebuy_min_liquidity_usd:
+        rejections.append(
+            f"liquidity ${liquidity:,.0f} is below "
+            f"${settings.auto_rebuy_min_liquidity_usd:,.0f}"
+        )
+    if retention_pct < settings.auto_rebuy_min_liquidity_retention_pct:
+        rejections.append(
+            f"liquidity retention {retention_pct:.1f}% is below "
+            f"{settings.auto_rebuy_min_liquidity_retention_pct:.1f}%"
+        )
+    if not rising:
+        rejections.append("price is not rising versus the prior poll")
+    if rejections:
+        return False, "; ".join(rejections), metrics
+    return (
+        True,
+        (
+            f"recovery confirmed: {drop_pct:.1f}% drop, "
+            f"{rebound_pct:.1f}% rebound, {momentum_pct:+.1f}% momentum"
+        ),
+        metrics,
+    )
+
+
 def _is_stock_token_symbol(
     symbol: str, stock_symbols: frozenset[str]
 ) -> bool:
@@ -140,6 +241,7 @@ class LaunchGuard:
         self.portfolio_last_decisions: dict[str, str] = {}
         self.auto_sell_dry_run_seen: set[str] = set()
         self.auto_buy_dry_run_seen: set[str] = set()
+        self.auto_buy_lock = asyncio.Lock()
         self.recommendations = RecommendationBook(
             pool_size=settings.recommendation_pool_size,
             ttl_seconds=settings.recommendation_ttl_seconds,
@@ -815,6 +917,9 @@ class LaunchGuard:
                 else:
                     holdings = list(saved.values())
 
+                if self.settings.auto_rebuy_enabled:
+                    await self._monitor_auto_rebuys(balances_by_mint, rpc)
+
                 semaphore = asyncio.Semaphore(5)
 
                 async def evaluate(holding: OwnedHolding):
@@ -926,9 +1031,15 @@ class LaunchGuard:
         if not self.settings.auto_sell_enabled:
             return
         if signal.token_address in self.settings.auto_sell_excluded_mints:
+            self.store.clear_auto_sell_signal_confirmation(
+                signal.token_address
+            )
             return
         policy = self.store.load_auto_sell_policy(signal.token_address)
         if policy is not None and not bool(policy["armed"]):
+            self.store.clear_auto_sell_signal_confirmation(
+                signal.token_address
+            )
             return
         holding = next(
             (
@@ -940,6 +1051,7 @@ class LaunchGuard:
         )
         intent = None
         source = "portfolio signal"
+        cycle = self.store.auto_sell_cycle(signal.token_address)
         if (
             policy is not None
             and bool(policy["armed"])
@@ -956,17 +1068,41 @@ class LaunchGuard:
                 current_price_usd=signal.current_price,
                 entry_price_usd=holding.entry_price,
                 original_cost_usd=holding.cost_amount,
+                cycle=cycle,
             )
             if intent is not None:
                 source = "profit ladder"
 
-        if (
+        portfolio_signal_eligible = (
             intent is None
             and self.settings.auto_sell_portfolio_signals
             and signal.current_value_usd is not None
             and signal.current_value_usd
             >= self.settings.auto_sell_min_value_usd
-        ):
+            and signal.decision
+            in {"TAKE PARTIAL", "PROTECT PROFIT", "EXIT WARNING"}
+        )
+        if portfolio_signal_eligible:
+            confirmation = self.store.record_auto_sell_signal_confirmation(
+                token_address=signal.token_address,
+                decision=signal.decision,
+                reason=signal.reason,
+                observed_at_epoch=time.time(),
+                max_gap_seconds=(
+                    self.settings.auto_sell_signal_max_gap_seconds
+                ),
+            )
+            polls = int(confirmation["consecutive_polls"])
+            required = self.settings.auto_sell_signal_confirmation_polls
+            if polls < required:
+                LOGGER.warning(
+                    "AUTO-SELL CONFIRMING %s decision=%s polls=%d/%d",
+                    signal.symbol,
+                    signal.decision,
+                    polls,
+                    required,
+                )
+                return
             intent = self.portfolio_signal_exit.plan(
                 mint=signal.token_address,
                 symbol=signal.symbol,
@@ -974,6 +1110,11 @@ class LaunchGuard:
                 reason=signal.reason,
                 balance_raw=balance.raw_amount,
                 decimals=balance.decimals,
+                cycle=cycle,
+            )
+        elif intent is None:
+            self.store.clear_auto_sell_signal_confirmation(
+                signal.token_address
             )
         if intent is None:
             return
@@ -1115,6 +1256,7 @@ class LaunchGuard:
                 event_key=intent.event_key,
                 signature=receipt.signature,
                 sold_raw=receipt.input_amount_raw,
+                output_usdc_raw=receipt.output_amount_raw,
             )
         else:
             self.store.complete_auto_sell_execution(
@@ -1141,6 +1283,47 @@ class LaunchGuard:
             reinvest_pct=self.settings.auto_buy_reinvest_profit_pct,
             managed_complete=managed_complete,
         )
+        if (
+            self.settings.auto_rebuy_enabled
+            and source == "portfolio signal"
+            and intent.stage == 12
+            and managed_complete
+            and intent.mint not in self.settings.auto_buy_excluded_mints
+        ):
+            sold_raw = receipt.input_amount_raw
+            proceeds_raw = receipt.output_amount_raw
+            sell_signature = receipt.signature
+            if batch_key is not None and batch_complete:
+                completed_batch = self.store.load_auto_sell_batch(batch_key)
+                if completed_batch is not None:
+                    sold_raw = int(completed_batch["sold_raw"])
+                    proceeds_raw = int(
+                        completed_batch["proceeds_usdc_raw"]
+                    )
+                    sell_signature = str(
+                        completed_batch["last_signature"]
+                        or receipt.signature
+                    )
+            sold_tokens = sold_raw / (10**intent.decimals)
+            if sold_tokens > 0 and proceeds_raw > 0:
+                watch = self.store.start_auto_rebuy_watch(
+                    token_address=intent.mint,
+                    symbol=intent.symbol,
+                    sell_signature=sell_signature,
+                    exit_price_usd=(proceeds_raw / 1_000_000) / sold_tokens,
+                    exit_liquidity_usd=signal.liquidity_usd,
+                    sale_proceeds_usdc_raw=proceeds_raw,
+                    sold_at_epoch=time.time(),
+                    max_rebuys=self.settings.auto_rebuy_max_per_token,
+                )
+                if watch is not None:
+                    self.store.clear_auto_sell_signal_confirmation(intent.mint)
+                    LOGGER.warning(
+                        "AUTO-REBUY WATCHING %s cycle=%d exit=$%.12g",
+                        intent.symbol,
+                        int(watch["cycle"]),
+                        float(watch["exit_price_usd"]),
+                    )
         LOGGER.warning(
             "AUTO-SELL CONFIRMED %s source=%s input_raw=%d "
             "adaptive_attempts=%d batch_complete=%s signature=%s",
@@ -1180,7 +1363,293 @@ class LaunchGuard:
                 reinvestment["reinvest_credit_usdc_raw"] / 1_000_000,
             )
 
+    async def _monitor_auto_rebuys(
+        self,
+        balances_by_mint: Mapping[str, SolanaTokenHolding],
+        rpc: SolanaRpc,
+    ) -> None:
+        watches = self.store.active_auto_rebuy_watches()
+        if not watches:
+            return
+        semaphore = asyncio.Semaphore(5)
+
+        async def load_quote(
+            watch: Mapping[str, Any],
+        ) -> tuple[Mapping[str, Any], MarketQuote | None]:
+            async with semaphore:
+                quote = await self.oracle.quote(
+                    str(watch["token_address"]), chain=str(watch["chain"])
+                )
+            return watch, quote
+
+        observations = await asyncio.gather(
+            *(load_quote(watch) for watch in watches)
+        )
+        observed_at = time.time()
+        for watch, quote in observations:
+            mint = str(watch["token_address"])
+            symbol = str(watch["symbol"])
+            if mint in self.settings.auto_buy_excluded_mints:
+                self.store.expire_auto_rebuy_watch(
+                    token_address=mint,
+                    reason="mint is excluded from automatic buys",
+                )
+                continue
+            wallet_balance = balances_by_mint.get(mint)
+            if wallet_balance is not None and wallet_balance.raw_amount > 0:
+                self.store.expire_auto_rebuy_watch(
+                    token_address=mint,
+                    reason=(
+                        "wallet already holds this mint; cost-basis mixing "
+                        "blocked"
+                    ),
+                )
+                continue
+            qualifying, reason, metrics = auto_rebuy_recovery_assessment(
+                watch,
+                quote,
+                self.settings,
+                now=observed_at,
+            )
+            age = observed_at - float(watch["sold_at_epoch"])
+            if age > self.settings.auto_rebuy_max_watch_seconds:
+                self.store.expire_auto_rebuy_watch(
+                    token_address=mint,
+                    reason="recovery watch expired",
+                )
+                continue
+            if quote is None or quote.price_usd is None or quote.price_usd <= 0:
+                self.store.reset_auto_rebuy_confirmation(
+                    token_address=mint,
+                    reason=reason,
+                )
+                continue
+            updated = self.store.record_auto_rebuy_observation(
+                token_address=mint,
+                current_price_usd=quote.price_usd,
+                observed_at_epoch=observed_at,
+                qualifying=qualifying,
+                confirmation_required=(
+                    self.settings.auto_rebuy_confirmation_polls
+                ),
+                reason=reason,
+            )
+            if qualifying:
+                LOGGER.warning(
+                    "AUTO-REBUY CONFIRMING %s polls=%d/%d drop=%.1f%% "
+                    "rebound=%.1f%%",
+                    symbol,
+                    int(updated["confirmation_count"]),
+                    self.settings.auto_rebuy_confirmation_polls,
+                    metrics["drop_pct"],
+                    metrics["rebound_pct"],
+                )
+            if updated["status"] == "READY":
+                await self._execute_auto_rebuy(updated, quote, rpc)
+
+    async def _execute_auto_rebuy(
+        self,
+        watch: Mapping[str, Any],
+        quote: MarketQuote,
+        rpc: SolanaRpc,
+    ) -> None:
+        async with self.auto_buy_lock:
+            await self._execute_auto_rebuy_locked(watch, quote, rpc)
+
+    async def _execute_auto_rebuy_locked(
+        self,
+        watch: Mapping[str, Any],
+        quote: MarketQuote,
+        rpc: SolanaRpc,
+    ) -> None:
+        mint = str(watch["token_address"])
+        symbol = str(watch["symbol"])
+        seed_raw = round(
+            min(
+                self.settings.auto_buy_seed_size_usdc,
+                self.settings.auto_rebuy_max_size_usdc,
+            )
+            * 1_000_000
+        )
+        try:
+            amount_raw, funding_source = self.store.preview_auto_buy_budget(
+                seed_size_usdc_raw=seed_raw,
+                max_seed_buys=self.settings.auto_buy_max_seed_buys,
+                max_open_positions=(
+                    self.settings.auto_buy_max_open_positions
+                ),
+            )
+        except ValueError as exc:
+            LOGGER.info("AUTO-REBUY WAITING %s (%s)", symbol, exc)
+            return
+        event_key = f"solana:{mint}:auto-rebuy:{int(watch['cycle'])}"
+        intent = BuyIntent(
+            mint=mint,
+            symbol=symbol,
+            event_key=event_key,
+            amount_usdc_raw=amount_raw,
+            funding_source=funding_source,
+        )
+        if self.auto_buyer is None:
+            if event_key not in self.auto_buy_dry_run_seen:
+                LOGGER.warning(
+                    "AUTO-REBUY READY (DRY RUN) %s amount=$%.2f "
+                    "funding=%s reason=%s",
+                    symbol,
+                    amount_raw / 1_000_000,
+                    funding_source,
+                    watch["last_reason"],
+                )
+                self.auto_buy_dry_run_seen.add(event_key)
+            return
+
+        assert self.settings.solana_wallet_address is not None
+        try:
+            usdc = await rpc.token_balance(
+                self.settings.solana_wallet_address, USDC_MINT
+            )
+            existing = await rpc.token_balance(
+                self.settings.solana_wallet_address, mint
+            )
+            output_decimals = await rpc.mint_decimals(mint)
+            if usdc.raw_amount < amount_raw:
+                raise ValueError("wallet USDC balance is below the buy amount")
+            if existing.raw_amount > 0:
+                raise ValueError(
+                    "wallet already holds this mint; cost-basis mixing blocked"
+                )
+            simulation = await self.auto_buyer.preflight(intent, rpc)
+            prepared = simulation.prepared
+        except (ConnectionError, RuntimeError, ValueError) as exc:
+            LOGGER.warning("AUTO-REBUY NOT SUBMITTED %s (%s)", symbol, exc)
+            return
+        claimed = self.store.begin_auto_buy_execution(
+            event_key=event_key,
+            token_address=mint,
+            symbol=symbol,
+            funding_source=funding_source,
+            input_usdc_raw=prepared.input_amount_raw,
+            expected_output_raw=prepared.expected_output_raw,
+        )
+        if not claimed:
+            return
+        try:
+            receipt = await self.auto_buyer.execute(prepared)
+            if receipt.output_amount_raw <= 0:
+                raise RuntimeError("confirmed re-buy reported no token output")
+        except (ConnectionError, RuntimeError, ValueError) as exc:
+            failure_signature = getattr(exc, "signature", None)
+            self.store.freeze_auto_buy_execution(
+                event_key=event_key,
+                error=str(exc),
+                signature=failure_signature,
+            )
+            review_reason = str(exc) + (
+                f"; signature={failure_signature}"
+                if failure_signature
+                else ""
+            )
+            self.store.freeze_auto_rebuy(
+                token_address=mint, error=review_reason
+            )
+            LOGGER.error(
+                "AUTO-REBUY FROZEN FOR REVIEW %s (%s)", symbol, exc
+            )
+            if self.push_client is not None:
+                try:
+                    await self.push_client.send(
+                        title="🔴 Launch Guard: RE-BUY NEEDS REVIEW",
+                        message=(
+                            f"TOKEN: {symbol} • SOLANA\n"
+                            f"No automatic retry will occur.\nReason: {exc}"
+                            + (
+                                f"\nSignature: {failure_signature}"
+                                if failure_signature
+                                else ""
+                            )
+                        ),
+                        sound="siren",
+                        priority=1,
+                    )
+                except ConnectionError as notification_exc:
+                    LOGGER.warning(
+                        "Could not send auto-rebuy review alert (%s)",
+                        notification_exc,
+                    )
+            return
+
+        self.store.complete_auto_buy_execution(
+            event_key=event_key,
+            signature=receipt.signature,
+            actual_output_raw=receipt.output_amount_raw,
+            output_decimals=output_decimals,
+        )
+        quantity = receipt.output_amount_raw / (10**output_decimals)
+        cost_usdc = receipt.input_amount_raw / 1_000_000
+        self.store.save_owned_holding(
+            OwnedHolding(
+                chain="solana",
+                token_address=mint,
+                symbol=symbol,
+                quantity=quantity,
+                entry_price=cost_usdc / quantity,
+                price_currency="USD",
+                cost_amount=cost_usdc,
+            )
+        )
+        self.store.complete_auto_rebuy(
+            token_address=mint,
+            buy_signature=receipt.signature,
+            reset_auto_sell=True,
+        )
+        self.store.clear_auto_sell_signal_confirmation(mint)
+        self.portfolio_advisor.restore_state(
+            chain="solana",
+            token_address=mint,
+            peak_price=quote.price_usd or cost_usdc / quantity,
+            baseline_liquidity_usd=quote.liquidity_usd or 0.0,
+        )
+        self.store.save_portfolio_state(
+            chain="solana",
+            token_address=mint,
+            peak_price=quote.price_usd or cost_usdc / quantity,
+            baseline_liquidity_usd=quote.liquidity_usd or 0.0,
+        )
+        LOGGER.warning(
+            "AUTO-REBUY CONFIRMED %s amount=$%.2f cycle=%d signature=%s",
+            symbol,
+            cost_usdc,
+            int(watch["cycle"]),
+            receipt.signature,
+        )
+        if self.push_client is not None:
+            try:
+                await self.push_client.send(
+                    title="🟢 Launch Guard: RE-BUY CONFIRMED",
+                    message=(
+                        f"TOKEN: {symbol} • SOLANA\n"
+                        f"Amount: ${cost_usdc:.2f}\n"
+                        f"Cycle: {int(watch['cycle'])}\n"
+                        f"Signature: {receipt.signature}"
+                    ),
+                    url=f"https://solscan.io/tx/{receipt.signature}",
+                    url_title="Open Solscan",
+                    sound="cashregister",
+                    priority=1,
+                )
+            except ConnectionError as notification_exc:
+                LOGGER.warning(
+                    "Re-buy confirmed, but the phone alert failed (%s)",
+                    notification_exc,
+                )
+
     async def _maybe_auto_buy(
+        self, candidate: RecommendationCandidate
+    ) -> None:
+        async with self.auto_buy_lock:
+            await self._maybe_auto_buy_locked(candidate)
+
+    async def _maybe_auto_buy_locked(
         self, candidate: RecommendationCandidate
     ) -> None:
         if (
@@ -1308,7 +1777,8 @@ class LaunchGuard:
                     cost_amount=cost_usdc,
                 )
             )
-            self.store.arm_auto_sell(intent.mint)
+            self.store.arm_auto_sell(intent.mint, reset_stage=True)
+            self.store.clear_auto_sell_signal_confirmation(intent.mint)
         except (ConnectionError, RuntimeError, ValueError) as exc:
             self.store.freeze_auto_buy_execution(
                 event_key=event_key,
@@ -1941,6 +2411,24 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--auto-rebuy-status",
+        action="store_true",
+        help="show post-sale recovery watches and completed re-buys",
+    )
+    parser.add_argument(
+        "--cancel-auto-rebuy-mint",
+        metavar="MINT",
+        help="cancel a watching, ready, or review-state recovery re-buy",
+    )
+    parser.add_argument(
+        "--preflight-auto-rebuy-mint",
+        metavar="MINT",
+        help=(
+            "build, locally sign, and RPC-simulate a watched recovery buy "
+            "without broadcasting it"
+        ),
+    )
+    parser.add_argument(
         "--recommendations-display",
         action="store_true",
         help=argparse.SUPPRESS,
@@ -2282,6 +2770,88 @@ async def preflight_auto_buy(
     }
 
 
+async def preflight_auto_rebuy(
+    settings: Settings, store: SQLiteStore, mint: str
+) -> dict[str, Any]:
+    if not settings.auto_rebuy_enabled:
+        raise ValueError("auto-rebuy preflight requires AUTO_REBUY_ENABLED=true")
+    if not settings.solana_wallet_address:
+        raise ValueError("auto-rebuy preflight requires SOLANA_WALLET_ADDRESS")
+    if not settings.jupiter_api_key:
+        raise ValueError("auto-rebuy preflight requires JUPITER_API_KEY")
+    if mint in settings.auto_buy_excluded_mints:
+        raise ValueError("this mint is excluded from automatic buys")
+    watch = store.load_auto_rebuy_watch(mint)
+    if watch is None or watch["status"] not in {"WATCHING", "READY"}:
+        raise ValueError("auto-rebuy preflight requires an active recovery watch")
+
+    seed_raw = round(
+        min(settings.auto_buy_seed_size_usdc, settings.auto_rebuy_max_size_usdc)
+        * 1_000_000
+    )
+    amount_raw, funding_source = store.preview_auto_buy_budget(
+        seed_size_usdc_raw=seed_raw,
+        max_seed_buys=settings.auto_buy_max_seed_buys,
+        max_open_positions=settings.auto_buy_max_open_positions,
+    )
+    rpc = SolanaRpc(settings.solana_rpc_http_url)
+    usdc = await rpc.token_balance(settings.solana_wallet_address, USDC_MINT)
+    if usdc.raw_amount < amount_raw:
+        raise ValueError("wallet USDC balance is below the preflight amount")
+    existing = await rpc.token_balance(settings.solana_wallet_address, mint)
+    if existing.raw_amount > 0:
+        raise ValueError(
+            "wallet already holds this mint; cost-basis mixing blocked"
+        )
+    decimals = await rpc.mint_decimals(mint)
+    signer = KeyringSolanaSigner(
+        expected_public_key=settings.solana_wallet_address
+    )
+    buyer = SolanaAutoBuyer(
+        client=JupiterSwapClient(api_key=settings.jupiter_api_key),
+        signer=signer,
+        max_price_impact_pct=settings.auto_buy_max_price_impact_pct,
+        max_slippage_bps=settings.auto_buy_max_slippage_bps,
+        floor_percentages=settings.auto_trade_floor_percentages,
+    )
+    intent = BuyIntent(
+        mint=mint,
+        symbol=str(watch["symbol"]),
+        event_key=f"solana:{mint}:auto-rebuy-preflight:{watch['cycle']}",
+        amount_usdc_raw=amount_raw,
+        funding_source=funding_source,
+    )
+    receipt = await buyer.preflight(intent, rpc)
+    prepared = receipt.prepared
+    return {
+        "result": "PASSED",
+        "broadcast": receipt.broadcast,
+        "wallet": signer.public_key,
+        "mint": mint,
+        "symbol": intent.symbol,
+        "watch_status": watch["status"],
+        "cycle": watch["cycle"],
+        "confirmation_count": watch["confirmation_count"],
+        "funding_source": funding_source,
+        "input_usdc": prepared.input_amount_raw / 1_000_000,
+        "expected_output_raw": prepared.expected_output_raw,
+        "expected_output_tokens": prepared.expected_output_raw / (10**decimals),
+        "minimum_output_raw": prepared.minimum_output_raw,
+        "minimum_output_tokens": prepared.minimum_output_raw / (10**decimals),
+        "price_impact_pct": prepared.price_impact_pct,
+        "quoted_price_impact_pct": prepared.quoted_price_impact_pct,
+        "router": prepared.router,
+        "mode": prepared.mode,
+        "slippage_bps": prepared.slippage_bps,
+        "quoted_slippage_bps": prepared.quoted_slippage_bps,
+        "reported_slippage_bps": prepared.reported_slippage_bps,
+        "threshold_slippage_bps": prepared.threshold_slippage_bps,
+        "fee_bps": prepared.fee_bps,
+        "simulation_units_consumed": receipt.units_consumed,
+        "simulation_log_count": receipt.log_count,
+    }
+
+
 def _process_exists(pid: int) -> bool:
     try:
         os.kill(pid, 0)
@@ -2562,6 +3132,18 @@ def main() -> None:
             LOGGER.info("Auto-buy disarmed for %s", args.disarm_auto_buy_mint)
         elif args.auto_buy_status:
             print(json.dumps(store.auto_buy_status(), indent=2))
+        elif args.auto_rebuy_status:
+            print(json.dumps(store.auto_rebuy_status(), indent=2))
+        elif args.cancel_auto_rebuy_mint:
+            cancelled = store.cancel_auto_rebuy(args.cancel_auto_rebuy_mint)
+            if not cancelled:
+                raise ValueError(
+                    "no active or review-state auto-rebuy watch was found"
+                )
+            LOGGER.info(
+                "Auto-rebuy cancelled for %s",
+                args.cancel_auto_rebuy_mint,
+            )
         elif args.preflight_auto_buy_mint:
             try:
                 result = asyncio.run(
@@ -2572,6 +3154,17 @@ def main() -> None:
             except (ConnectionError, RuntimeError) as exc:
                 raise ValueError(f"auto-buy preflight failed: {exc}") from exc
             print("AUTO-BUY PREFLIGHT PASSED — NO TRANSACTION BROADCAST")
+            print(json.dumps(result, indent=2))
+        elif args.preflight_auto_rebuy_mint:
+            try:
+                result = asyncio.run(
+                    preflight_auto_rebuy(
+                        settings, store, args.preflight_auto_rebuy_mint
+                    )
+                )
+            except (ConnectionError, RuntimeError) as exc:
+                raise ValueError(f"auto-rebuy preflight failed: {exc}") from exc
+            print("AUTO-REBUY PREFLIGHT PASSED — NO TRANSACTION BROADCAST")
             print(json.dumps(result, indent=2))
         else:
             guard = LaunchGuard(settings, store)

@@ -188,6 +188,8 @@ class Settings:
     auto_sell_protect_profit_fraction: float = 1.0
     auto_sell_exit_warning_fraction: float = 1.0
     auto_sell_min_value_usd: float = 1.0
+    auto_sell_signal_confirmation_polls: int = 3
+    auto_sell_signal_max_gap_seconds: float = 180.0
     auto_sell_excluded_mints: tuple[str, ...] = (USDC_MINT,)
     auto_buy_enabled: bool = False
     auto_buy_live: bool = False
@@ -202,6 +204,20 @@ class Settings:
     auto_buy_reinvest_profit_pct: float = 50.0
     auto_buy_max_price_impact_pct: float = 5.0
     auto_buy_max_slippage_bps: int = 500
+    auto_rebuy_enabled: bool = False
+    auto_rebuy_cooldown_seconds: float = 600.0
+    auto_rebuy_max_watch_seconds: float = 86_400.0
+    auto_rebuy_min_drop_pct: float = 10.0
+    auto_rebuy_min_rebound_pct: float = 5.0
+    auto_rebuy_min_entry_discount_pct: float = 5.0
+    auto_rebuy_min_momentum_pct: float = 3.0
+    auto_rebuy_min_buy_sell_ratio: float = 1.4
+    auto_rebuy_min_buys_m5: int = 8
+    auto_rebuy_min_liquidity_usd: float = 20_000.0
+    auto_rebuy_min_liquidity_retention_pct: float = 80.0
+    auto_rebuy_confirmation_polls: int = 3
+    auto_rebuy_max_per_token: int = 1
+    auto_rebuy_max_size_usdc: float = 5.0
     jupiter_api_key: str | None = None
     ethereum_token_addresses: tuple[str, ...] = ()
     base_token_addresses: tuple[str, ...] = ()
@@ -399,6 +415,12 @@ class Settings:
             auto_sell_min_value_usd=_float(
                 "AUTO_SELL_MIN_VALUE_USD", 1.0
             ),
+            auto_sell_signal_confirmation_polls=_int(
+                "AUTO_SELL_SIGNAL_CONFIRMATION_POLLS", 3
+            ),
+            auto_sell_signal_max_gap_seconds=_float(
+                "AUTO_SELL_SIGNAL_MAX_GAP_SECONDS", 180.0
+            ),
             auto_sell_excluded_mints=tuple(
                 dict.fromkeys(
                     (USDC_MINT, *_addresses("AUTO_SELL_EXCLUDED_MINTS"))
@@ -434,6 +456,46 @@ class Settings:
             ),
             auto_buy_max_slippage_bps=_int(
                 "AUTO_BUY_MAX_SLIPPAGE_BPS", 500
+            ),
+            auto_rebuy_enabled=_bool("AUTO_REBUY_ENABLED", False),
+            auto_rebuy_cooldown_seconds=_float(
+                "AUTO_REBUY_COOLDOWN_SECONDS", 600.0
+            ),
+            auto_rebuy_max_watch_seconds=_float(
+                "AUTO_REBUY_MAX_WATCH_SECONDS", 86_400.0
+            ),
+            auto_rebuy_min_drop_pct=_float(
+                "AUTO_REBUY_MIN_DROP_PCT", 10.0
+            ),
+            auto_rebuy_min_rebound_pct=_float(
+                "AUTO_REBUY_MIN_REBOUND_PCT", 5.0
+            ),
+            auto_rebuy_min_entry_discount_pct=_float(
+                "AUTO_REBUY_MIN_ENTRY_DISCOUNT_PCT", 5.0
+            ),
+            auto_rebuy_min_momentum_pct=_float(
+                "AUTO_REBUY_MIN_MOMENTUM_PCT", 3.0
+            ),
+            auto_rebuy_min_buy_sell_ratio=_float(
+                "AUTO_REBUY_MIN_BUY_SELL_RATIO", 1.4
+            ),
+            auto_rebuy_min_buys_m5=_int(
+                "AUTO_REBUY_MIN_BUYS_M5", 8
+            ),
+            auto_rebuy_min_liquidity_usd=_float(
+                "AUTO_REBUY_MIN_LIQUIDITY_USD", 20_000.0
+            ),
+            auto_rebuy_min_liquidity_retention_pct=_float(
+                "AUTO_REBUY_MIN_LIQUIDITY_RETENTION_PCT", 80.0
+            ),
+            auto_rebuy_confirmation_polls=_int(
+                "AUTO_REBUY_CONFIRMATION_POLLS", 3
+            ),
+            auto_rebuy_max_per_token=_int(
+                "AUTO_REBUY_MAX_PER_TOKEN", 1
+            ),
+            auto_rebuy_max_size_usdc=_float(
+                "AUTO_REBUY_MAX_SIZE_USDC", 5.0
             ),
             jupiter_api_key=os.getenv("JUPITER_API_KEY") or None,
             ethereum_token_addresses=_addresses(
@@ -546,6 +608,14 @@ class Settings:
                 raise ValueError(f"{name} must be above 0 and at most 1")
         if self.auto_sell_min_value_usd <= 0:
             raise ValueError("AUTO_SELL_MIN_VALUE_USD must be above 0")
+        if not 1 <= self.auto_sell_signal_confirmation_polls <= 20:
+            raise ValueError(
+                "AUTO_SELL_SIGNAL_CONFIRMATION_POLLS must be from 1 through 20"
+            )
+        if self.auto_sell_signal_max_gap_seconds < 10:
+            raise ValueError(
+                "AUTO_SELL_SIGNAL_MAX_GAP_SECONDS must be at least 10"
+            )
         if self.auto_sell_live and not self.auto_sell_enabled:
             raise ValueError("AUTO_SELL_LIVE requires AUTO_SELL_ENABLED=true")
         if self.auto_sell_portfolio_signals and not self.auto_sell_enabled:
@@ -603,6 +673,54 @@ class Settings:
         if self.auto_buy_live and not self.solana_wallet_address:
             raise ValueError(
                 "AUTO_BUY_LIVE requires SOLANA_WALLET_ADDRESS"
+            )
+        if self.auto_rebuy_enabled and not self.auto_buy_enabled:
+            raise ValueError("AUTO_REBUY_ENABLED requires AUTO_BUY_ENABLED=true")
+        if self.auto_rebuy_enabled and not self.auto_sell_enabled:
+            raise ValueError("AUTO_REBUY_ENABLED requires AUTO_SELL_ENABLED=true")
+        if self.auto_rebuy_cooldown_seconds < 60:
+            raise ValueError(
+                "AUTO_REBUY_COOLDOWN_SECONDS must be at least 60"
+            )
+        if self.auto_rebuy_max_watch_seconds < self.auto_rebuy_cooldown_seconds:
+            raise ValueError(
+                "AUTO_REBUY_MAX_WATCH_SECONDS must be at least the cooldown"
+            )
+        for name, value in (
+            ("AUTO_REBUY_MIN_DROP_PCT", self.auto_rebuy_min_drop_pct),
+            ("AUTO_REBUY_MIN_REBOUND_PCT", self.auto_rebuy_min_rebound_pct),
+            (
+                "AUTO_REBUY_MIN_ENTRY_DISCOUNT_PCT",
+                self.auto_rebuy_min_entry_discount_pct,
+            ),
+            (
+                "AUTO_REBUY_MIN_LIQUIDITY_RETENTION_PCT",
+                self.auto_rebuy_min_liquidity_retention_pct,
+            ),
+        ):
+            if not 0 < value < 100:
+                raise ValueError(f"{name} must be above 0 and below 100")
+        if self.auto_rebuy_min_momentum_pct <= 0:
+            raise ValueError("AUTO_REBUY_MIN_MOMENTUM_PCT must be above 0")
+        if self.auto_rebuy_min_buy_sell_ratio <= 0:
+            raise ValueError(
+                "AUTO_REBUY_MIN_BUY_SELL_RATIO must be above 0"
+            )
+        if self.auto_rebuy_min_buys_m5 < 1:
+            raise ValueError("AUTO_REBUY_MIN_BUYS_M5 must be at least one")
+        if self.auto_rebuy_min_liquidity_usd <= 0:
+            raise ValueError("AUTO_REBUY_MIN_LIQUIDITY_USD must be above 0")
+        if not 1 <= self.auto_rebuy_confirmation_polls <= 20:
+            raise ValueError(
+                "AUTO_REBUY_CONFIRMATION_POLLS must be from 1 through 20"
+            )
+        if not 1 <= self.auto_rebuy_max_per_token <= 5:
+            raise ValueError(
+                "AUTO_REBUY_MAX_PER_TOKEN must be from 1 through 5"
+            )
+        if not 1 <= self.auto_rebuy_max_size_usdc <= 100:
+            raise ValueError(
+                "AUTO_REBUY_MAX_SIZE_USDC must be from 1 through 100"
             )
         if self.standard_trade_size_usd <= 0 or self.moonshot_trade_size_usd <= 0:
             raise ValueError("USD position sizes must be greater than zero")

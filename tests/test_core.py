@@ -15,7 +15,9 @@ from solana_launch_guard.app import (
     LaunchGuard,
     _is_stock_token_symbol,
     auto_buy_discovery_rejection,
+    auto_rebuy_recovery_assessment,
     preflight_auto_buy,
+    preflight_auto_rebuy,
     preflight_auto_sell,
     preflight_owned_auto_sell,
     reconcile_auto_sell_review,
@@ -31,6 +33,8 @@ from solana_launch_guard.core import (
 from solana_launch_guard.execution import (
     USDC_MINT,
     BuyIntent,
+    BuyPreflightReceipt,
+    BuyReceipt,
     JupiterExecutionError,
     JupiterRequestError,
     JupiterSwapClient,
@@ -1085,11 +1089,13 @@ def test_auto_sell_batch_persists_confirmed_chunk_progress(
         event_key=first_key,
         signature="sig-1",
         sold_raw=40,
+        output_usdc_raw=4_000_000,
     )
     batch = store.load_or_create_auto_sell_batch(**batch_values)
     assert batch["sold_raw"] == 40
     assert batch["next_chunk_index"] == 1
     assert batch["status"] == "ACTIVE"
+    assert batch["proceeds_usdc_raw"] == 4_000_000
 
     second_key = f"{batch_values['batch_key']}:chunk:1"
     assert store.begin_auto_sell_execution(
@@ -1106,12 +1112,53 @@ def test_auto_sell_batch_persists_confirmed_chunk_progress(
         event_key=second_key,
         signature="sig-2",
         sold_raw=60,
+        output_usdc_raw=6_000_000,
     )
     batch = store.load_or_create_auto_sell_batch(**batch_values)
     assert batch["sold_raw"] == 100
     assert batch["next_chunk_index"] == 2
     assert batch["status"] == "CONFIRMED"
     assert batch["last_signature"] == "sig-2"
+    assert batch["proceeds_usdc_raw"] == 10_000_000
+    store.close()
+
+
+def test_auto_sell_batch_migration_adds_proceeds_column(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "old-sell-batch.db"
+    connection = sqlite3.connect(path)
+    connection.execute(
+        """
+        CREATE TABLE auto_sell_batches (
+            batch_key TEXT PRIMARY KEY,
+            chain TEXT NOT NULL,
+            token_address TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            stage INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            target_raw INTEGER NOT NULL,
+            full_exit INTEGER NOT NULL DEFAULT 0,
+            sold_raw INTEGER NOT NULL DEFAULT 0,
+            next_chunk_index INTEGER NOT NULL DEFAULT 0,
+            last_signature TEXT,
+            error TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    store = SQLiteStore(str(path))
+    columns = {
+        row["name"]
+        for row in store.connection.execute(
+            "PRAGMA table_info(auto_sell_batches)"
+        ).fetchall()
+    }
+    assert "proceeds_usdc_raw" in columns
     store.close()
 
 
@@ -1805,6 +1852,108 @@ def test_auto_buy_preflight_uses_seed_budget_without_broadcast(
     assert result["input_usdc"] == 5
     assert result["expected_output_tokens"] == 250
     assert result["simulation_units_consumed"] == 456
+    assert store.auto_buy_status()["fund"]["seed_buys_used"] == 0
+    store.close()
+
+
+def test_auto_rebuy_preflight_respects_recovery_size_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wallet = str(Keypair().pubkey())
+    store = SQLiteStore(str(tmp_path / "rebuy-preflight.db"))
+    watch = store.start_auto_rebuy_watch(
+        token_address="MintRecovery111",
+        symbol="RECOVER",
+        sell_signature="sell-1",
+        exit_price_usd=1,
+        exit_liquidity_usd=100_000,
+        sale_proceeds_usdc_raw=10_000_000,
+        sold_at_epoch=time.time(),
+        max_rebuys=1,
+    )
+    assert watch is not None
+
+    class FakeRpc:
+        def __init__(self, _url: str) -> None:
+            pass
+
+        async def token_balance(
+            self, owner: str, mint: str
+        ) -> SolanaTokenHolding:
+            assert owner == wallet
+            if mint == USDC_MINT:
+                return SolanaTokenHolding(
+                    mint=mint, amount=20, raw_amount=20_000_000, decimals=6
+                )
+            return SolanaTokenHolding(
+                mint=mint, amount=0, raw_amount=0, decimals=6
+            )
+
+        async def mint_decimals(self, mint: str) -> int:
+            assert mint == "MintRecovery111"
+            return 6
+
+        async def simulate_transaction(
+            self, signed_transaction_b64: str
+        ) -> dict[str, object]:
+            assert signed_transaction_b64 == "signed-buy"
+            return {"err": None, "logs": ["ok"], "unitsConsumed": 456}
+
+    class FakeSigner:
+        def __init__(self, *, expected_public_key: str) -> None:
+            assert expected_public_key == wallet
+            self.public_key = wallet
+
+        def sign(self, transaction_b64: str) -> str:
+            assert transaction_b64 == "unsigned-buy"
+            return "signed-buy"
+
+    class FakeClient:
+        def __init__(self, *, api_key: str) -> None:
+            assert api_key == "jupiter-key"
+
+        async def order(self, **values: object) -> dict[str, object]:
+            assert values["input_mint"] == USDC_MINT
+            assert values["output_mint"] == "MintRecovery111"
+            assert values["amount_raw"] == 3_000_000
+            assert values["exclude_routers"] == ("jupiterz",)
+            return {
+                "inputMint": USDC_MINT,
+                "outputMint": "MintRecovery111",
+                "inAmount": "3000000",
+                "outAmount": "150000000",
+                "otherAmountThreshold": "145000000",
+                "priceImpact": -0.4,
+                "transaction": "unsigned-buy",
+                "requestId": "rebuy-preflight",
+            }
+
+        async def execute(self, **_values: object) -> dict[str, object]:
+            raise AssertionError("preflight must never execute")
+
+    monkeypatch.setattr("solana_launch_guard.app.SolanaRpc", FakeRpc)
+    monkeypatch.setattr("solana_launch_guard.app.KeyringSolanaSigner", FakeSigner)
+    monkeypatch.setattr("solana_launch_guard.app.JupiterSwapClient", FakeClient)
+    config = settings(
+        tmp_path / "rebuy-preflight.db",
+        solana_wallet_address=wallet,
+        jupiter_api_key="jupiter-key",
+        auto_sell_enabled=True,
+        auto_buy_enabled=True,
+        auto_buy_seed_size_usdc=10,
+        auto_rebuy_enabled=True,
+        auto_rebuy_max_size_usdc=3,
+    )
+
+    result = asyncio.run(
+        preflight_auto_rebuy(config, store, "MintRecovery111")
+    )
+
+    assert result["result"] == "PASSED"
+    assert result["broadcast"] is False
+    assert result["input_usdc"] == 3
+    assert result["expected_output_tokens"] == 150
+    assert result["watch_status"] == "WATCHING"
     assert store.auto_buy_status()["fund"]["seed_buys_used"] == 0
     store.close()
 
@@ -2533,6 +2682,7 @@ def test_owned_portfolio_exit_can_trigger_without_cost_basis(
         auto_sell_live=False,
         auto_sell_portfolio_signals=True,
         auto_sell_min_value_usd=1.0,
+        auto_sell_signal_confirmation_polls=1,
     )
     guard = LaunchGuard(config, store)
     signal = PortfolioSignal(
@@ -2581,6 +2731,7 @@ def test_live_portfolio_exit_executes_one_persistent_chunk_per_poll(
         auto_sell_adaptive_chunks=True,
         auto_sell_min_chunk_fraction=0.01,
         auto_sell_max_chunk_attempts=8,
+        auto_sell_signal_confirmation_polls=1,
     )
     guard = LaunchGuard(config, store)
     prepared_amounts: list[int] = []
@@ -2689,6 +2840,495 @@ def test_live_portfolio_exit_executes_one_persistent_chunk_per_poll(
     assert batch["status"] == "CONFIRMED"
     assert batch["sold_raw"] == 100_000_000
     assert batch["next_chunk_index"] == 2
+    store.close()
+
+
+def test_portfolio_sell_signal_requires_confirmation_across_restart(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "sell-confirmation.db"
+    store = SQLiteStore(str(path))
+    config = settings(
+        path,
+        auto_sell_enabled=True,
+        auto_sell_portfolio_signals=True,
+        auto_sell_signal_confirmation_polls=3,
+    )
+    signal = PortfolioSignal(
+        chain="solana",
+        token_address="MintConfirm111",
+        symbol="CONFIRM",
+        quantity=100,
+        current_price=0.1,
+        price_currency="USD",
+        current_value_usd=10,
+        pnl_pct=None,
+        decision="EXIT WARNING",
+        reason="momentum reversal",
+        price_change_m5_pct=-10,
+        buys_m5=2,
+        sells_m5=8,
+        liquidity_usd=20_000,
+        entry_price=None,
+        peak_price=0.12,
+    )
+    balance = SolanaTokenHolding(
+        mint=signal.token_address,
+        amount=100,
+        raw_amount=100_000_000,
+        decimals=6,
+    )
+    guard = LaunchGuard(config, store)
+    asyncio.run(guard._maybe_auto_sell(signal, balance))
+    asyncio.run(guard._maybe_auto_sell(signal, balance))
+    assert not guard.auto_sell_dry_run_seen
+    store.close()
+
+    restarted_store = SQLiteStore(str(path))
+    restarted = LaunchGuard(config, restarted_store)
+    asyncio.run(restarted._maybe_auto_sell(signal, balance))
+    assert (
+        "solana:MintConfirm111:portfolio-signal:exit-warning"
+        in restarted.auto_sell_dry_run_seen
+    )
+    restarted_store.close()
+
+
+def test_portfolio_sell_confirmation_resets_on_hold_and_stale_gap(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(str(tmp_path / "sell-reset.db"))
+    first = store.record_auto_sell_signal_confirmation(
+        token_address="MintConfirm111",
+        decision="EXIT WARNING",
+        reason="selloff",
+        observed_at_epoch=100,
+        max_gap_seconds=30,
+    )
+    second = store.record_auto_sell_signal_confirmation(
+        token_address="MintConfirm111",
+        decision="EXIT WARNING",
+        reason="selloff",
+        observed_at_epoch=110,
+        max_gap_seconds=30,
+    )
+    stale = store.record_auto_sell_signal_confirmation(
+        token_address="MintConfirm111",
+        decision="EXIT WARNING",
+        reason="selloff",
+        observed_at_epoch=200,
+        max_gap_seconds=30,
+    )
+    assert first["consecutive_polls"] == 1
+    assert second["consecutive_polls"] == 2
+    assert stale["consecutive_polls"] == 1
+    store.clear_auto_sell_signal_confirmation("MintConfirm111")
+    reset = store.record_auto_sell_signal_confirmation(
+        token_address="MintConfirm111",
+        decision="EXIT WARNING",
+        reason="selloff",
+        observed_at_epoch=210,
+        max_gap_seconds=30,
+    )
+    assert reset["consecutive_polls"] == 1
+    store.close()
+
+
+def test_auto_rebuy_requires_drop_rebound_momentum_and_liquidity(
+    tmp_path: Path,
+) -> None:
+    config = settings(
+        tmp_path / "rebuy-assessment.db",
+        auto_buy_enabled=True,
+        auto_sell_enabled=True,
+        auto_rebuy_enabled=True,
+    )
+    now = time.time()
+    watch = {
+        "sold_at_epoch": now - 700,
+        "exit_price_usd": 1.0,
+        "exit_liquidity_usd": 100_000,
+        "lowest_price_usd": 0.8,
+        "last_price_usd": 0.82,
+    }
+    recovery = MarketQuote(
+        mint="MintRecovery111",
+        symbol="RECOVER",
+        price_sol=0.001,
+        price_usd=0.85,
+        liquidity_usd=90_000,
+        market_cap_usd=200_000,
+        pair_address="PairRecovery",
+        pair_created_at_ms=1,
+        buys_m5=14,
+        sells_m5=5,
+        volume_m5_usd=25_000,
+        price_change_m5_pct=4.0,
+    )
+
+    accepted, reason, metrics = auto_rebuy_recovery_assessment(
+        watch, recovery, config, now=now
+    )
+    assert accepted is True
+    assert "recovery confirmed" in reason
+    assert metrics["drop_pct"] == pytest.approx(20)
+    assert metrics["rebound_pct"] == pytest.approx(6.25)
+
+    falling = replace(recovery, price_usd=0.79, price_change_m5_pct=-2)
+    accepted, reason, _metrics = auto_rebuy_recovery_assessment(
+        watch, falling, config, now=now
+    )
+    assert accepted is False
+    assert "momentum" in reason
+    assert "not rising" in reason
+
+
+def test_auto_rebuy_watch_lifecycle_creates_new_sell_cycle(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(str(tmp_path / "rebuy-watch.db"))
+    watch = store.start_auto_rebuy_watch(
+        token_address="MintRecovery111",
+        symbol="RECOVER",
+        sell_signature="sell-1",
+        exit_price_usd=1.0,
+        exit_liquidity_usd=100_000,
+        sale_proceeds_usdc_raw=10_000_000,
+        sold_at_epoch=100,
+        max_rebuys=2,
+    )
+    assert watch is not None
+    assert watch["cycle"] == 1
+    for poll in range(3):
+        watch = store.record_auto_rebuy_observation(
+            token_address="MintRecovery111",
+            current_price_usd=0.8 + poll * 0.01,
+            observed_at_epoch=200 + poll,
+            qualifying=True,
+            confirmation_required=3,
+            reason="recovery confirmed",
+        )
+    assert watch["status"] == "READY"
+    completed = store.complete_auto_rebuy(
+        token_address="MintRecovery111", buy_signature="buy-1"
+    )
+    assert completed["status"] == "BOUGHT"
+    assert completed["completed_rebuys"] == 1
+    assert store.auto_sell_cycle("MintRecovery111") == 1
+
+    planner = PortfolioSignalExitPlanner()
+    sell = planner.plan(
+        mint="MintRecovery111",
+        symbol="RECOVER",
+        decision="EXIT WARNING",
+        reason="new decline",
+        balance_raw=100,
+        decimals=6,
+        cycle=store.auto_sell_cycle("MintRecovery111"),
+    )
+    assert sell is not None
+    assert sell.event_key.endswith(":cycle:1")
+    assert store.start_auto_rebuy_watch(
+        token_address="MintRecovery111",
+        symbol="RECOVER",
+        sell_signature="sell-2",
+        exit_price_usd=0.9,
+        exit_liquidity_usd=90_000,
+        sale_proceeds_usdc_raw=9_000_000,
+        sold_at_epoch=300,
+        max_rebuys=1,
+    ) is None
+    second_watch = store.start_auto_rebuy_watch(
+        token_address="MintRecovery111",
+        symbol="RECOVER",
+        sell_signature="sell-2",
+        exit_price_usd=0.9,
+        exit_liquidity_usd=90_000,
+        sale_proceeds_usdc_raw=9_000_000,
+        sold_at_epoch=300,
+        max_rebuys=2,
+    )
+    assert second_watch is not None
+    assert second_watch["cycle"] == 2
+    assert store.cancel_auto_rebuy("MintRecovery111") is True
+    store.close()
+
+
+def test_uncertain_rebuy_is_frozen_without_automatic_retry(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(str(tmp_path / "rebuy-review.db"))
+    watch = store.start_auto_rebuy_watch(
+        token_address="MintRecovery111",
+        symbol="RECOVER",
+        sell_signature="sell-1",
+        exit_price_usd=1.0,
+        exit_liquidity_usd=100_000,
+        sale_proceeds_usdc_raw=10_000_000,
+        sold_at_epoch=100,
+        max_rebuys=1,
+    )
+    assert watch is not None
+    event_key = "solana:MintRecovery111:auto-rebuy:1"
+    assert store.begin_auto_buy_execution(
+        event_key=event_key,
+        token_address="MintRecovery111",
+        symbol="RECOVER",
+        funding_source="seed",
+        input_usdc_raw=5_000_000,
+        expected_output_raw=6_000_000,
+    )
+    store.freeze_auto_buy_execution(
+        event_key=event_key,
+        error="execution outcome unknown",
+        signature="public-signature",
+    )
+    store.freeze_auto_rebuy(
+        token_address="MintRecovery111",
+        error="execution outcome unknown; signature=public-signature",
+    )
+
+    assert store.active_auto_rebuy_watches() == []
+    status = store.auto_rebuy_status()
+    assert status["watches"][0]["status"] == "REVIEW"
+    assert status["executions"][0]["status"] == "REVIEW"
+    assert status["executions"][0]["signature"] == "public-signature"
+    assert store.begin_auto_buy_execution(
+        event_key=event_key,
+        token_address="MintRecovery111",
+        symbol="RECOVER",
+        funding_source="seed",
+        input_usdc_raw=5_000_000,
+        expected_output_raw=6_000_000,
+    ) is False
+    store.close()
+
+
+def test_confirmed_full_exit_starts_rebuy_watch(tmp_path: Path) -> None:
+    path = tmp_path / "rebuy-after-sale.db"
+    store = SQLiteStore(str(path))
+    config = settings(
+        path,
+        auto_sell_enabled=True,
+        auto_sell_portfolio_signals=True,
+        auto_sell_signal_confirmation_polls=1,
+        auto_buy_enabled=True,
+        auto_rebuy_enabled=True,
+    )
+    guard = LaunchGuard(config, store)
+
+    class FakeSeller:
+        async def preflight(
+            self, intent: SellIntent, _simulator: object
+        ) -> PreflightReceipt:
+            return PreflightReceipt(
+                prepared=PreparedSell(
+                    intent=intent,
+                    transaction="unsigned",
+                    request_id="request-sell",
+                    input_amount_raw=intent.amount_raw,
+                    expected_output_raw=8_000_000,
+                    minimum_output_raw=7_900_000,
+                    price_impact_pct=1.0,
+                    last_valid_block_height="123",
+                ),
+                units_consumed=100_000,
+                log_count=5,
+            )
+
+        async def execute(self, prepared: PreparedSell) -> SellReceipt:
+            return SellReceipt(
+                intent=prepared.intent,
+                signature="sell-confirmed",
+                input_amount_raw=prepared.input_amount_raw,
+                output_amount_raw=8_000_000,
+            )
+
+    guard.auto_seller = FakeSeller()  # type: ignore[assignment]
+    signal = PortfolioSignal(
+        chain="solana",
+        token_address="MintRecovery111",
+        symbol="RECOVER",
+        quantity=100,
+        current_price=0.1,
+        price_currency="USD",
+        current_value_usd=10,
+        pnl_pct=None,
+        decision="EXIT WARNING",
+        reason="confirmed selloff",
+        price_change_m5_pct=-10,
+        buys_m5=2,
+        sells_m5=8,
+        liquidity_usd=50_000,
+        entry_price=None,
+        peak_price=0.12,
+    )
+    balance = SolanaTokenHolding(
+        mint=signal.token_address,
+        amount=100,
+        raw_amount=100_000_000,
+        decimals=6,
+    )
+
+    asyncio.run(guard._maybe_auto_sell(signal, balance))
+
+    watch = store.load_auto_rebuy_watch(signal.token_address)
+    assert watch is not None
+    assert watch["status"] == "WATCHING"
+    assert watch["sell_signature"] == "sell-confirmed"
+    assert watch["exit_price_usd"] == pytest.approx(0.08)
+    assert watch["sale_proceeds_usdc_raw"] == 8_000_000
+    store.close()
+
+
+def test_rebuy_resets_profit_ladder_stage(tmp_path: Path) -> None:
+    store = SQLiteStore(str(tmp_path / "rebuy-stage.db"))
+    store.save_owned_holding(
+        OwnedHolding(
+            chain="solana",
+            token_address="MintRecovery111",
+            symbol="RECOVER",
+            quantity=100,
+            entry_price=1,
+            price_currency="USD",
+            cost_amount=100,
+        )
+    )
+    store.arm_auto_sell("MintRecovery111")
+    assert store.begin_auto_sell_execution(
+        event_key="stage-zero",
+        chain="solana",
+        token_address="MintRecovery111",
+        symbol="RECOVER",
+        stage=0,
+        requested_raw=50,
+        expected_output_raw=100,
+    )
+    store.complete_auto_sell_execution(
+        event_key="stage-zero", signature="sell-stage-zero", next_stage=1
+    )
+    store.arm_auto_sell("MintRecovery111", reset_stage=True)
+    policy = store.load_auto_sell_policy("MintRecovery111")
+    assert policy is not None
+    assert policy["stage"] == 0
+    assert policy["last_signature"] is None
+    store.close()
+
+
+def test_confirmed_rebuy_uses_shared_budget_and_rearms_new_cycle(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "rebuy-execution.db"
+    wallet = str(Keypair().pubkey())
+    store = SQLiteStore(str(path))
+    config = settings(
+        path,
+        solana_wallet_address=wallet,
+        auto_buy_enabled=True,
+        auto_sell_enabled=True,
+        auto_rebuy_enabled=True,
+    )
+    watch = store.start_auto_rebuy_watch(
+        token_address="MintRecovery111",
+        symbol="RECOVER",
+        sell_signature="sell-1",
+        exit_price_usd=1.0,
+        exit_liquidity_usd=100_000,
+        sale_proceeds_usdc_raw=10_000_000,
+        sold_at_epoch=time.time() - 700,
+        max_rebuys=1,
+    )
+    assert watch is not None
+    for poll in range(3):
+        watch = store.record_auto_rebuy_observation(
+            token_address="MintRecovery111",
+            current_price_usd=0.83 + poll * 0.01,
+            observed_at_epoch=time.time() + poll,
+            qualifying=True,
+            confirmation_required=3,
+            reason="recovery confirmed",
+        )
+    guard = LaunchGuard(config, store)
+
+    class FakeRpc:
+        async def token_balance(
+            self, owner: str, mint: str
+        ) -> SolanaTokenHolding:
+            assert owner == wallet
+            if mint == USDC_MINT:
+                return SolanaTokenHolding(
+                    mint=mint, amount=10, raw_amount=10_000_000, decimals=6
+                )
+            return SolanaTokenHolding(
+                mint=mint, amount=0, raw_amount=0, decimals=6
+            )
+
+        async def mint_decimals(self, mint: str) -> int:
+            assert mint == "MintRecovery111"
+            return 6
+
+    class FakeBuyer:
+        async def preflight(
+            self, intent: BuyIntent, _simulator: object
+        ) -> BuyPreflightReceipt:
+            return BuyPreflightReceipt(
+                prepared=PreparedBuy(
+                    intent=intent,
+                    transaction="unsigned",
+                    request_id="request-buy",
+                    input_amount_raw=intent.amount_usdc_raw,
+                    expected_output_raw=6_000_000,
+                    minimum_output_raw=5_900_000,
+                    price_impact_pct=1.0,
+                    last_valid_block_height="123",
+                ),
+                units_consumed=100_000,
+                log_count=5,
+            )
+
+        async def execute(self, prepared: PreparedBuy) -> BuyReceipt:
+            return BuyReceipt(
+                intent=prepared.intent,
+                signature="buy-confirmed",
+                input_amount_raw=prepared.input_amount_raw,
+                output_amount_raw=6_000_000,
+            )
+
+    guard.auto_buyer = FakeBuyer()  # type: ignore[assignment]
+    quote = MarketQuote(
+        mint="MintRecovery111",
+        symbol="RECOVER",
+        price_sol=0.001,
+        price_usd=0.85,
+        liquidity_usd=90_000,
+        market_cap_usd=200_000,
+        pair_address="PairRecovery",
+        pair_created_at_ms=1,
+        buys_m5=14,
+        sells_m5=5,
+        volume_m5_usd=25_000,
+        price_change_m5_pct=4,
+    )
+
+    asyncio.run(guard._execute_auto_rebuy(watch, quote, FakeRpc()))  # type: ignore[arg-type]
+
+    completed = store.load_auto_rebuy_watch("MintRecovery111")
+    assert completed is not None
+    assert completed["status"] == "BOUGHT"
+    assert completed["completed_rebuys"] == 1
+    status = store.auto_buy_status()
+    assert status["fund"]["seed_buys_used"] == 1
+    assert status["positions"][0]["status"] == "OPEN"
+    holding = next(
+        item
+        for item in store.load_owned_holdings("solana")
+        if item.token_address == "MintRecovery111"
+    )
+    assert holding.cost_amount == 5
+    policy = store.load_auto_sell_policy("MintRecovery111")
+    assert policy is not None
+    assert policy["armed"] == 1
+    assert policy["stage"] == 0
     store.close()
 
 
