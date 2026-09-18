@@ -40,11 +40,11 @@ class MarketQuote:
 
     @property
     def recommendation_currency(self) -> str:
-        return "USD" if self.chain == "robinhood" else "SOL"
+        return "SOL" if self.chain == "solana" else "USD"
 
     @property
     def recommendation_key(self) -> str:
-        address = self.mint.lower() if self.chain == "robinhood" else self.mint
+        address = self.mint if self.chain == "solana" else self.mint.lower()
         return f"{self.chain}:{address}"
 
     @property
@@ -74,13 +74,15 @@ class DexScreenerOracle:
     def __init__(self, cache_seconds: float = 2.0) -> None:
         self.cache_seconds = cache_seconds
         self._cache: dict[str, tuple[float, MarketQuote | None]] = {}
-        self._stock_token_cache: tuple[float, frozenset[str]] | None = None
+        self._stock_token_cache: (
+            tuple[float, frozenset[str], frozenset[str]] | None
+        ) = None
         self._ssl = ssl.create_default_context(cafile=certifi.where())
 
     async def quote(
         self, mint: str, *, chain: str = "solana"
     ) -> MarketQuote | None:
-        normalized = mint.lower() if chain == "robinhood" else mint
+        normalized = mint if chain == "solana" else mint.lower()
         cache_key = f"{chain}:{normalized}"
         cached = self._cache.get(cache_key)
         now = time.monotonic()
@@ -97,6 +99,11 @@ class DexScreenerOracle:
         self,
     ) -> frozenset[str] | None:
         return await asyncio.to_thread(self._robinhood_stock_token_addresses)
+
+    async def robinhood_stock_token_symbols(
+        self,
+    ) -> frozenset[str] | None:
+        return await asyncio.to_thread(self._robinhood_stock_token_symbols)
 
     async def sol_usd_price(self) -> float | None:
         return await asyncio.to_thread(self._fetch_sol_usd)
@@ -154,27 +161,44 @@ class DexScreenerOracle:
                 address = str(profile.get("tokenAddress") or "").strip()
                 if not address:
                     continue
-                key = address.lower() if chain == "robinhood" else address
+                key = address if chain == "solana" else address.lower()
                 discovered.setdefault(key, address)
         return tuple(discovered.values())
 
     def _robinhood_stock_token_addresses(self) -> frozenset[str] | None:
+        stock_tokens = self._robinhood_stock_tokens()
+        return stock_tokens[0] if stock_tokens is not None else None
+
+    def _robinhood_stock_token_symbols(self) -> frozenset[str] | None:
+        stock_tokens = self._robinhood_stock_tokens()
+        return stock_tokens[1] if stock_tokens is not None else None
+
+    def _robinhood_stock_tokens(
+        self,
+    ) -> tuple[frozenset[str], frozenset[str]] | None:
         now = time.monotonic()
         if self._stock_token_cache is not None:
-            cached_at, addresses = self._stock_token_cache
+            cached_at, addresses, symbols = self._stock_token_cache
             if now - cached_at <= 600:
-                return addresses
+                return addresses, symbols
 
         payload = self._request_json("https://api.robinhood.com/rhj/assets")
         excluded: set[str] = set()
+        symbols: set[str] = set()
         assets = payload.get("assets") if isinstance(payload, dict) else None
         if not isinstance(assets, list):
             if self._stock_token_cache is not None:
-                return self._stock_token_cache[1]
+                return (
+                    self._stock_token_cache[1],
+                    self._stock_token_cache[2],
+                )
             return None
         for asset in assets:
             if not isinstance(asset, dict):
                 continue
+            symbol = str(asset.get("tokenSymbol") or "").strip().casefold()
+            if symbol:
+                symbols.add(symbol)
             deployments = asset.get("deployments")
             if not isinstance(deployments, list):
                 continue
@@ -193,8 +217,9 @@ class DexScreenerOracle:
                 if address:
                     excluded.add(address.casefold())
         result = frozenset(excluded)
-        self._stock_token_cache = (now, result)
-        return result
+        stock_symbols = frozenset(symbols)
+        self._stock_token_cache = (now, result, stock_symbols)
+        return result, stock_symbols
 
     def _fetch(self, mint: str, chain: str = "solana") -> MarketQuote | None:
         pairs = self._request_token(mint)
@@ -206,18 +231,16 @@ class DexScreenerOracle:
             quote_token = pair.get("quoteToken") or {}
             base_address = str(base_token.get("address") or "")
             addresses_match = (
-                base_address.casefold() == mint.casefold()
-                if chain == "robinhood"
-                else base_address == mint
+                base_address == mint
+                if chain == "solana"
+                else base_address.casefold() == mint.casefold()
             )
             if not addresses_match:
                 continue
             if chain == "solana" and quote_token.get("address") != WSOL_MINT:
                 continue
             try:
-                price_field = (
-                    "priceUsd" if chain == "robinhood" else "priceNative"
-                )
+                price_field = "priceNative" if chain == "solana" else "priceUsd"
                 price = float(pair.get(price_field))
             except (TypeError, ValueError):
                 continue
@@ -235,16 +258,14 @@ class DexScreenerOracle:
 
         pair = max(candidates, key=liquidity)
         try:
-            price_sol = (
-                float(pair["priceNative"]) if chain == "solana" else 0.0
-            )
+            price_sol = float(pair["priceNative"]) if chain == "solana" else 0.0
             raw_price_usd = pair.get("priceUsd")
             price_usd = (
                 float(raw_price_usd) if raw_price_usd is not None else None
             )
         except (KeyError, TypeError, ValueError):
             return None
-        if chain == "robinhood" and (price_usd is None or price_usd <= 0):
+        if chain != "solana" and (price_usd is None or price_usd <= 0):
             return None
 
         market_cap = pair.get("marketCap") or pair.get("fdv")
