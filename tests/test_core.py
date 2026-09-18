@@ -19,7 +19,9 @@ from solana_launch_guard.market import DexScreenerOracle, MarketQuote
 from solana_launch_guard.multichain import EvmRpc, HyperCoreWatcher
 from solana_launch_guard.notifications import (
     DecisionNotifier,
+    PortfolioNotifier,
     format_candidate_notification,
+    format_portfolio_notification,
 )
 from solana_launch_guard.portfolio import (
     OwnedHolding,
@@ -803,6 +805,7 @@ def test_phone_notifications_deduplicate_and_respect_cooldown(
     assert asyncio.run(notifier.maybe_send(candidate)) is True
     assert asyncio.run(notifier.maybe_send(candidate)) is False
     assert len(client.messages) == 1
+    assert client.messages[0]["priority"] == 0
 
     pullback = MarketQuote(
         mint=initial.mint,
@@ -823,6 +826,7 @@ def test_phone_notifications_deduplicate_and_respect_cooldown(
     clock[0] = 1_200
     assert asyncio.run(notifier.maybe_send(candidate)) is True
     assert len(client.messages) == 2
+    assert client.messages[1]["priority"] == 1
     assert store.last_notification("pushover", candidate.key) == (
         "BUY ZONE",
         1_200,
@@ -848,6 +852,71 @@ def test_phone_notifications_deduplicate_and_respect_cooldown(
     clock[0] = 1_501
     assert asyncio.run(notifier.maybe_send(candidate)) is True
     assert len(client.messages) == 3
+    asyncio.run(notifier.send_high_priority_test())
+    assert len(client.messages) == 4
+    assert client.messages[3]["priority"] == 1
+    assert client.messages[3]["sound"] == "siren"
+    store.close()
+
+
+def test_portfolio_phone_alert_is_high_priority_and_state_deduplicated(
+    tmp_path: Path,
+) -> None:
+    class FakeClient:
+        def __init__(self) -> None:
+            self.messages: list[dict[str, object]] = []
+
+        async def send(self, **payload: object) -> str:
+            self.messages.append(payload)
+            return f"request-{len(self.messages)}"
+
+    holding = OwnedHolding(
+        chain="solana",
+        token_address="MintAlert111",
+        symbol="ALERT",
+        quantity=100,
+    )
+    quote = MarketQuote(
+        mint=holding.token_address,
+        symbol=holding.symbol,
+        price_sol=0.000001,
+        price_usd=0.00015,
+        chain="solana",
+        liquidity_usd=10_000,
+        market_cap_usd=50_000,
+        pair_address="PairAlert",
+        pair_created_at_ms=1,
+        buys_m5=5,
+        sells_m5=10,
+        volume_m5_usd=4_000,
+        price_change_m5_pct=-9,
+    )
+    signal = PortfolioAdvisor().evaluate(holding, quote)
+    assert signal.decision == "EXIT WARNING"
+
+    store = SQLiteStore(tmp_path / "portfolio-alerts.db")
+    client = FakeClient()
+    notifier = PortfolioNotifier(
+        client=client,
+        store=store,
+        decisions=("TAKE PARTIAL", "PROTECT PROFIT", "EXIT WARNING"),
+        high_priority_decisions=(
+            "TAKE PARTIAL",
+            "PROTECT PROFIT",
+            "EXIT WARNING",
+        ),
+        cooldown_seconds=300,
+        clock=lambda: 1_000,
+    )
+
+    assert asyncio.run(notifier.maybe_send(signal)) is True
+    assert asyncio.run(notifier.maybe_send(signal)) is False
+    assert len(client.messages) == 1
+    assert client.messages[0]["priority"] == 1
+    title, message, sound = format_portfolio_notification(signal)
+    assert "REVIEW SELL" in title
+    assert "no order was placed" in message
+    assert sound == "siren"
     store.close()
 
 

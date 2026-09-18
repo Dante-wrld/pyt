@@ -152,6 +152,19 @@ class Settings:
     )
     pushover_min_score: int = 60
     pushover_cooldown_seconds: float = 300.0
+    pushover_portfolio_alert_decisions: tuple[str, ...] = (
+        "TAKE PARTIAL",
+        "PROTECT PROFIT",
+        "EXIT WARNING",
+    )
+    pushover_high_priority_decisions: tuple[str, ...] = (
+        "BUY NOW",
+        "BUY ZONE",
+        "TAKE PARTIAL",
+        "PROTECT PROFIT",
+        "EXIT WARNING",
+    )
+    pushover_portfolio_cooldown_seconds: float = 300.0
     color_output: bool = True
     recommendation_snapshot_path: str = "launch_guard_recommendations.json"
     portfolio_snapshot_path: str = "launch_guard_portfolio.json"
@@ -282,6 +295,20 @@ class Settings:
             pushover_min_score=_int("PUSHOVER_MIN_SCORE", 60),
             pushover_cooldown_seconds=_float(
                 "PUSHOVER_COOLDOWN_SECONDS", 300.0
+            ),
+            pushover_portfolio_alert_decisions=_csv_upper(
+                "PUSHOVER_PORTFOLIO_ALERT_DECISIONS",
+                "TAKE PARTIAL,PROTECT PROFIT,EXIT WARNING",
+            ),
+            pushover_high_priority_decisions=_csv_upper(
+                "PUSHOVER_HIGH_PRIORITY_DECISIONS",
+                (
+                    "BUY NOW,BUY ZONE,TAKE PARTIAL,PROTECT PROFIT,"
+                    "EXIT WARNING"
+                ),
+            ),
+            pushover_portfolio_cooldown_seconds=_float(
+                "PUSHOVER_PORTFOLIO_COOLDOWN_SECONDS", 300.0
             ),
             color_output=_bool("COLOR_OUTPUT", True),
             recommendation_snapshot_path=os.getenv(
@@ -446,10 +473,36 @@ class Settings:
                 "PUSHOVER_ALERT_DECISIONS contains unknown states: "
                 + ", ".join(sorted(invalid_alerts))
             )
+        portfolio_alerts = {
+            "TAKE PARTIAL",
+            "PROTECT PROFIT",
+            "EXIT WARNING",
+        }
+        invalid_portfolio_alerts = (
+            set(self.pushover_portfolio_alert_decisions) - portfolio_alerts
+        )
+        if invalid_portfolio_alerts:
+            raise ValueError(
+                "PUSHOVER_PORTFOLIO_ALERT_DECISIONS contains unknown states: "
+                + ", ".join(sorted(invalid_portfolio_alerts))
+            )
+        all_priority_states = allowed_alerts | portfolio_alerts
+        invalid_priority_states = (
+            set(self.pushover_high_priority_decisions) - all_priority_states
+        )
+        if invalid_priority_states:
+            raise ValueError(
+                "PUSHOVER_HIGH_PRIORITY_DECISIONS contains unknown states: "
+                + ", ".join(sorted(invalid_priority_states))
+            )
         if not 0 <= self.pushover_min_score <= 100:
             raise ValueError("PUSHOVER_MIN_SCORE must be 0 through 100")
         if self.pushover_cooldown_seconds < 15:
             raise ValueError("PUSHOVER_COOLDOWN_SECONDS must be at least 15")
+        if self.pushover_portfolio_cooldown_seconds < 15:
+            raise ValueError(
+                "PUSHOVER_PORTFOLIO_COOLDOWN_SECONDS must be at least 15"
+            )
         if self.pushover_enabled:
             credential_pattern = r"[A-Za-z0-9]{30}"
             if not self.pushover_app_token or re.fullmatch(
