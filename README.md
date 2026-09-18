@@ -1,13 +1,14 @@
 # Launch Guard
 
 A safety-first Python monitor, paper trader, and opt-in guarded Solana
-buyer/profit-ladder seller for multichain crypto tokens.
+buyer/automatic seller for multichain crypto tokens.
 
-Version 0.16 adds an off-by-default, per-mint-allow-listed Solana buyer. It can
-use at most two $5 USDC seed purchases, hold at most two actively managed bot
-positions, and credit 50% of confirmed positive realized profit to a separate
-reinvestment pool. Both buy and sell paths include a non-broadcasting
-preflight that builds, locally signs, and RPC-simulates the transaction. Direct
+Version 0.17 adds off-by-default automatic selection of fresh, confirmed
+Solana `BUY NOW`/`BUY ZONE` candidates and optional wallet-wide execution of
+`TAKE PARTIAL`, `PROTECT PROFIT`, and `EXIT WARNING` rules. Every unattended
+order must pass a Jupiter price-impact cap, a separate slippage cap, local
+signing, and Solana RPC simulation before broadcast. Principal remains limited
+to two $5 USDC seed purchases and two active bot-managed positions. Direct
 on-chain swaps use Jupiter; Launch Guard does not log in to or control Fomo's
 app or website.
 
@@ -39,18 +40,20 @@ app or website.
   confirmed entries and configured profit-protection/exit states.
 - Can dry-run or execute a two-stage, per-token-armed Solana profit ladder:
   recover the original USD principal at 2x, then sell half the remainder at 3x.
+- Can apply deterministic wallet-wide sell rules: sell 50% on `TAKE PARTIAL`
+  and 100% on `PROTECT PROFIT` or `EXIT WARNING`, with configurable fractions.
 - Can preflight the next sale for one armed mint by building and locally
   signing the real Jupiter transaction, then simulating it without broadcasting.
-- Can allow-list one Solana mint at a time for a confirmed `BUY NOW` or
-  `BUY ZONE` signal, preflight a fixed-USDC purchase, and optionally execute it.
+- Can either allow-list one Solana mint or automatically select fresh,
+  sufficiently liquid, confirmed `BUY NOW`/`BUY ZONE` candidates.
 - Separates two $5 seed buys from a reinvestment pool containing only 50% of
   positive realized profit from bot-managed positions.
 - Simulates take-profit and stop-loss exits using subsequent trade events.
 - Persists launches, decisions, positions, fills, and sell execution state in
   `launch_guard.db`.
 - Reconnects after WebSocket failures.
-- Never uses SOL as an automated buy input and never lets advisory
-  `TAKE PARTIAL`, `PROTECT PROFIT`, or `EXIT WARNING` states place orders.
+- Never uses SOL as an automated buy input. Portfolio guidance places orders
+  only when `AUTO_SELL_PORTFOLIO_SIGNALS=true`; the default remains off.
 
 ## Requirements
 
@@ -158,13 +161,26 @@ pytest
 | `AUTO_SELL_HALF_PROFIT_MULTIPLE` | `3.0` | Entry-price multiple that triggers the second stage |
 | `AUTO_SELL_SECOND_STAGE_FRACTION` | `0.5` | Fraction of the remaining token balance sold at the second stage |
 | `AUTO_SELL_MAX_PRICE_IMPACT_PCT` | `5.0` | Reject a Jupiter order above this reported price impact |
-| `AUTO_BUY_ENABLED` | `false` | Evaluate allow-listed Solana candidates; remains dry-run unless live mode is also enabled |
+| `AUTO_SELL_MAX_SLIPPAGE_BPS` | `500` | Reject sell quotes whose reported or output-threshold slippage exceeds 5% |
+| `AUTO_SELL_PORTFOLIO_SIGNALS` | `false` | Permit owned-wallet `TAKE PARTIAL`, `PROTECT PROFIT`, and `EXIT WARNING` rules in dry-run/live mode |
+| `AUTO_SELL_TAKE_PARTIAL_FRACTION` | `0.5` | Fraction sold once for `TAKE PARTIAL` |
+| `AUTO_SELL_PROTECT_PROFIT_FRACTION` | `1.0` | Fraction sold once for `PROTECT PROFIT` |
+| `AUTO_SELL_EXIT_WARNING_FRACTION` | `1.0` | Fraction sold once for `EXIT WARNING` |
+| `AUTO_SELL_MIN_VALUE_USD` | `1.0` | Minimum priced wallet holding eligible for portfolio-signal execution |
+| `AUTO_SELL_EXCLUDED_MINTS` | USDC mint | Exact Solana mints never sold by wallet-wide rules |
+| `AUTO_BUY_ENABLED` | `false` | Evaluate guarded Solana candidates; remains dry-run unless live mode is also enabled |
 | `AUTO_BUY_LIVE` | `false` | Permit locally signed Jupiter USDC purchases; requires live auto-selling |
+| `AUTO_BUY_DISCOVERY` | `false` | Automatically create a one-shot policy for qualified Solana buy signals |
+| `AUTO_BUY_DISCOVERY_MIN_SCORE` | `70` | Minimum live signal score for automatic selection |
+| `AUTO_BUY_DISCOVERY_MIN_LIQUIDITY_USD` | `50000` | Minimum quoted liquidity for automatic selection |
+| `AUTO_BUY_SIGNAL_MAX_AGE_SECONDS` | `30` | Maximum age of an automatically selected signal |
+| `AUTO_BUY_EXCLUDED_MINTS` | empty | Exact Solana mints never selected automatically |
 | `AUTO_BUY_SEED_SIZE_USDC` | `5.0` | Maximum USDC principal for each initial seed purchase |
 | `AUTO_BUY_MAX_SEED_BUYS` | `2` | Lifetime number of principal-funded purchases before only profit may be reused |
 | `AUTO_BUY_MAX_OPEN_POSITIONS` | `2` | Maximum actively managed bot positions, including pending purchases |
 | `AUTO_BUY_REINVEST_PROFIT_PCT` | `50.0` | Positive realized-profit share credited to the reinvestment pool |
 | `AUTO_BUY_MAX_PRICE_IMPACT_PCT` | `5.0` | Reject a Jupiter buy order above this reported price impact |
+| `AUTO_BUY_MAX_SLIPPAGE_BPS` | `500` | Reject buy quotes whose reported or output-threshold slippage exceeds 5% |
 | `JUPITER_API_KEY` | empty | Private Jupiter API key required for live order and execution requests |
 | `ROBINHOOD_TOKEN_ADDRESSES` | empty | Comma-separated Robinhood Chain `0x` contracts to monitor in addition to discovery |
 | `ETHEREUM_TOKEN_ADDRESSES`, `BASE_TOKEN_ADDRESSES`, `BNB_TOKEN_ADDRESSES`, `BOB_TOKEN_ADDRESSES`, `MONAD_TOKEN_ADDRESSES`, `HYPEREVM_TOKEN_ADDRESSES` | empty | Exact contracts to monitor per chain |
@@ -322,9 +338,9 @@ launch-guard --mode all --recommendations-window --portfolio-window
 
 The holdings board reads current SPL Token and Token-2022 balances using
 Solana JSON-RPC and obtains market data from DEX Screener. It is read-only by
-default. When the live seller is explicitly configured, only the two armed
-profit-ladder events described below can submit a real USDC sale. Ordinary
-holdings-board signals remain advisory.
+default. When the live seller is explicitly configured, armed 2x/3x ladder
+events can submit a real USDC sale. Holdings-board signals remain advisory
+unless `AUTO_SELL_PORTFOLIO_SIGNALS=true` is also explicitly configured.
 
 Market-risk exits can be evaluated without a cost basis. Profit/loss,
 `TAKE PARTIAL`, and cost-based stop guidance require a known entry price. For
@@ -345,9 +361,10 @@ tokens. Wallet tokens that were not imported remain visible with `P/L=n/a`.
 
 This mode gives the local signer full authority for the Solana wallet whose
 public address is in `SOLANA_WALLET_ADDRESS`. Launch Guard narrows its own trade
-policy to individually imported and armed SPL-token mints, but private-key
-authority cannot be technically restricted to those tokens. SOL, wrapped SOL,
-USDC, and USDT are never ladder-sale inputs.
+policy to imported/armed profit-ladder mints and optional portfolio-signal
+rules, but private-key authority cannot be technically restricted to those
+tokens. Native SOL is not an SPL-token input and USDC is excluded from
+wallet-wide rules by default.
 
 The default ladder for every armed mint is:
 
@@ -361,10 +378,10 @@ The default ladder for every armed mint is:
 3. Leave the final remainder in the wallet. There is no third automatic sale.
 
 If the balance or quote cannot recover the full principal, reported price
-impact exceeds the configured cap, or Jupiter cannot build a transaction, no
-sale is submitted. A token that jumps directly beyond 3x still completes the
-principal-recovery stage first, then becomes eligible for stage 2 on a later
-poll.
+impact or effective slippage exceeds its configured cap, RPC simulation fails,
+or Jupiter cannot build a transaction, no sale is submitted. A token that
+jumps directly beyond 3x still completes the principal-recovery stage first,
+then becomes eligible for stage 2 on a later poll.
 
 Set up one guarded token at a time:
 
@@ -446,18 +463,73 @@ running monitor reloads the armed policy on each poll. To stop all execution,
 press Control-C. Changing `AUTO_SELL_LIVE=false` takes effect after the process
 is restarted.
 
+### Wallet-wide automatic sells
+
+Portfolio-signal execution is separate from the 2x/3x ladder and remains off
+by default. When enabled, every priced, non-excluded SPL holding in the selected
+wallet is evaluated on each portfolio poll:
+
+- `TAKE PARTIAL` sells 50% once;
+- `PROTECT PROFIT` sells 100% once;
+- `EXIT WARNING` sells 100% once.
+
+The fractions are configurable. Each mint/decision pair has a unique stored
+execution key, so a persistent state cannot submit the same rule repeatedly.
+Every live attempt is signed locally and RPC-simulated immediately before the
+Jupiter execution call. USDC is excluded by default. Add stablecoins,
+long-term holdings, or unwanted tokens to `AUTO_SELL_EXCLUDED_MINTS` before
+enabling this mode.
+
+Profit-based states require a verified USD cost basis. A wallet holding with
+unknown cost basis can still reach `EXIT WARNING` from severe momentum reversal
+or a liquidity break, but it cannot calculate `TAKE PARTIAL` or
+`PROTECT PROFIT` from return percentage.
+
+Configure wallet-wide rules in dry-run first:
+
+```dotenv
+AUTO_SELL_ENABLED=true
+AUTO_SELL_LIVE=false
+AUTO_SELL_PORTFOLIO_SIGNALS=true
+AUTO_SELL_TAKE_PARTIAL_FRACTION=0.5
+AUTO_SELL_PROTECT_PROFIT_FRACTION=1.0
+AUTO_SELL_EXIT_WARNING_FRACTION=1.0
+AUTO_SELL_MIN_VALUE_USD=1.0
+AUTO_SELL_MAX_PRICE_IMPACT_PCT=5.0
+AUTO_SELL_MAX_SLIPPAGE_BPS=500
+AUTO_SELL_EXCLUDED_MINTS=EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v
+```
+
+Preflight a representative 50% wallet-owned sale without broadcasting:
+
+```bash
+launch-guard --preflight-owned-auto-sell-mint TOKEN_MINT
+```
+
+Require `"result": "PASSED"` and `"broadcast": false`. The per-mint emergency
+block works even when no cost basis was imported:
+
+```bash
+launch-guard --disarm-auto-sell-mint TOKEN_MINT
+launch-guard --allow-owned-auto-sell-mint TOKEN_MINT
+```
+
 ### Guarded automated buys
 
 The buyer is independent from Fomo's user interface. It watches Launch Guard's
 existing Solana recommendation candidates and considers a purchase only when
 all of the following are true:
 
-- the exact mint was manually allow-listed;
+- the exact mint was manually allow-listed, or automatic discovery is enabled
+  and the mint is not excluded;
 - the candidate has a confirmed `BUY NOW` or `BUY ZONE` state;
+- automatic selections meet the score/liquidity thresholds and are no older
+  than the configured signal-age limit;
 - fewer than two bot-managed positions are open or pending;
 - the wallet does not already hold that mint, preventing mixed cost bases;
-- the wallet has enough USDC and Jupiter reports price impact within the cap;
-- the transaction passes the same signer and execution gates as the seller.
+- the wallet has enough USDC and Jupiter reports price impact and effective
+  slippage within their caps;
+- the transaction is locally signed and RPC-simulated before execution.
 
 The first two confirmed purchases use at most 5 USDC each. Those are the only
 principal-funded purchases. Afterward, a purchase can use only the accumulated
@@ -480,14 +552,22 @@ Configure dry-run buying first:
 ```dotenv
 AUTO_BUY_ENABLED=true
 AUTO_BUY_LIVE=false
+AUTO_BUY_DISCOVERY=true
+AUTO_BUY_DISCOVERY_MIN_SCORE=70
+AUTO_BUY_DISCOVERY_MIN_LIQUIDITY_USD=50000
+AUTO_BUY_SIGNAL_MAX_AGE_SECONDS=30
+AUTO_BUY_EXCLUDED_MINTS=
 AUTO_BUY_SEED_SIZE_USDC=5.0
 AUTO_BUY_MAX_SEED_BUYS=2
 AUTO_BUY_MAX_OPEN_POSITIONS=2
 AUTO_BUY_REINVEST_PROFIT_PCT=50.0
 AUTO_BUY_MAX_PRICE_IMPACT_PCT=5.0
+AUTO_BUY_MAX_SLIPPAGE_BPS=500
 ```
 
-Allow-list and preflight an exact mint:
+Automatic discovery creates a one-shot policy when an eligible final signal
+appears. Manual allow-listing and preflight remain available for a specific
+mint:
 
 ```bash
 launch-guard --arm-auto-buy-mint TOKEN_MINT --buy-symbol SYMBOL
@@ -506,9 +586,11 @@ buy and sell preflights have been reviewed, live mode is started with:
 caffeinate -i launch-guard --mode all --recommendations-window --portfolio-window
 ```
 
-Each allow-list entry permits one confirmed purchase and is automatically
-disarmed afterward. Use `--disarm-auto-buy-mint TOKEN_MINT` as the per-mint kill
-switch and set `AUTO_BUY_LIVE=false` before restarting to disable all purchases.
+Each manual or discovered policy permits one confirmed purchase and is
+automatically disarmed afterward. A previously disarmed policy is not
+automatically rearmed. Use `--disarm-auto-buy-mint TOKEN_MINT` as the per-mint
+kill switch and set `AUTO_BUY_LIVE=false` before restarting to disable all
+purchases.
 
 The current [Fomo Terms](https://fomo.family/terms) prohibit automated scripts
 or bots from executing trades or controlling account activity on Fomo's
@@ -561,10 +643,11 @@ reward-to-risk multiple. These levels are a consistency framework rather than
 a forecast; Launch Guard does not place the stop or target on any exchange.
 
 These states are deterministic heuristics based on incomplete market data—not
-predictions or instructions to trade. They trigger an order only when the
-Solana mint is separately allow-listed and both auto-buy switches are enabled.
-The optional profit-ladder seller uses its own exact 2x/3x policy and neither
-path requests a Fomo login or Robinhood credentials.
+predictions or instructions to trade. They trigger an order only when the mint
+has a one-shot manual/discovered policy and both auto-buy switches are enabled.
+The optional seller uses the exact 2x/3x ladder and separately enabled
+portfolio-signal rules. Neither path requests Fomo login or Robinhood
+credentials.
 
 ### Optional phone alerts with Pushover
 
@@ -683,8 +766,8 @@ classification system.
 DEX Screener discovery does not prove that Fomo currently exposes or permits a
 trade for every contract. Verify the chain, contract, quote, slippage, and fees
 inside Fomo before taking any manual action. The bot does not log in to Fomo;
-automated buying is limited to separately allow-listed Solana mints and never
-applies to the EVM discovery feeds.
+automated buying is limited to guarded manual or automatically selected Solana
+mints and never applies to the EVM discovery feeds.
 
 Review stored EVM and HyperCore activity with:
 

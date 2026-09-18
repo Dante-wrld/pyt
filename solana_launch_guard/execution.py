@@ -10,7 +10,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, replace
-from typing import Any, Protocol
+from typing import Any, ClassVar, Protocol
 
 import certifi
 import keyring
@@ -287,6 +287,76 @@ class ProfitLadder:
         )
 
 
+class PortfolioSignalExitPlanner:
+    """Turn high-priority wallet guidance into bounded one-shot sell intents."""
+
+    _STAGES: ClassVar[dict[str, int]] = {
+        "TAKE PARTIAL": 10,
+        "PROTECT PROFIT": 11,
+        "EXIT WARNING": 12,
+    }
+
+    def __init__(
+        self,
+        *,
+        take_partial_fraction: float = 0.5,
+        protect_profit_fraction: float = 1.0,
+        exit_warning_fraction: float = 1.0,
+    ) -> None:
+        self.fractions = {
+            "TAKE PARTIAL": take_partial_fraction,
+            "PROTECT PROFIT": protect_profit_fraction,
+            "EXIT WARNING": exit_warning_fraction,
+        }
+
+    def plan(
+        self,
+        *,
+        mint: str,
+        symbol: str,
+        decision: str,
+        reason: str,
+        balance_raw: int,
+        decimals: int,
+    ) -> SellIntent | None:
+        fraction = self.fractions.get(decision)
+        if fraction is None or balance_raw <= 0 or decimals < 0:
+            return None
+        amount_raw = (
+            balance_raw
+            if fraction >= 1
+            else math.floor(balance_raw * fraction)
+        )
+        if amount_raw <= 0:
+            return None
+        decision_key = decision.casefold().replace(" ", "-")
+        return SellIntent(
+            mint=mint,
+            symbol=symbol,
+            stage=self._STAGES[decision],
+            event_key=f"solana:{mint}:portfolio-signal:{decision_key}",
+            amount_raw=amount_raw,
+            balance_raw=balance_raw,
+            decimals=decimals,
+            trigger_multiple=0,
+            current_multiple=0,
+            target_output_raw=None,
+            reason=f"{decision}: sell {fraction:.0%}; {reason}",
+        )
+
+
+def _effective_slippage_bps(
+    order: dict[str, Any], expected_output: int, minimum_output: int
+) -> int:
+    reported = int(order.get("slippageBps") or 0)
+    if expected_output <= 0 or minimum_output <= 0:
+        return reported
+    threshold = math.ceil(
+        max(0, expected_output - minimum_output) * 10_000 / expected_output
+    )
+    return max(reported, threshold)
+
+
 class KeyringSolanaSigner:
     def __init__(self, *, expected_public_key: str) -> None:
         try:
@@ -416,7 +486,7 @@ class JupiterSwapClient:
         data = json.dumps(payload).encode() if payload is not None else None
         headers = {
             "Accept": "application/json",
-            "User-Agent": "solana-launch-guard/0.16",
+            "User-Agent": "solana-launch-guard/0.17",
             "x-api-key": self.api_key,
         }
         if data is not None:
@@ -450,11 +520,13 @@ class SolanaAutoSeller:
         client: OrderClient,
         signer: TransactionSigner,
         max_price_impact_pct: float = 5.0,
+        max_slippage_bps: int = 500,
         max_principal_quote_attempts: int = 3,
     ) -> None:
         self.client = client
         self.signer = signer
         self.max_price_impact_pct = max_price_impact_pct
+        self.max_slippage_bps = max_slippage_bps
         self.max_principal_quote_attempts = max_principal_quote_attempts
 
     async def prepare(
@@ -515,6 +587,15 @@ class SolanaAutoSeller:
                 f"Jupiter price impact {price_impact:.2f}% exceeds the "
                 f"{self.max_price_impact_pct:.2f}% limit"
             )
+        expected_output = int(order.get("outAmount") or 0)
+        slippage_bps = _effective_slippage_bps(
+            order, expected_output, minimum_output
+        )
+        if slippage_bps > self.max_slippage_bps:
+            raise ValueError(
+                f"Jupiter slippage {slippage_bps} bps exceeds the "
+                f"{self.max_slippage_bps} bps limit"
+            )
         transaction = str(order.get("transaction") or "")
         request_id = str(order.get("requestId") or "")
         if not transaction or not request_id:
@@ -527,7 +608,7 @@ class SolanaAutoSeller:
             transaction=transaction,
             request_id=request_id,
             input_amount_raw=amount_raw,
-            expected_output_raw=int(order.get("outAmount") or 0),
+            expected_output_raw=expected_output,
             minimum_output_raw=minimum_output,
             price_impact_pct=price_impact,
             last_valid_block_height=(
@@ -535,11 +616,7 @@ class SolanaAutoSeller:
             ),
             router=str(order.get("router")) if order.get("router") else None,
             mode=str(order.get("mode")) if order.get("mode") else None,
-            slippage_bps=(
-                int(order["slippageBps"])
-                if order.get("slippageBps") is not None
-                else None
-            ),
+            slippage_bps=slippage_bps,
             fee_bps=(
                 int(order["feeBps"])
                 if order.get("feeBps") is not None
@@ -605,7 +682,7 @@ class SolanaAutoSeller:
 
 
 class SolanaAutoBuyer:
-    """Prepare, simulate, and execute an allow-listed USDC token purchase."""
+    """Prepare, simulate, and execute a guarded USDC token purchase."""
 
     def __init__(
         self,
@@ -613,10 +690,12 @@ class SolanaAutoBuyer:
         client: OrderClient,
         signer: TransactionSigner,
         max_price_impact_pct: float = 5.0,
+        max_slippage_bps: int = 500,
     ) -> None:
         self.client = client
         self.signer = signer
         self.max_price_impact_pct = max_price_impact_pct
+        self.max_slippage_bps = max_slippage_bps
 
     async def prepare(
         self,
@@ -648,6 +727,14 @@ class SolanaAutoBuyer:
                 f"Jupiter price impact {price_impact:.2f}% exceeds the "
                 f"{self.max_price_impact_pct:.2f}% limit"
             )
+        slippage_bps = _effective_slippage_bps(
+            order, expected_output, minimum_output
+        )
+        if slippage_bps > self.max_slippage_bps:
+            raise ValueError(
+                f"Jupiter slippage {slippage_bps} bps exceeds the "
+                f"{self.max_slippage_bps} bps limit"
+            )
         transaction = str(order.get("transaction") or "")
         request_id = str(order.get("requestId") or "")
         if not transaction or not request_id:
@@ -668,11 +755,7 @@ class SolanaAutoBuyer:
             ),
             router=str(order.get("router")) if order.get("router") else None,
             mode=str(order.get("mode")) if order.get("mode") else None,
-            slippage_bps=(
-                int(order["slippageBps"])
-                if order.get("slippageBps") is not None
-                else None
-            ),
+            slippage_bps=slippage_bps,
             fee_bps=(
                 int(order["feeBps"])
                 if order.get("feeBps") is not None

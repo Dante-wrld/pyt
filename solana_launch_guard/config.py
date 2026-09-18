@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+
 
 def _load_dotenv(path: str = ".env") -> None:
     """Load a simple .env file without overwriting real environment variables."""
@@ -176,13 +178,26 @@ class Settings:
     auto_sell_half_profit_multiple: float = 3.0
     auto_sell_second_stage_fraction: float = 0.5
     auto_sell_max_price_impact_pct: float = 5.0
+    auto_sell_max_slippage_bps: int = 500
+    auto_sell_portfolio_signals: bool = False
+    auto_sell_take_partial_fraction: float = 0.5
+    auto_sell_protect_profit_fraction: float = 1.0
+    auto_sell_exit_warning_fraction: float = 1.0
+    auto_sell_min_value_usd: float = 1.0
+    auto_sell_excluded_mints: tuple[str, ...] = (USDC_MINT,)
     auto_buy_enabled: bool = False
     auto_buy_live: bool = False
+    auto_buy_discovery: bool = False
+    auto_buy_discovery_min_score: int = 70
+    auto_buy_discovery_min_liquidity_usd: float = 50_000.0
+    auto_buy_signal_max_age_seconds: float = 30.0
+    auto_buy_excluded_mints: tuple[str, ...] = ()
     auto_buy_seed_size_usdc: float = 5.0
     auto_buy_max_seed_buys: int = 2
     auto_buy_max_open_positions: int = 2
     auto_buy_reinvest_profit_pct: float = 50.0
     auto_buy_max_price_impact_pct: float = 5.0
+    auto_buy_max_slippage_bps: int = 500
     jupiter_api_key: str | None = None
     ethereum_token_addresses: tuple[str, ...] = ()
     base_token_addresses: tuple[str, ...] = ()
@@ -350,8 +365,44 @@ class Settings:
             auto_sell_max_price_impact_pct=_float(
                 "AUTO_SELL_MAX_PRICE_IMPACT_PCT", 5.0
             ),
+            auto_sell_max_slippage_bps=_int(
+                "AUTO_SELL_MAX_SLIPPAGE_BPS", 500
+            ),
+            auto_sell_portfolio_signals=_bool(
+                "AUTO_SELL_PORTFOLIO_SIGNALS", False
+            ),
+            auto_sell_take_partial_fraction=_float(
+                "AUTO_SELL_TAKE_PARTIAL_FRACTION", 0.5
+            ),
+            auto_sell_protect_profit_fraction=_float(
+                "AUTO_SELL_PROTECT_PROFIT_FRACTION", 1.0
+            ),
+            auto_sell_exit_warning_fraction=_float(
+                "AUTO_SELL_EXIT_WARNING_FRACTION", 1.0
+            ),
+            auto_sell_min_value_usd=_float(
+                "AUTO_SELL_MIN_VALUE_USD", 1.0
+            ),
+            auto_sell_excluded_mints=tuple(
+                dict.fromkeys(
+                    (USDC_MINT, *_addresses("AUTO_SELL_EXCLUDED_MINTS"))
+                )
+            ),
             auto_buy_enabled=_bool("AUTO_BUY_ENABLED", False),
             auto_buy_live=_bool("AUTO_BUY_LIVE", False),
+            auto_buy_discovery=_bool("AUTO_BUY_DISCOVERY", False),
+            auto_buy_discovery_min_score=_int(
+                "AUTO_BUY_DISCOVERY_MIN_SCORE", 70
+            ),
+            auto_buy_discovery_min_liquidity_usd=_float(
+                "AUTO_BUY_DISCOVERY_MIN_LIQUIDITY_USD", 50_000.0
+            ),
+            auto_buy_signal_max_age_seconds=_float(
+                "AUTO_BUY_SIGNAL_MAX_AGE_SECONDS", 30.0
+            ),
+            auto_buy_excluded_mints=_addresses(
+                "AUTO_BUY_EXCLUDED_MINTS"
+            ),
             auto_buy_seed_size_usdc=_float(
                 "AUTO_BUY_SEED_SIZE_USDC", 5.0
             ),
@@ -364,6 +415,9 @@ class Settings:
             ),
             auto_buy_max_price_impact_pct=_float(
                 "AUTO_BUY_MAX_PRICE_IMPACT_PCT", 5.0
+            ),
+            auto_buy_max_slippage_bps=_int(
+                "AUTO_BUY_MAX_SLIPPAGE_BPS", 500
             ),
             jupiter_api_key=os.getenv("JUPITER_API_KEY") or None,
             ethereum_token_addresses=_addresses(
@@ -455,8 +509,25 @@ class Settings:
             raise ValueError(
                 "AUTO_SELL_MAX_PRICE_IMPACT_PCT must be above 0 and at most 10"
             )
+        if not 1 <= self.auto_sell_max_slippage_bps <= 2_000:
+            raise ValueError(
+                "AUTO_SELL_MAX_SLIPPAGE_BPS must be from 1 through 2000"
+            )
+        for name, value in (
+            ("AUTO_SELL_TAKE_PARTIAL_FRACTION", self.auto_sell_take_partial_fraction),
+            ("AUTO_SELL_PROTECT_PROFIT_FRACTION", self.auto_sell_protect_profit_fraction),
+            ("AUTO_SELL_EXIT_WARNING_FRACTION", self.auto_sell_exit_warning_fraction),
+        ):
+            if not 0 < value <= 1:
+                raise ValueError(f"{name} must be above 0 and at most 1")
+        if self.auto_sell_min_value_usd <= 0:
+            raise ValueError("AUTO_SELL_MIN_VALUE_USD must be above 0")
         if self.auto_sell_live and not self.auto_sell_enabled:
             raise ValueError("AUTO_SELL_LIVE requires AUTO_SELL_ENABLED=true")
+        if self.auto_sell_portfolio_signals and not self.auto_sell_enabled:
+            raise ValueError(
+                "AUTO_SELL_PORTFOLIO_SIGNALS requires AUTO_SELL_ENABLED=true"
+            )
         if self.auto_sell_live and not self.jupiter_api_key:
             raise ValueError("AUTO_SELL_LIVE requires JUPITER_API_KEY")
         if self.auto_sell_live and not self.solana_wallet_address:
@@ -479,8 +550,28 @@ class Settings:
             raise ValueError(
                 "AUTO_BUY_MAX_PRICE_IMPACT_PCT must be above 0 and at most 10"
             )
+        if not 1 <= self.auto_buy_max_slippage_bps <= 2_000:
+            raise ValueError(
+                "AUTO_BUY_MAX_SLIPPAGE_BPS must be from 1 through 2000"
+            )
+        if not 0 <= self.auto_buy_discovery_min_score <= 100:
+            raise ValueError(
+                "AUTO_BUY_DISCOVERY_MIN_SCORE must be from 0 through 100"
+            )
+        if self.auto_buy_discovery_min_liquidity_usd <= 0:
+            raise ValueError(
+                "AUTO_BUY_DISCOVERY_MIN_LIQUIDITY_USD must be above 0"
+            )
+        if self.auto_buy_signal_max_age_seconds < 5:
+            raise ValueError(
+                "AUTO_BUY_SIGNAL_MAX_AGE_SECONDS must be at least 5"
+            )
         if self.auto_buy_live and not self.auto_buy_enabled:
             raise ValueError("AUTO_BUY_LIVE requires AUTO_BUY_ENABLED=true")
+        if self.auto_buy_discovery and not self.auto_buy_enabled:
+            raise ValueError(
+                "AUTO_BUY_DISCOVERY requires AUTO_BUY_ENABLED=true"
+            )
         if self.auto_buy_live and not self.auto_sell_live:
             raise ValueError("AUTO_BUY_LIVE requires AUTO_SELL_LIVE=true")
         if self.auto_buy_live and not self.jupiter_api_key:
