@@ -5,6 +5,7 @@ import base64
 import getpass
 import json
 import math
+import re
 import ssl
 import urllib.error
 import urllib.parse
@@ -28,6 +29,38 @@ KEYRING_ACCOUNT = "fomo-solana-private-key"
 
 class QuoteGuardError(ValueError):
     """A Jupiter quote exceeded a configured price-impact or slippage cap."""
+
+
+class JupiterRequestError(ConnectionError):
+    """A sanitized Jupiter HTTP failure with any public execution evidence."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        http_status: int,
+        code: int | None = None,
+        signature: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.http_status = http_status
+        self.code = code
+        self.signature = signature
+
+
+class JupiterExecutionError(RuntimeError):
+    """Jupiter returned a non-successful managed-execution result."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: int,
+        signature: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.signature = signature
 
 
 @dataclass(frozen=True, slots=True)
@@ -511,11 +544,72 @@ class JupiterSwapClient:
             payload,
         )
 
+    def _http_error_evidence(
+        self, exc: urllib.error.HTTPError,
+    ) -> tuple[str | None, int | None, str | None]:
+        """Return allow-listed error detail, code, and signature only."""
+        try:
+            raw = exc.read(8_193)
+        except (OSError, ValueError):
+            return None, None, None
+        if not raw:
+            return None, None, None
+        truncated = len(raw) > 8_192
+        raw = raw[:8_192]
+        try:
+            payload = json.loads(raw.decode("utf-8", errors="replace"))
+        except ValueError:
+            text = raw.decode("utf-8", errors="replace")
+            text = re.sub(r"[\x00-\x1f\x7f-\x9f]", " ", text)
+            if self.api_key:
+                text = text.replace(self.api_key, "[redacted-api-key]")
+            text = re.sub(
+                r"[A-Za-z0-9_+/=-]{64,}", "[redacted-long-value]", text
+            )
+            text = " ".join(text.split())[:300]
+            if truncated:
+                text = f"{text} [truncated]"
+            return text or None, None, None
+        if not isinstance(payload, dict):
+            return None, None, None
+
+        details: list[str] = []
+        for key in ("errorCode", "errorMessage", "error", "message", "status"):
+            value = payload.get(key)
+            if isinstance(value, (str, int, float, bool)):
+                safe_value = re.sub(
+                    r"[\x00-\x1f\x7f-\x9f]", " ", str(value)
+                )
+                if self.api_key:
+                    safe_value = safe_value.replace(
+                        self.api_key, "[redacted-api-key]"
+                    )
+                safe_value = re.sub(
+                    r"[A-Za-z0-9_+/=-]{64,}",
+                    "[redacted-long-value]",
+                    safe_value,
+                )
+                safe_value = " ".join(safe_value.split())
+                details.append(f"{key}={safe_value[:300]}")
+        raw_code = payload.get("code")
+        try:
+            code = int(raw_code) if raw_code is not None else None
+        except (TypeError, ValueError):
+            code = None
+        signature_value = payload.get("signature")
+        signature = None
+        if isinstance(signature_value, str) and re.fullmatch(
+            r"[1-9A-HJ-NP-Za-km-z]{32,128}", signature_value
+        ):
+            signature = signature_value
+        detail = "; ".join(details)[:500] or None
+        return detail, code, signature
+
     def _request_json(self, url: str, payload: dict[str, Any] | None) -> dict[str, Any]:
         data = json.dumps(payload).encode() if payload is not None else None
         headers = {
             "Accept": "application/json",
-            "User-Agent": "solana-launch-guard/0.19",
+            "User-Agent": "solana-launch-guard/0.20",
             "x-api-key": self.api_key,
         }
         if data is not None:
@@ -532,8 +626,18 @@ class JupiterSwapClient:
             ) as response:
                 result = json.load(response)
         except urllib.error.HTTPError as exc:
-            raise ConnectionError(
-                f"Jupiter request was rejected (HTTP {exc.code})"
+            detail, code, signature = self._http_error_evidence(exc)
+            message = f"Jupiter request was rejected (HTTP {exc.code}"
+            if code is not None:
+                message += f", code {code}"
+            message += ")"
+            if detail:
+                message += f": {detail}"
+            raise JupiterRequestError(
+                message,
+                http_status=exc.code,
+                code=code,
+                signature=signature,
             ) from exc
         except (OSError, ValueError, urllib.error.URLError) as exc:
             raise ConnectionError(f"Jupiter request failed: {exc}") from exc
@@ -686,7 +790,11 @@ class SolanaAutoSeller:
         signature = str(result.get("signature") or "")
         if status != "Success" or code != 0 or not signature:
             detail = result.get("error") or "transaction did not confirm"
-            raise RuntimeError(f"Jupiter execution uncertain/failed ({code}): {detail}")
+            raise JupiterExecutionError(
+                f"Jupiter execution uncertain/failed ({code}): {detail}",
+                code=code,
+                signature=signature or None,
+            )
         return SellReceipt(
             intent=prepared.intent,
             signature=signature,
@@ -888,7 +996,11 @@ class SolanaAutoBuyer:
         signature = str(result.get("signature") or "")
         if status != "Success" or code != 0 or not signature:
             detail = result.get("error") or "transaction did not confirm"
-            raise RuntimeError(f"Jupiter execution uncertain/failed ({code}): {detail}")
+            raise JupiterExecutionError(
+                f"Jupiter execution uncertain/failed ({code}): {detail}",
+                code=code,
+                signature=signature or None,
+            )
         return BuyReceipt(
             intent=prepared.intent,
             signature=signature,

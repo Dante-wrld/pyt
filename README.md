@@ -5,8 +5,10 @@ buyer/automatic seller for multichain crypto tokens.
 
 Launch Guard can automatically select fresh, confirmed Solana `BUY NOW`/`BUY
 ZONE` candidates and optionally execute wallet-wide `TAKE PARTIAL`, `PROTECT
-PROFIT`, and `EXIT WARNING` rules. Version 0.19 adds off-by-default adaptive
-wallet-exit chunks: an unsafe quote is halved without weakening either guard,
+PROFIT`, and `EXIT WARNING` rules. Version 0.20 records sanitized Jupiter error
+evidence, preserves any returned public transaction signature, and adds an
+explicit reconcile-pause-resume workflow for frozen sell batches. Adaptive
+wallet-exit chunks can halve an unsafe quote without weakening either guard,
 and confirmed progress persists across polling cycles and restarts. Every
 unattended order must pass a Jupiter price-impact cap, a separate slippage cap,
 local signing, and Solana RPC simulation before broadcast. Principal remains
@@ -224,17 +226,18 @@ Pump.fun events may represent token amounts in different unit scales. Because bo
   different result than a DEX Screener mark. A fast pump and reversal can occur
   between polling intervals.
 - An exported Solana private key has authority over the entire wallet even
-  though Launch Guard's execution policy only sells individually armed tokens.
-  A compromised computer, keychain, dependency, or transaction provider can
-  put every asset in that wallet at risk.
+  though Launch Guard limits its own policy to armed ladder mints and eligible
+  wallet-wide signals. A compromised computer, keychain, dependency, or
+  transaction provider can put every asset in that wallet at risk.
 - The process can act only while the computer is awake, online, and running.
 - New tokens can lose essentially all value.
 
 ## Live sell guardrails
 
-- Live execution is off by default and requires both enable flags, a Jupiter
-  API key, a matching keychain signer, a positive imported USD cost basis, and
-  a separate arm action for each token mint.
+- Live execution is off by default and requires the relevant enable/live
+  flags, a Jupiter API key, and a matching keychain signer. The profit ladder
+  also requires a positive imported USD cost basis and a separate arm action;
+  wallet-wide rules require their separate portfolio-signals flag.
 - Stage 1 will not submit unless Jupiter's minimum quoted USDC output covers
   the original principal after quote slippage and fees.
 - The seller rejects excessive reported price impact, records an idempotent
@@ -242,6 +245,12 @@ Pump.fun events may represent token amounts in different unit scales. Because bo
   confirmed success with a transaction signature.
 - Any uncertain or failed execution is frozen for human review with no
   automatic retry, avoiding a duplicate sell when the first result is unknown.
+- Jupiter HTTP failures retain only allow-listed, length-limited error fields,
+  the numeric code, and any public transaction signature. Request payloads,
+  signed transactions, and API keys are not written into the diagnostic.
+- Review recovery first compares the current on-chain balance with the stored
+  pre-execution balance. Resolution leaves the batch paused; reactivation is a
+  separate explicit command and never broadcasts by itself.
 - Native SOL, wrapped SOL, USDC, and USDT are excluded. Keep enough SOL in the
   wallet to pay network and priority fees.
 
@@ -546,6 +555,48 @@ are stored in SQLite, so a restart continues only the unsold remainder. An
 uncertain execution freezes the whole batch for review. Profit-ladder principal
 recovery is not adaptively chunked because its minimum principal output must be
 satisfied by one guarded order.
+
+#### Recover a frozen sell batch
+
+Keep both live flags false and stop every running Launch Guard process before
+reviewing a frozen batch. First list the records, then perform a read-only
+on-chain balance comparison using the exact quoted `batch_key`:
+
+```bash
+launch-guard --auto-sell-review-status
+launch-guard --reconcile-auto-sell-review 'BATCH_KEY'
+```
+
+Reconciliation does not sign or broadcast a transaction. Continue only when
+the result is `BALANCE_UNCHANGED`, `eligible_to_resolve` is `true`, and
+`execution_signature` is empty. Also inspect the wallet history independently
+in a Solana explorer. If a signature exists, the balance changed, or the result
+is inconclusive, leave the record frozen and investigate it on-chain.
+
+After confirming that no transaction occurred, clear the failed attempt while
+leaving the overall batch paused:
+
+```bash
+launch-guard \
+  --resolve-auto-sell-review 'BATCH_KEY' \
+  --confirm-no-transaction
+```
+
+This records `CLEARED_NO_TRANSACTION`, advances to a new idempotency key, and
+does not broadcast. Recheck status. Only after all monitor processes are still
+stopped should the paused batch be made eligible for a future monitor run:
+
+```bash
+launch-guard \
+  --resume-auto-sell-batch 'BATCH_KEY' \
+  --confirm-monitor-stopped
+```
+
+Resume also does not sign or broadcast. A later live portfolio monitor may
+attempt the remaining target under the current quote, simulation, impact, and
+slippage guards. For failures recorded before v0.20, the original Jupiter HTTP
+response cannot be recovered; full-exit batches can still use the stored target
+and unchanged on-chain balance for read-only reconciliation.
 
 ### Guarded automated buys
 

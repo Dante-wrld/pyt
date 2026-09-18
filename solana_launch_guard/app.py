@@ -1057,21 +1057,26 @@ class LaunchGuard:
             stage=intent.stage,
             requested_raw=prepared.input_amount_raw,
             expected_output_raw=prepared.expected_output_raw,
+            balance_before_raw=intent.balance_raw,
         )
         if not claimed:
             return
         try:
             receipt = await self.auto_seller.execute(prepared)
         except (ConnectionError, RuntimeError, ValueError) as exc:
+            failure_signature = getattr(exc, "signature", None)
             if batch_key is not None:
                 self.store.freeze_auto_sell_chunk(
                     batch_key=batch_key,
                     event_key=intent.event_key,
                     error=str(exc),
+                    signature=failure_signature,
                 )
             else:
                 self.store.freeze_auto_sell_execution(
-                    event_key=intent.event_key, error=str(exc)
+                    event_key=intent.event_key,
+                    error=str(exc),
+                    signature=failure_signature,
                 )
             LOGGER.error(
                 "AUTO-SELL FROZEN FOR REVIEW %s stage=%d (%s)",
@@ -1087,6 +1092,11 @@ class LaunchGuard:
                             f"TOKEN: {intent.symbol} • SOLANA\n"
                             f"Stage: {intent.stage + 1}\n"
                             f"No automatic retry will occur.\nReason: {exc}"
+                            + (
+                                f"\nSignature: {failure_signature}"
+                                if failure_signature
+                                else ""
+                            )
                         ),
                         sound="siren",
                         priority=1,
@@ -1301,7 +1311,9 @@ class LaunchGuard:
             self.store.arm_auto_sell(intent.mint)
         except (ConnectionError, RuntimeError, ValueError) as exc:
             self.store.freeze_auto_buy_execution(
-                event_key=event_key, error=str(exc)
+                event_key=event_key,
+                error=str(exc),
+                signature=getattr(exc, "signature", None),
             )
             LOGGER.error("AUTO-BUY FROZEN FOR REVIEW %s (%s)", intent.symbol, exc)
             return
@@ -1855,6 +1867,36 @@ def build_parser() -> argparse.ArgumentParser:
         help="show armed tokens and completed profit-ladder stages",
     )
     parser.add_argument(
+        "--auto-sell-review-status",
+        action="store_true",
+        help="show frozen or resolved-paused auto-sell review records",
+    )
+    parser.add_argument(
+        "--reconcile-auto-sell-review",
+        metavar="BATCH_KEY",
+        help="compare a frozen batch with the current on-chain token balance",
+    )
+    parser.add_argument(
+        "--resolve-auto-sell-review",
+        metavar="BATCH_KEY",
+        help="mark a verified no-transaction review resolved and paused",
+    )
+    parser.add_argument(
+        "--confirm-no-transaction",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--resume-auto-sell-batch",
+        metavar="BATCH_KEY",
+        help="reactivate a resolved paused batch for a future monitor run",
+    )
+    parser.add_argument(
+        "--confirm-monitor-stopped",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
         "--preflight-auto-sell-mint",
         metavar="MINT",
         help=(
@@ -1919,6 +1961,74 @@ def build_parser() -> argparse.ArgumentParser:
         help=argparse.SUPPRESS,
     )
     return parser
+
+
+async def reconcile_auto_sell_review(
+    settings: Settings, store: SQLiteStore, batch_key: str
+) -> dict[str, Any]:
+    if not settings.solana_wallet_address:
+        raise ValueError(
+            "auto-sell review reconciliation requires SOLANA_WALLET_ADDRESS"
+        )
+    review = store.load_auto_sell_review(batch_key)
+    batch = review["batch"]
+    execution = review["execution"]
+    if batch["status"] not in {"REVIEW", "PAUSED"}:
+        raise ValueError("auto-sell batch is not in review or paused")
+    if execution is None:
+        raise ValueError("auto-sell review has no execution record")
+
+    rpc = SolanaRpc(settings.solana_rpc_http_url)
+    balance = await rpc.token_balance(
+        settings.solana_wallet_address, str(batch["token_address"])
+    )
+    balance_before = execution.get("balance_before_raw")
+    balance_source: str | None = None
+    if balance_before is not None:
+        balance_before = int(balance_before)
+        balance_source = "recorded_pre_execution_balance"
+    elif bool(batch["full_exit"]):
+        balance_before = int(batch["target_raw"]) - int(batch["sold_raw"])
+        balance_source = "inferred_full_exit_remainder"
+
+    signature = execution.get("signature")
+    unchanged = (
+        balance.raw_amount == balance_before
+        if balance_before is not None
+        else None
+    )
+    if signature:
+        result = "SIGNATURE_REQUIRES_ON_CHAIN_REVIEW"
+    elif unchanged is True:
+        result = "BALANCE_UNCHANGED"
+    elif unchanged is False:
+        result = "BALANCE_CHANGED"
+    else:
+        result = "INCONCLUSIVE"
+    return {
+        "result": result,
+        "broadcast": False,
+        "batch_key": batch_key,
+        "batch_status": batch["status"],
+        "mint": batch["token_address"],
+        "symbol": batch["symbol"],
+        "execution_event_key": execution["event_key"],
+        "execution_status": execution["status"],
+        "execution_signature": signature,
+        "execution_error": execution.get("error"),
+        "requested_raw": execution["requested_raw"],
+        "balance_before_raw": balance_before,
+        "balance_before_source": balance_source,
+        "current_balance_raw": balance.raw_amount,
+        "current_balance_tokens": balance.amount,
+        "balance_unchanged": unchanged,
+        "eligible_to_resolve": (
+            batch["status"] == "REVIEW"
+            and execution["status"] == "REVIEW"
+            and not signature
+            and unchanged is True
+        ),
+    }
 
 
 async def preflight_auto_sell(
@@ -2354,6 +2464,63 @@ def main() -> None:
             )
         elif args.auto_sell_status:
             print(json.dumps(store.auto_sell_status(), indent=2))
+        elif args.auto_sell_review_status:
+            print(json.dumps(store.auto_sell_review_status(), indent=2))
+        elif args.reconcile_auto_sell_review:
+            result = asyncio.run(
+                reconcile_auto_sell_review(
+                    settings, store, args.reconcile_auto_sell_review
+                )
+            )
+            print("AUTO-SELL REVIEW RECONCILIATION — READ ONLY")
+            print(json.dumps(result, indent=2))
+        elif args.resolve_auto_sell_review:
+            if settings.auto_sell_live or settings.auto_buy_live:
+                raise ValueError(
+                    "set AUTO_SELL_LIVE=false and AUTO_BUY_LIVE=false before "
+                    "resolving a review"
+                )
+            if not args.confirm_no_transaction:
+                raise ValueError(
+                    "--confirm-no-transaction is required after checking "
+                    "the wallet's on-chain history"
+                )
+            reconciliation = asyncio.run(
+                reconcile_auto_sell_review(
+                    settings, store, args.resolve_auto_sell_review
+                )
+            )
+            if not reconciliation["eligible_to_resolve"]:
+                raise ValueError(
+                    "review cannot be resolved: on-chain balance is not "
+                    "verified unchanged or a signature requires inspection"
+                )
+            batch = store.resolve_auto_sell_review(
+                batch_key=args.resolve_auto_sell_review,
+                confirmed_no_transaction=True,
+                verified_balance_raw=int(
+                    reconciliation["current_balance_raw"]
+                ),
+            )
+            print("AUTO-SELL REVIEW RESOLVED — BATCH REMAINS PAUSED")
+            print(json.dumps(batch, indent=2))
+        elif args.resume_auto_sell_batch:
+            if settings.auto_sell_live or settings.auto_buy_live:
+                raise ValueError(
+                    "set AUTO_SELL_LIVE=false and AUTO_BUY_LIVE=false before "
+                    "resuming a batch"
+                )
+            if not args.confirm_monitor_stopped:
+                raise ValueError(
+                    "--confirm-monitor-stopped is required before resuming "
+                    "an auto-sell batch"
+                )
+            batch = store.resume_auto_sell_batch(
+                batch_key=args.resume_auto_sell_batch,
+                confirmed_monitor_stopped=True,
+            )
+            print("AUTO-SELL BATCH RESUMED — NO TRANSACTION BROADCAST")
+            print(json.dumps(batch, indent=2))
         elif args.preflight_auto_sell_mint:
             try:
                 result = asyncio.run(

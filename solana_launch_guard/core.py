@@ -474,6 +474,7 @@ class SQLiteStore:
                 stage INTEGER NOT NULL,
                 status TEXT NOT NULL,
                 requested_raw INTEGER NOT NULL,
+                balance_before_raw INTEGER,
                 expected_output_raw INTEGER,
                 signature TEXT,
                 error TEXT,
@@ -569,6 +570,17 @@ class SQLiteStore:
             );
             """
         )
+        execution_columns = {
+            str(row["name"])
+            for row in self.connection.execute(
+                "PRAGMA table_info(auto_sell_executions)"
+            ).fetchall()
+        }
+        if "balance_before_raw" not in execution_columns:
+            self.connection.execute(
+                "ALTER TABLE auto_sell_executions "
+                "ADD COLUMN balance_before_raw INTEGER"
+            )
         self.connection.commit()
 
     def save_event(
@@ -915,6 +927,142 @@ class SQLiteStore:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    def auto_sell_review_status(self) -> dict[str, list[dict[str, Any]]]:
+        batches = self.connection.execute(
+            """
+            SELECT batch_key, chain, token_address, symbol, stage, status,
+                   target_raw, full_exit, sold_raw, next_chunk_index,
+                   last_signature, error, created_at, updated_at
+            FROM auto_sell_batches
+            WHERE status IN ('REVIEW', 'PAUSED')
+            ORDER BY updated_at DESC
+            """
+        ).fetchall()
+        executions = self.connection.execute(
+            """
+            SELECT event_key, chain, token_address, symbol, stage, status,
+                   requested_raw, balance_before_raw, expected_output_raw,
+                   signature, error, created_at, updated_at
+            FROM auto_sell_executions
+            WHERE status IN ('REVIEW', 'CLEARED_NO_TRANSACTION')
+            ORDER BY updated_at DESC
+            """
+        ).fetchall()
+        return {
+            "batches": [dict(row) for row in batches],
+            "executions": [dict(row) for row in executions],
+        }
+
+    def load_auto_sell_review(self, batch_key: str) -> dict[str, Any]:
+        batch = self.connection.execute(
+            "SELECT * FROM auto_sell_batches WHERE batch_key = ?",
+            (batch_key,),
+        ).fetchone()
+        if batch is None:
+            raise ValueError("auto-sell batch was not found")
+        chunk_index = int(batch["next_chunk_index"])
+        event_key = f"{batch_key}:chunk:{chunk_index}"
+        execution = self.connection.execute(
+            "SELECT * FROM auto_sell_executions WHERE event_key = ?",
+            (event_key,),
+        ).fetchone()
+        if execution is None:
+            execution = self.connection.execute(
+                "SELECT * FROM auto_sell_executions "
+                "WHERE event_key LIKE ? ORDER BY updated_at DESC LIMIT 1",
+                (f"{batch_key}:chunk:%",),
+            ).fetchone()
+        return {
+            "batch": dict(batch),
+            "execution": dict(execution) if execution is not None else None,
+        }
+
+    def resolve_auto_sell_review(
+        self,
+        *,
+        batch_key: str,
+        confirmed_no_transaction: bool,
+        verified_balance_raw: int,
+    ) -> dict[str, Any]:
+        if not confirmed_no_transaction:
+            raise ValueError("explicit no-transaction confirmation is required")
+        review = self.load_auto_sell_review(batch_key)
+        batch = review["batch"]
+        execution = review["execution"]
+        if batch["status"] != "REVIEW":
+            raise ValueError("auto-sell batch is not awaiting review")
+        if execution is None or execution["status"] != "REVIEW":
+            raise ValueError("auto-sell execution is not awaiting review")
+        if execution.get("signature"):
+            raise ValueError(
+                "review has a transaction signature; inspect it on-chain"
+            )
+        balance_before = execution.get("balance_before_raw")
+        if balance_before is None and bool(batch["full_exit"]):
+            balance_before = int(batch["target_raw"]) - int(batch["sold_raw"])
+        if balance_before is None:
+            raise ValueError(
+                "the pre-execution balance is unavailable; review cannot be "
+                "resolved automatically"
+            )
+        if verified_balance_raw != int(balance_before):
+            raise ValueError(
+                "current on-chain balance differs from the pre-execution balance"
+            )
+
+        now = utc_now()
+        prior_error = str(execution.get("error") or "execution outcome reviewed")
+        review_note = (
+            f"{prior_error}; operator confirmed no transaction after "
+            f"on-chain balance reconciliation"
+        )[:500]
+        with self.connection:
+            self.connection.execute(
+                "UPDATE auto_sell_executions "
+                "SET status = 'CLEARED_NO_TRANSACTION', error = ?, "
+                "updated_at = ? WHERE event_key = ? AND status = 'REVIEW'",
+                (review_note, now, execution["event_key"]),
+            )
+            self.connection.execute(
+                "UPDATE auto_sell_batches "
+                "SET status = 'PAUSED', next_chunk_index = ?, error = ?, "
+                "updated_at = ? WHERE batch_key = ? AND status = 'REVIEW'",
+                (
+                    int(batch["next_chunk_index"]) + 1,
+                    "review resolved; batch remains paused",
+                    now,
+                    batch_key,
+                ),
+            )
+        return self.load_auto_sell_review(batch_key)["batch"]
+
+    def resume_auto_sell_batch(
+        self, *, batch_key: str, confirmed_monitor_stopped: bool
+    ) -> dict[str, Any]:
+        if not confirmed_monitor_stopped:
+            raise ValueError("explicit stopped-monitor confirmation is required")
+        batch = self.connection.execute(
+            "SELECT * FROM auto_sell_batches WHERE batch_key = ?",
+            (batch_key,),
+        ).fetchone()
+        if batch is None:
+            raise ValueError("auto-sell batch was not found")
+        if batch["status"] != "PAUSED":
+            raise ValueError("only a resolved paused batch can be resumed")
+        self.connection.execute(
+            "UPDATE auto_sell_batches SET status = 'ACTIVE', error = NULL, "
+            "updated_at = ? WHERE batch_key = ? AND status = 'PAUSED'",
+            (utc_now(), batch_key),
+        )
+        self.connection.commit()
+        row = self.connection.execute(
+            "SELECT * FROM auto_sell_batches WHERE batch_key = ?",
+            (batch_key,),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("could not reload the auto-sell batch")
+        return dict(row)
+
     def begin_auto_sell_execution(
         self,
         *,
@@ -925,14 +1073,16 @@ class SQLiteStore:
         stage: int,
         requested_raw: int,
         expected_output_raw: int,
+        balance_before_raw: int | None = None,
     ) -> bool:
         now = utc_now()
         cursor = self.connection.execute(
             """
             INSERT OR IGNORE INTO auto_sell_executions(
                 event_key, chain, token_address, symbol, stage, status,
-                requested_raw, expected_output_raw, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, 'PENDING', ?, ?, ?, ?)
+                requested_raw, balance_before_raw, expected_output_raw,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, 'PENDING', ?, ?, ?, ?, ?)
             """,
             (
                 event_key,
@@ -941,6 +1091,7 @@ class SQLiteStore:
                 symbol,
                 stage,
                 requested_raw,
+                balance_before_raw,
                 expected_output_raw,
                 now,
                 now,
@@ -1044,14 +1195,20 @@ class SQLiteStore:
         return completed
 
     def freeze_auto_sell_chunk(
-        self, *, batch_key: str, event_key: str, error: str
+        self,
+        *,
+        batch_key: str,
+        event_key: str,
+        error: str,
+        signature: str | None = None,
     ) -> None:
         now = utc_now()
         with self.connection:
             self.connection.execute(
                 "UPDATE auto_sell_executions SET status = 'REVIEW', error = ?, "
-                "updated_at = ? WHERE event_key = ? AND status = 'PENDING'",
-                (error[:500], now, event_key),
+                "signature = COALESCE(?, signature), updated_at = ? "
+                "WHERE event_key = ? AND status = 'PENDING'",
+                (error[:500], signature, now, event_key),
             )
             self.connection.execute(
                 "UPDATE auto_sell_batches SET status = 'REVIEW', error = ?, "
@@ -1092,11 +1249,18 @@ class SQLiteStore:
                 ),
             )
 
-    def freeze_auto_sell_execution(self, *, event_key: str, error: str) -> None:
+    def freeze_auto_sell_execution(
+        self,
+        *,
+        event_key: str,
+        error: str,
+        signature: str | None = None,
+    ) -> None:
         self.connection.execute(
             "UPDATE auto_sell_executions SET status = 'REVIEW', error = ?, "
-            "updated_at = ? WHERE event_key = ? AND status = 'PENDING'",
-            (error[:500], utc_now(), event_key),
+            "signature = COALESCE(?, signature), updated_at = ? "
+            "WHERE event_key = ? AND status = 'PENDING'",
+            (error[:500], signature, utc_now(), event_key),
         )
         self.connection.commit()
 
@@ -1294,11 +1458,18 @@ class SQLiteStore:
                 (now, row["chain"], row["token_address"]),
             )
 
-    def freeze_auto_buy_execution(self, *, event_key: str, error: str) -> None:
+    def freeze_auto_buy_execution(
+        self,
+        *,
+        event_key: str,
+        error: str,
+        signature: str | None = None,
+    ) -> None:
         self.connection.execute(
             "UPDATE auto_buy_executions SET status = 'REVIEW', error = ?, "
-            "updated_at = ? WHERE event_key = ? AND status = 'PENDING'",
-            (error[:500], utc_now(), event_key),
+            "signature = COALESCE(?, signature), updated_at = ? "
+            "WHERE event_key = ? AND status = 'PENDING'",
+            (error[:500], signature, utc_now(), event_key),
         )
         self.connection.commit()
 
