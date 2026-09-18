@@ -116,6 +116,58 @@ class SolanaRpc:
             for mint, amount in sorted(totals.items())
         )
 
+    async def token_balance(
+        self, owner: str, mint: str
+    ) -> SolanaTokenHolding:
+        result = await asyncio.to_thread(
+            self._request,
+            "getTokenAccountsByOwner",
+            [
+                owner,
+                {"mint": mint},
+                {"encoding": "jsonParsed", "commitment": "confirmed"},
+            ],
+        )
+        if not isinstance(result, dict):
+            raise ConnectionError("Solana token balance is unavailable")
+        raw_total = 0
+        decimals: int | None = None
+        for item in result.get("value") or []:
+            try:
+                token_amount = item["account"]["data"]["parsed"]["info"][
+                    "tokenAmount"
+                ]
+                raw_total += int(token_amount["amount"])
+                decimals = int(token_amount["decimals"])
+            except (KeyError, TypeError, ValueError):
+                continue
+        if decimals is None:
+            decimals = 6 if mint in IGNORED_MINTS else 0
+        return SolanaTokenHolding(
+            mint=mint,
+            amount=float(
+                Decimal(raw_total) / (Decimal(10) ** decimals)
+            ),
+            raw_amount=raw_total,
+            decimals=decimals,
+        )
+
+    async def mint_decimals(self, mint: str) -> int:
+        result = await asyncio.to_thread(
+            self._request,
+            "getTokenSupply",
+            [mint, {"commitment": "confirmed"}],
+        )
+        if not isinstance(result, dict):
+            raise ConnectionError("Solana token supply is unavailable")
+        try:
+            decimals = int(result["value"]["decimals"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ConnectionError("Solana returned invalid mint decimals") from exc
+        if decimals < 0:
+            raise ConnectionError("Solana returned invalid mint decimals")
+        return decimals
+
     async def simulate_transaction(
         self, signed_transaction_b64: str
     ) -> dict[str, Any]:

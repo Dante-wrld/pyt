@@ -73,11 +73,53 @@ class PreflightReceipt:
     broadcast: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class BuyIntent:
+    mint: str
+    symbol: str
+    event_key: str
+    amount_usdc_raw: int
+    funding_source: str
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedBuy:
+    intent: BuyIntent
+    transaction: str
+    request_id: str
+    input_amount_raw: int
+    expected_output_raw: int
+    minimum_output_raw: int
+    price_impact_pct: float
+    last_valid_block_height: int | None
+    router: str | None = None
+    mode: str | None = None
+    slippage_bps: int | None = None
+    fee_bps: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class BuyReceipt:
+    intent: BuyIntent
+    signature: str
+    input_amount_raw: int
+    output_amount_raw: int
+
+
+@dataclass(frozen=True, slots=True)
+class BuyPreflightReceipt:
+    prepared: PreparedBuy
+    units_consumed: int | None
+    log_count: int
+    broadcast: bool = False
+
+
 class OrderClient(Protocol):
     async def order(
         self,
         *,
         input_mint: str,
+        output_mint: str = USDC_MINT,
         amount_raw: int,
         taker: str,
         exclude_routers: tuple[str, ...] = (),
@@ -331,13 +373,14 @@ class JupiterSwapClient:
         self,
         *,
         input_mint: str,
+        output_mint: str = USDC_MINT,
         amount_raw: int,
         taker: str,
         exclude_routers: tuple[str, ...] = (),
     ) -> dict[str, Any]:
         parameters = {
             "inputMint": input_mint,
-            "outputMint": USDC_MINT,
+            "outputMint": output_mint,
             "amount": str(amount_raw),
             "taker": taker,
         }
@@ -373,7 +416,7 @@ class JupiterSwapClient:
         data = json.dumps(payload).encode() if payload is not None else None
         headers = {
             "Accept": "application/json",
-            "User-Agent": "solana-launch-guard/0.15",
+            "User-Agent": "solana-launch-guard/0.16",
             "x-api-key": self.api_key,
         }
         if data is not None:
@@ -558,4 +601,137 @@ class SolanaAutoSeller:
         if order.get("outputMint") not in {None, USDC_MINT}:
             raise ValueError("Jupiter order output mint mismatch")
         if int(order.get("inAmount") or amount_raw) != amount_raw:
+            raise ValueError("Jupiter order input amount mismatch")
+
+
+class SolanaAutoBuyer:
+    """Prepare, simulate, and execute an allow-listed USDC token purchase."""
+
+    def __init__(
+        self,
+        *,
+        client: OrderClient,
+        signer: TransactionSigner,
+        max_price_impact_pct: float = 5.0,
+    ) -> None:
+        self.client = client
+        self.signer = signer
+        self.max_price_impact_pct = max_price_impact_pct
+
+    async def prepare(
+        self,
+        intent: BuyIntent,
+        *,
+        exclude_routers: tuple[str, ...] = (),
+    ) -> PreparedBuy:
+        order = await self.client.order(
+            input_mint=USDC_MINT,
+            output_mint=intent.mint,
+            amount_raw=intent.amount_usdc_raw,
+            taker=self.signer.public_key,
+            exclude_routers=exclude_routers,
+        )
+        self._validate_order(order, intent)
+        expected_output = int(order.get("outAmount") or 0)
+        minimum_output = int(
+            order.get("otherAmountThreshold") or expected_output
+        )
+        if expected_output <= 0 or minimum_output <= 0:
+            raise ValueError("Jupiter returned no usable token output")
+        raw_price_impact = order.get("priceImpact")
+        if raw_price_impact is None:
+            price_impact = float(order.get("priceImpactPct") or 0) * 100
+        else:
+            price_impact = float(raw_price_impact)
+        if abs(price_impact) > self.max_price_impact_pct:
+            raise ValueError(
+                f"Jupiter price impact {price_impact:.2f}% exceeds the "
+                f"{self.max_price_impact_pct:.2f}% limit"
+            )
+        transaction = str(order.get("transaction") or "")
+        request_id = str(order.get("requestId") or "")
+        if not transaction or not request_id:
+            code = order.get("errorCode")
+            message = order.get("errorMessage") or "transaction unavailable"
+            raise ValueError(f"Jupiter order {code}: {message}")
+        last_valid = order.get("lastValidBlockHeight")
+        return PreparedBuy(
+            intent=intent,
+            transaction=transaction,
+            request_id=request_id,
+            input_amount_raw=intent.amount_usdc_raw,
+            expected_output_raw=expected_output,
+            minimum_output_raw=minimum_output,
+            price_impact_pct=price_impact,
+            last_valid_block_height=(
+                int(last_valid) if last_valid is not None else None
+            ),
+            router=str(order.get("router")) if order.get("router") else None,
+            mode=str(order.get("mode")) if order.get("mode") else None,
+            slippage_bps=(
+                int(order["slippageBps"])
+                if order.get("slippageBps") is not None
+                else None
+            ),
+            fee_bps=(
+                int(order["feeBps"])
+                if order.get("feeBps") is not None
+                else None
+            ),
+        )
+
+    async def execute(self, prepared: PreparedBuy) -> BuyReceipt:
+        signed = self.signer.sign(prepared.transaction)
+        result = await self.client.execute(
+            signed_transaction=signed,
+            request_id=prepared.request_id,
+            last_valid_block_height=prepared.last_valid_block_height,
+        )
+        status = str(result.get("status") or "")
+        code = int(result.get("code") or 0)
+        signature = str(result.get("signature") or "")
+        if status != "Success" or code != 0 or not signature:
+            detail = result.get("error") or "transaction did not confirm"
+            raise RuntimeError(f"Jupiter execution uncertain/failed ({code}): {detail}")
+        return BuyReceipt(
+            intent=prepared.intent,
+            signature=signature,
+            input_amount_raw=int(
+                result.get("totalInputAmount") or prepared.input_amount_raw
+            ),
+            output_amount_raw=int(
+                result.get("totalOutputAmount")
+                or result.get("outputAmountResult")
+                or 0
+            ),
+        )
+
+    async def preflight(
+        self,
+        intent: BuyIntent,
+        simulator: TransactionSimulator,
+    ) -> BuyPreflightReceipt:
+        prepared = await self.prepare(
+            intent, exclude_routers=("jupiterz",)
+        )
+        signed = self.signer.sign(prepared.transaction)
+        simulation = await simulator.simulate_transaction(signed)
+        logs = simulation.get("logs")
+        units = simulation.get("unitsConsumed")
+        return BuyPreflightReceipt(
+            prepared=prepared,
+            units_consumed=int(units) if units is not None else None,
+            log_count=len(logs) if isinstance(logs, list) else 0,
+        )
+
+    @staticmethod
+    def _validate_order(order: dict[str, Any], intent: BuyIntent) -> None:
+        if order.get("inputMint") not in {None, USDC_MINT}:
+            raise ValueError("Jupiter order input mint mismatch")
+        if order.get("outputMint") not in {None, intent.mint}:
+            raise ValueError("Jupiter order output mint mismatch")
+        input_amount = int(
+            order.get("inAmount") or intent.amount_usdc_raw
+        )
+        if input_amount != intent.amount_usdc_raw:
             raise ValueError("Jupiter order input amount mismatch")

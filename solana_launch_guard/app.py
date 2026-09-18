@@ -19,10 +19,13 @@ import websockets
 from .config import Settings
 from .core import Launch, PaperBroker, RiskEngine, SQLiteStore
 from .execution import (
+    BuyIntent,
     JupiterSwapClient,
     KeyringSolanaSigner,
     ProfitLadder,
+    SolanaAutoBuyer,
     SolanaAutoSeller,
+    USDC_MINT,
     store_fomo_solana_key,
 )
 from .intelligence import CoinIntelligence
@@ -46,6 +49,7 @@ from .portfolio import (
     write_portfolio_snapshot,
 )
 from .recommendations import (
+    RecommendationCandidate,
     RecommendationBook,
     build_snapshot,
     format_dashboard,
@@ -100,6 +104,7 @@ class LaunchGuard:
         self.portfolio_monitor_enabled = False
         self.portfolio_last_decisions: dict[str, str] = {}
         self.auto_sell_dry_run_seen: set[str] = set()
+        self.auto_buy_dry_run_seen: set[str] = set()
         self.recommendations = RecommendationBook(
             pool_size=settings.recommendation_pool_size,
             ttl_seconds=settings.recommendation_ttl_seconds,
@@ -194,6 +199,7 @@ class LaunchGuard:
             ),
         )
         self.auto_seller: SolanaAutoSeller | None = None
+        self.auto_buyer: SolanaAutoBuyer | None = None
         if settings.auto_sell_enabled and settings.auto_sell_live:
             assert settings.solana_wallet_address is not None
             assert settings.jupiter_api_key is not None
@@ -205,6 +211,19 @@ class LaunchGuard:
                 signer=signer,
                 max_price_impact_pct=(
                     settings.auto_sell_max_price_impact_pct
+                ),
+            )
+        if settings.auto_buy_enabled and settings.auto_buy_live:
+            assert settings.solana_wallet_address is not None
+            assert settings.jupiter_api_key is not None
+            buy_signer = KeyringSolanaSigner(
+                expected_public_key=settings.solana_wallet_address
+            )
+            self.auto_buyer = SolanaAutoBuyer(
+                client=JupiterSwapClient(api_key=settings.jupiter_api_key),
+                signer=buy_signer,
+                max_price_impact_pct=(
+                    settings.auto_buy_max_price_impact_pct
                 ),
             )
         for state in store.load_portfolio_states():
@@ -951,6 +970,13 @@ class LaunchGuard:
             signature=receipt.signature,
             next_stage=intent.stage + 1,
         )
+        reinvestment = self.store.record_auto_buy_sale(
+            token_address=intent.mint,
+            sold_raw=receipt.input_amount_raw,
+            proceeds_usdc_raw=receipt.output_amount_raw,
+            reinvest_pct=self.settings.auto_buy_reinvest_profit_pct,
+            managed_complete=(intent.stage + 1 >= 2),
+        )
         LOGGER.warning(
             "AUTO-SELL CONFIRMED %s stage=%d signature=%s",
             intent.symbol,
@@ -977,6 +1003,128 @@ class LaunchGuard:
                     "Sell confirmed, but the phone alert failed (%s)",
                     notification_exc,
                 )
+
+        if reinvestment is not None:
+            LOGGER.warning(
+                "AUTO-BUY PROFIT LEDGER %s realized=$%.6f reinvested=$%.6f",
+                intent.symbol,
+                reinvestment["profit_usdc_raw"] / 1_000_000,
+                reinvestment["reinvest_credit_usdc_raw"] / 1_000_000,
+            )
+
+    async def _maybe_auto_buy(
+        self, candidate: RecommendationCandidate
+    ) -> None:
+        if (
+            not self.settings.auto_buy_enabled
+            or candidate.chain != "solana"
+            or candidate.decision not in {"BUY NOW", "BUY ZONE"}
+        ):
+            return
+        policy = self.store.load_auto_buy_policy(candidate.mint)
+        if policy is None or not bool(policy["armed"]):
+            return
+        seed_raw = round(self.settings.auto_buy_seed_size_usdc * 1_000_000)
+        try:
+            amount_raw, funding_source = self.store.preview_auto_buy_budget(
+                seed_size_usdc_raw=seed_raw,
+                max_seed_buys=self.settings.auto_buy_max_seed_buys,
+                max_open_positions=(
+                    self.settings.auto_buy_max_open_positions
+                ),
+            )
+        except ValueError as exc:
+            LOGGER.info("AUTO-BUY WAITING %s (%s)", candidate.symbol, exc)
+            return
+        event_key = (
+            f"solana:{candidate.mint}:auto-buy:{policy['updated_at']}"
+        )
+        intent = BuyIntent(
+            mint=candidate.mint,
+            symbol=str(policy["symbol"]),
+            event_key=event_key,
+            amount_usdc_raw=amount_raw,
+            funding_source=funding_source,
+        )
+        if self.auto_buyer is None:
+            if event_key not in self.auto_buy_dry_run_seen:
+                LOGGER.warning(
+                    "AUTO-BUY READY (DRY RUN) %s decision=%s amount=$%.2f "
+                    "funding=%s",
+                    intent.symbol,
+                    candidate.decision,
+                    amount_raw / 1_000_000,
+                    funding_source,
+                )
+                self.auto_buy_dry_run_seen.add(event_key)
+            return
+
+        assert self.settings.solana_wallet_address is not None
+        rpc = SolanaRpc(self.settings.solana_rpc_http_url)
+        try:
+            usdc = await rpc.token_balance(
+                self.settings.solana_wallet_address, USDC_MINT
+            )
+            existing = await rpc.token_balance(
+                self.settings.solana_wallet_address, candidate.mint
+            )
+            output_decimals = await rpc.mint_decimals(candidate.mint)
+            if usdc.raw_amount < amount_raw:
+                raise ValueError("wallet USDC balance is below the buy amount")
+            if existing.raw_amount > 0:
+                raise ValueError(
+                    "wallet already holds this mint; cost-basis mixing blocked"
+                )
+            prepared = await self.auto_buyer.prepare(intent)
+        except (ConnectionError, ValueError) as exc:
+            LOGGER.warning("AUTO-BUY NOT SUBMITTED %s (%s)", intent.symbol, exc)
+            return
+        claimed = self.store.begin_auto_buy_execution(
+            event_key=event_key,
+            token_address=intent.mint,
+            symbol=intent.symbol,
+            funding_source=funding_source,
+            input_usdc_raw=prepared.input_amount_raw,
+            expected_output_raw=prepared.expected_output_raw,
+        )
+        if not claimed:
+            return
+        try:
+            receipt = await self.auto_buyer.execute(prepared)
+            if receipt.output_amount_raw <= 0:
+                raise RuntimeError("confirmed buy reported no token output")
+            self.store.complete_auto_buy_execution(
+                event_key=event_key,
+                signature=receipt.signature,
+                actual_output_raw=receipt.output_amount_raw,
+                output_decimals=output_decimals,
+            )
+            quantity = receipt.output_amount_raw / (10**output_decimals)
+            cost_usdc = receipt.input_amount_raw / 1_000_000
+            self.store.save_owned_holding(
+                OwnedHolding(
+                    chain="solana",
+                    token_address=intent.mint,
+                    symbol=intent.symbol,
+                    quantity=quantity,
+                    entry_price=cost_usdc / quantity,
+                    price_currency="USD",
+                    cost_amount=cost_usdc,
+                )
+            )
+            self.store.arm_auto_sell(intent.mint)
+        except (ConnectionError, RuntimeError, ValueError) as exc:
+            self.store.freeze_auto_buy_execution(
+                event_key=event_key, error=str(exc)
+            )
+            LOGGER.error("AUTO-BUY FROZEN FOR REVIEW %s (%s)", intent.symbol, exc)
+            return
+        LOGGER.warning(
+            "AUTO-BUY CONFIRMED %s amount=$%.2f signature=%s",
+            intent.symbol,
+            receipt.input_amount_raw / 1_000_000,
+            receipt.signature,
+        )
 
     async def run_recommendation_monitor(self) -> None:
         LOGGER.info(
@@ -1036,6 +1184,12 @@ class LaunchGuard:
                             candidate.decision,
                             candidate.signal_score,
                         )
+
+            if self.settings.auto_buy_enabled:
+                for candidate in list(
+                    self.recommendations.candidates.values()
+                ):
+                    await self._maybe_auto_buy(candidate)
 
             alerts = (
                 self.recommendations.pop_pullback_alerts()
@@ -1518,6 +1672,34 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--arm-auto-buy-mint",
+        metavar="MINT",
+        help="allow one Solana mint to receive one risk-gated automated buy",
+    )
+    parser.add_argument(
+        "--buy-symbol",
+        default="ARMED",
+        help="symbol stored with --arm-auto-buy-mint",
+    )
+    parser.add_argument(
+        "--disarm-auto-buy-mint",
+        metavar="MINT",
+        help="prevent a new automated buy for one mint",
+    )
+    parser.add_argument(
+        "--auto-buy-status",
+        action="store_true",
+        help="show the seed counter, profit pool, allow-list, and positions",
+    )
+    parser.add_argument(
+        "--preflight-auto-buy-mint",
+        metavar="MINT",
+        help=(
+            "build, locally sign, and RPC-simulate an armed USDC purchase "
+            "without broadcasting it"
+        ),
+    )
+    parser.add_argument(
         "--recommendations-display",
         action="store_true",
         help=argparse.SUPPRESS,
@@ -1605,6 +1787,76 @@ async def preflight_auto_sell(
         "input_tokens": prepared.input_amount_raw / (10**balance.decimals),
         "expected_output_usdc": prepared.expected_output_raw / 1_000_000,
         "minimum_output_usdc": prepared.minimum_output_raw / 1_000_000,
+        "price_impact_pct": prepared.price_impact_pct,
+        "router": prepared.router,
+        "mode": prepared.mode,
+        "slippage_bps": prepared.slippage_bps,
+        "fee_bps": prepared.fee_bps,
+        "simulation_units_consumed": receipt.units_consumed,
+        "simulation_log_count": receipt.log_count,
+    }
+
+
+async def preflight_auto_buy(
+    settings: Settings, store: SQLiteStore, mint: str
+) -> dict[str, Any]:
+    if not settings.solana_wallet_address:
+        raise ValueError("auto-buy preflight requires SOLANA_WALLET_ADDRESS")
+    if not settings.jupiter_api_key:
+        raise ValueError("auto-buy preflight requires JUPITER_API_KEY")
+    policy = store.load_auto_buy_policy(mint)
+    if policy is None or not bool(policy["armed"]):
+        raise ValueError("auto-buy preflight requires an armed token mint")
+
+    seed_raw = round(settings.auto_buy_seed_size_usdc * 1_000_000)
+    amount_raw, funding_source = store.preview_auto_buy_budget(
+        seed_size_usdc_raw=seed_raw,
+        max_seed_buys=settings.auto_buy_max_seed_buys,
+        max_open_positions=settings.auto_buy_max_open_positions,
+    )
+    rpc = SolanaRpc(settings.solana_rpc_http_url)
+    usdc = await rpc.token_balance(settings.solana_wallet_address, USDC_MINT)
+    if usdc.raw_amount < amount_raw:
+        raise ValueError("wallet USDC balance is below the preflight amount")
+    existing = await rpc.token_balance(settings.solana_wallet_address, mint)
+    if existing.raw_amount > 0:
+        raise ValueError(
+            "wallet already holds this mint; cost-basis mixing blocked"
+        )
+    decimals = await rpc.mint_decimals(mint)
+    signer = KeyringSolanaSigner(
+        expected_public_key=settings.solana_wallet_address
+    )
+    buyer = SolanaAutoBuyer(
+        client=JupiterSwapClient(api_key=settings.jupiter_api_key),
+        signer=signer,
+        max_price_impact_pct=settings.auto_buy_max_price_impact_pct,
+    )
+    intent = BuyIntent(
+        mint=mint,
+        symbol=str(policy["symbol"]),
+        event_key=f"solana:{mint}:auto-buy-preflight",
+        amount_usdc_raw=amount_raw,
+        funding_source=funding_source,
+    )
+    receipt = await buyer.preflight(intent, rpc)
+    prepared = receipt.prepared
+    return {
+        "result": "PASSED",
+        "broadcast": receipt.broadcast,
+        "wallet": signer.public_key,
+        "mint": mint,
+        "symbol": intent.symbol,
+        "funding_source": funding_source,
+        "input_usdc": prepared.input_amount_raw / 1_000_000,
+        "expected_output_raw": prepared.expected_output_raw,
+        "expected_output_tokens": (
+            prepared.expected_output_raw / (10**decimals)
+        ),
+        "minimum_output_raw": prepared.minimum_output_raw,
+        "minimum_output_tokens": (
+            prepared.minimum_output_raw / (10**decimals)
+        ),
         "price_impact_pct": prepared.price_impact_pct,
         "router": prepared.router,
         "mode": prepared.mode,
@@ -1801,6 +2053,29 @@ def main() -> None:
             except (ConnectionError, RuntimeError) as exc:
                 raise ValueError(f"auto-sell preflight failed: {exc}") from exc
             print("AUTO-SELL PREFLIGHT PASSED — NO TRANSACTION BROADCAST")
+            print(json.dumps(result, indent=2))
+        elif args.arm_auto_buy_mint:
+            store.arm_auto_buy(args.arm_auto_buy_mint, args.buy_symbol)
+            LOGGER.info(
+                "Auto-buy allow-listed %s as %s",
+                args.arm_auto_buy_mint,
+                args.buy_symbol,
+            )
+        elif args.disarm_auto_buy_mint:
+            store.disarm_auto_buy(args.disarm_auto_buy_mint)
+            LOGGER.info("Auto-buy disarmed for %s", args.disarm_auto_buy_mint)
+        elif args.auto_buy_status:
+            print(json.dumps(store.auto_buy_status(), indent=2))
+        elif args.preflight_auto_buy_mint:
+            try:
+                result = asyncio.run(
+                    preflight_auto_buy(
+                        settings, store, args.preflight_auto_buy_mint
+                    )
+                )
+            except (ConnectionError, RuntimeError) as exc:
+                raise ValueError(f"auto-buy preflight failed: {exc}") from exc
+            print("AUTO-BUY PREFLIGHT PASSED — NO TRANSACTION BROADCAST")
             print(json.dumps(result, indent=2))
         else:
             guard = LaunchGuard(settings, store)
