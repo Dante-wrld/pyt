@@ -46,6 +46,7 @@ class RecommendationCandidate:
     decision_reason: str = "waiting for confirmation"
     entry_zone_low: float | None = None
     entry_zone_high: float | None = None
+    peak_price: float = 0.0
 
     @property
     def rise_pct(self) -> float:
@@ -86,6 +87,7 @@ class RecommendationCandidate:
         return {
             "BUY ZONE": 4,
             "BUY NOW": 3,
+            "PULLBACK STARTED": 2,
             "WAIT FOR PULLBACK": 2,
             "WATCH": 1,
             "AVOID": 0,
@@ -116,6 +118,12 @@ class RecommendationCandidate:
             * 100,
         )
         return shallow, deep
+
+    @property
+    def pullback_from_peak_pct(self) -> float:
+        if self.peak_price <= 0 or self.current_price >= self.peak_price:
+            return 0.0
+        return (self.peak_price - self.current_price) / self.peak_price * 100.0
 
     @property
     def momentum_label(self) -> str:
@@ -171,6 +179,7 @@ class RecommendationBook:
         pullback_trigger_pct: float = 8.0,
         pullback_zone_min_pct: float = 4.0,
         pullback_zone_max_pct: float = 6.0,
+        pullback_started_pct: float = 2.0,
         buy_now_min_ratio: float = 1.2,
         avoid_momentum_pct: float = -8.0,
         avoid_sell_pressure_ratio: float = 2.0,
@@ -181,12 +190,14 @@ class RecommendationBook:
         self.pullback_trigger_pct = pullback_trigger_pct
         self.pullback_zone_min_pct = pullback_zone_min_pct
         self.pullback_zone_max_pct = pullback_zone_max_pct
+        self.pullback_started_pct = pullback_started_pct
         self.buy_now_min_ratio = buy_now_min_ratio
         self.avoid_momentum_pct = avoid_momentum_pct
         self.avoid_sell_pressure_ratio = avoid_sell_pressure_ratio
         self.min_liquidity_usd = min_liquidity_usd
         self.candidates: dict[str, RecommendationCandidate] = {}
         self._buy_zone_alerts: set[str] = set()
+        self._pullback_alerts: set[str] = set()
 
     def add(
         self,
@@ -223,6 +234,7 @@ class RecommendationBook:
             buy_sell_ratio=quote.buy_sell_ratio,
             observed_at=timestamp,
             updated_at=timestamp,
+            peak_price=price,
         )
         self._refresh_decision(candidate)
         self.candidates[quote.recommendation_key] = candidate
@@ -238,6 +250,7 @@ class RecommendationBook:
             return None
         candidate.symbol = quote.symbol
         candidate.current_price = price
+        candidate.peak_price = max(candidate.peak_price, price)
         candidate.liquidity_usd = quote.liquidity_usd
         candidate.volume_m5_usd = quote.volume_m5_usd
         candidate.buys_m5 = quote.buys_m5
@@ -252,6 +265,11 @@ class RecommendationBook:
             and previous_decision != "BUY ZONE"
         ):
             self._buy_zone_alerts.add(candidate.key)
+        if (
+            candidate.decision == "PULLBACK STARTED"
+            and previous_decision != "PULLBACK STARTED"
+        ):
+            self._pullback_alerts.add(candidate.key)
         return candidate
 
     def pop_buy_zone_alerts(self) -> list[RecommendationCandidate]:
@@ -261,6 +279,15 @@ class RecommendationBook:
             if key in self.candidates
         ]
         self._buy_zone_alerts.clear()
+        return sorted(alerts, key=lambda item: item.signal_score, reverse=True)
+
+    def pop_pullback_alerts(self) -> list[RecommendationCandidate]:
+        alerts = [
+            self.candidates[key]
+            for key in self._pullback_alerts
+            if key in self.candidates
+        ]
+        self._pullback_alerts.clear()
         return sorted(alerts, key=lambda item: item.signal_score, reverse=True)
 
     def expire(self, *, now: float | None = None) -> None:
@@ -340,8 +367,20 @@ class RecommendationBook:
         zone_high = candidate.entry_zone_high
         if zone_low is not None and zone_high is not None:
             if candidate.current_price > zone_high:
-                candidate.decision = "WAIT FOR PULLBACK"
-                candidate.decision_reason = "price remains above anchored entry zone"
+                if (
+                    candidate.pullback_from_peak_pct
+                    >= self.pullback_started_pct
+                ):
+                    candidate.decision = "PULLBACK STARTED"
+                    candidate.decision_reason = (
+                        "price is retreating from its tracked peak toward the "
+                        "entry zone"
+                    )
+                else:
+                    candidate.decision = "WAIT FOR PULLBACK"
+                    candidate.decision_reason = (
+                        "price remains above anchored entry zone"
+                    )
                 return
             if zone_low <= candidate.current_price <= zone_high:
                 if (
@@ -374,6 +413,9 @@ class RecommendationBook:
             )
             candidate.entry_zone_high = candidate.current_price * (
                 1 - self.pullback_zone_min_pct / 100
+            )
+            candidate.peak_price = max(
+                candidate.peak_price, candidate.current_price
             )
             candidate.decision = "WAIT FOR PULLBACK"
             candidate.decision_reason = "momentum is strong but price is extended"
@@ -427,6 +469,7 @@ def format_recommendations(
             lines.append(
                 f"    entry={price_prefix}{item.entry_zone_low:.12g}-"
                 f"{price_prefix}{item.entry_zone_high:.12g} "
+                f"from_peak={item.pullback_from_peak_pct:.1f}% "
                 f"pullback={pullback[0]:.1f}%-{pullback[1]:.1f}% "
                 f"reason={item.decision_reason}"
             )
@@ -456,6 +499,8 @@ def build_snapshot(
                 "price_currency": candidate.price_currency,
                 "entry_zone_low": candidate.entry_zone_low,
                 "entry_zone_high": candidate.entry_zone_high,
+                "decision": candidate.decision,
+                "pullback_from_peak_pct": candidate.pullback_from_peak_pct,
             }
             for candidate in (alerts or [])
         ],
@@ -477,6 +522,7 @@ def build_snapshot(
                 "entry_zone_low": candidate.entry_zone_low,
                 "entry_zone_high": candidate.entry_zone_high,
                 "pullback_needed_pct": candidate.pullback_needed_pct,
+                "pullback_from_peak_pct": candidate.pullback_from_peak_pct,
                 "momentum_label": candidate.momentum_label,
                 "liquidity_label": candidate.liquidity_label,
                 "volume_label": candidate.volume_label,
@@ -544,8 +590,9 @@ def format_dashboard(snapshot: dict[str, Any], *, color: bool = True) -> str:
         price_prefix = "$" if currency == "USD" else ""
         chain = str(alert.get("chain") or "solana")
         chain_label = CHAIN_LABELS.get(chain, chain.upper()[:5])
+        decision = str(alert.get("decision") or "BUY ZONE")
         lines.append(
-            f"{bold}>>> BUY ZONE ALERT: {alert.get('symbol') or 'UNKNOWN'} "
+            f"{bold}>>> {decision} ALERT: {alert.get('symbol') or 'UNKNOWN'} "
             f"[{chain_label}] current={price_prefix}"
             f"{float(alert.get('price') or 0):.12g}{reset}"
         )

@@ -452,6 +452,58 @@ def test_pullback_zone_is_anchored_and_alerts_once() -> None:
     assert "decision=BUY ZONE" in output
 
 
+def test_pullback_started_is_detected_and_alerted_once() -> None:
+    initial = market_quote(
+        liquidity=50_000,
+        market_cap=100_000,
+        buys=60,
+        sells=20,
+        volume=15_000,
+        change=15,
+    )
+    book = RecommendationBook(
+        pool_size=10,
+        ttl_seconds=60,
+        pullback_started_pct=2,
+    )
+    candidate = book.add(initial, CoinIntelligence().score(initial), now=0)
+    assert candidate is not None
+    assert candidate.decision == "WAIT FOR PULLBACK"
+
+    pullback = MarketQuote(
+        mint=initial.mint,
+        symbol=initial.symbol,
+        price_sol=initial.price_sol * 0.97,
+        liquidity_usd=initial.liquidity_usd,
+        market_cap_usd=initial.market_cap_usd,
+        pair_address=initial.pair_address,
+        pair_created_at_ms=initial.pair_created_at_ms,
+        buys_m5=35,
+        sells_m5=20,
+        volume_m5_usd=16_000,
+        price_change_m5_pct=-1,
+    )
+    book.update(pullback, now=5)
+
+    assert candidate.decision == "PULLBACK STARTED"
+    assert candidate.pullback_from_peak_pct == pytest.approx(3)
+    alerts = book.pop_pullback_alerts()
+    assert alerts == [candidate]
+    assert book.pop_pullback_alerts() == []
+
+    output = format_dashboard(
+        build_snapshot(
+            book.ranked(),
+            pending_count=0,
+            poll_seconds=15,
+            alerts=alerts,
+        ),
+        color=False,
+    )
+    assert "PULLBACK STARTED ALERT" in output
+    assert "decision=PULLBACK STARTED" in output
+
+
 def test_entry_decision_avoids_heavy_selloff() -> None:
     initial = market_quote(
         liquidity=50_000,

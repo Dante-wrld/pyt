@@ -129,6 +129,7 @@ class Settings:
     pullback_trigger_pct: float = 8.0
     pullback_zone_min_pct: float = 4.0
     pullback_zone_max_pct: float = 6.0
+    pullback_started_pct: float = 2.0
     buy_now_min_ratio: float = 1.2
     avoid_entry_momentum_pct: float = -8.0
     avoid_entry_sell_pressure_ratio: float = 2.0
@@ -139,6 +140,7 @@ class Settings:
     pushover_alert_decisions: tuple[str, ...] = (
         "BUY NOW",
         "BUY ZONE",
+        "PULLBACK STARTED",
         "WAIT FOR PULLBACK",
         "AVOID",
     )
@@ -238,6 +240,7 @@ class Settings:
             pullback_trigger_pct=_float("PULLBACK_TRIGGER_PCT", 8.0),
             pullback_zone_min_pct=_float("PULLBACK_ZONE_MIN_PCT", 4.0),
             pullback_zone_max_pct=_float("PULLBACK_ZONE_MAX_PCT", 6.0),
+            pullback_started_pct=_float("PULLBACK_STARTED_PCT", 2.0),
             buy_now_min_ratio=_float("BUY_NOW_MIN_RATIO", 1.2),
             avoid_entry_momentum_pct=float(
                 os.getenv("AVOID_ENTRY_MOMENTUM_PCT", "-8")
@@ -251,7 +254,7 @@ class Settings:
             pushover_device=os.getenv("PUSHOVER_DEVICE") or None,
             pushover_alert_decisions=_csv_upper(
                 "PUSHOVER_ALERT_DECISIONS",
-                "BUY NOW,BUY ZONE,WAIT FOR PULLBACK,AVOID",
+                "BUY NOW,BUY ZONE,PULLBACK STARTED,WAIT FOR PULLBACK,AVOID",
             ),
             pushover_min_score=_int("PUSHOVER_MIN_SCORE", 60),
             pushover_cooldown_seconds=_float(
@@ -364,6 +367,11 @@ class Settings:
             raise ValueError(
                 "PULLBACK_ZONE_MAX_PCT must exceed the minimum and be below 100"
             )
+        if not 0 < self.pullback_started_pct < self.pullback_zone_min_pct:
+            raise ValueError(
+                "PULLBACK_STARTED_PCT must be positive and below "
+                "PULLBACK_ZONE_MIN_PCT"
+            )
         if self.pullback_trigger_pct <= 0:
             raise ValueError("PULLBACK_TRIGGER_PCT must be positive")
         if self.buy_now_min_ratio <= 0:
@@ -377,6 +385,7 @@ class Settings:
         allowed_alerts = {
             "BUY NOW",
             "BUY ZONE",
+            "PULLBACK STARTED",
             "WAIT FOR PULLBACK",
             "WATCH",
             "AVOID",

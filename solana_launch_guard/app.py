@@ -87,6 +87,7 @@ class LaunchGuard:
             pullback_trigger_pct=settings.pullback_trigger_pct,
             pullback_zone_min_pct=settings.pullback_zone_min_pct,
             pullback_zone_max_pct=settings.pullback_zone_max_pct,
+            pullback_started_pct=settings.pullback_started_pct,
             buy_now_min_ratio=settings.buy_now_min_ratio,
             avoid_momentum_pct=settings.avoid_entry_momentum_pct,
             avoid_sell_pressure_ratio=(
@@ -650,12 +651,16 @@ class LaunchGuard:
                             candidate.signal_score,
                         )
 
-            alerts = self.recommendations.pop_buy_zone_alerts()
+            alerts = (
+                self.recommendations.pop_pullback_alerts()
+                + self.recommendations.pop_buy_zone_alerts()
+            )
             for candidate in alerts:
                 price_prefix = "$" if candidate.price_currency == "USD" else ""
                 LOGGER.info(
-                    "BUY ZONE ALERT %s chain=%s current=%s%.12g "
+                    "%s ALERT %s chain=%s current=%s%.12g "
                     "entry=%s%.12g-%s%.12g",
+                    candidate.decision,
                     candidate.symbol,
                     candidate.chain,
                     price_prefix,
