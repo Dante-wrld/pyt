@@ -18,6 +18,13 @@ import websockets
 
 from .config import Settings
 from .core import Launch, PaperBroker, RiskEngine, SQLiteStore
+from .execution import (
+    JupiterSwapClient,
+    KeyringSolanaSigner,
+    ProfitLadder,
+    SolanaAutoSeller,
+    store_fomo_solana_key,
+)
 from .intelligence import CoinIntelligence
 from .market import DexScreenerOracle, MarketQuote
 from .multichain import (
@@ -32,6 +39,7 @@ from .notifications import DecisionNotifier, PortfolioNotifier, PushoverClient
 from .portfolio import (
     OwnedHolding,
     PortfolioAdvisor,
+    PortfolioSignal,
     build_portfolio_snapshot,
     format_portfolio_dashboard,
     read_portfolio_snapshot,
@@ -46,7 +54,7 @@ from .recommendations import (
     write_snapshot,
 )
 from .strategy import AdaptiveStrategy
-from .wallet import SolanaRpc, WalletTrade, WalletWatcher
+from .wallet import SolanaRpc, SolanaTokenHolding, WalletTrade, WalletWatcher
 
 LOGGER = logging.getLogger("solana_launch_guard")
 
@@ -91,6 +99,7 @@ class LaunchGuard:
         self.recommendation_console_output = True
         self.portfolio_monitor_enabled = False
         self.portfolio_last_decisions: dict[str, str] = {}
+        self.auto_sell_dry_run_seen: set[str] = set()
         self.recommendations = RecommendationBook(
             pool_size=settings.recommendation_pool_size,
             ttl_seconds=settings.recommendation_ttl_seconds,
@@ -122,6 +131,7 @@ class LaunchGuard:
         )
         self.notifier: DecisionNotifier | None = None
         self.portfolio_notifier: PortfolioNotifier | None = None
+        self.push_client: PushoverClient | None = None
         if settings.pushover_enabled:
             if not settings.pushover_app_token or not settings.pushover_user_key:
                 raise ValueError("Pushover is enabled but credentials are missing")
@@ -130,6 +140,7 @@ class LaunchGuard:
                 user_key=settings.pushover_user_key,
                 device=settings.pushover_device,
             )
+            self.push_client = pushover_client
             self.notifier = DecisionNotifier(
                 client=pushover_client,
                 store=store,
@@ -171,6 +182,31 @@ class LaunchGuard:
             sell_pressure_ratio=settings.sell_pressure_ratio,
             liquidity_drop_pct=settings.liquidity_drop_pct,
         )
+        self.profit_ladder = ProfitLadder(
+            principal_trigger_multiple=(
+                settings.auto_sell_principal_multiple
+            ),
+            half_profit_trigger_multiple=(
+                settings.auto_sell_half_profit_multiple
+            ),
+            second_stage_fraction=(
+                settings.auto_sell_second_stage_fraction
+            ),
+        )
+        self.auto_seller: SolanaAutoSeller | None = None
+        if settings.auto_sell_enabled and settings.auto_sell_live:
+            assert settings.solana_wallet_address is not None
+            assert settings.jupiter_api_key is not None
+            signer = KeyringSolanaSigner(
+                expected_public_key=settings.solana_wallet_address
+            )
+            self.auto_seller = SolanaAutoSeller(
+                client=JupiterSwapClient(api_key=settings.jupiter_api_key),
+                signer=signer,
+                max_price_impact_pct=(
+                    settings.auto_sell_max_price_impact_pct
+                ),
+            )
         for state in store.load_portfolio_states():
             self.portfolio_advisor.restore_state(
                 chain=str(state["chain"]),
@@ -673,12 +709,16 @@ class LaunchGuard:
         backoff = 1.0
         while True:
             try:
+                balances_by_mint: dict[str, SolanaTokenHolding] = {}
                 saved = {
                     item.token_address: item
                     for item in self.store.load_owned_holdings("solana")
                 }
                 if wallet:
                     balances = await rpc.token_holdings(wallet)
+                    balances_by_mint = {
+                        balance.mint: balance for balance in balances
+                    }
                     holdings = []
                     for balance in balances:
                         basis = saved.get(balance.mint)
@@ -777,12 +817,25 @@ class LaunchGuard:
                                     signal.decision,
                                 )
 
+                    balance = balances_by_mint.get(signal.token_address)
+                    if balance is not None:
+                        await self._maybe_auto_sell(signal, balance)
+
                 write_portfolio_snapshot(
                     self.settings.portfolio_snapshot_path,
                     build_portfolio_snapshot(
                         signals,
                         wallet=wallet,
                         poll_seconds=self.settings.portfolio_poll_seconds,
+                        execution_mode=(
+                            "live"
+                            if self.auto_seller is not None
+                            else (
+                                "dry-run"
+                                if self.settings.auto_sell_enabled
+                                else "read-only"
+                            )
+                        ),
                     ),
                 )
                 backoff = 1.0
@@ -797,6 +850,133 @@ class LaunchGuard:
                 )
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 30)
+
+    async def _maybe_auto_sell(
+        self, signal: PortfolioSignal, balance: SolanaTokenHolding
+    ) -> None:
+        if not self.settings.auto_sell_enabled:
+            return
+        policy = self.store.load_auto_sell_policy(signal.token_address)
+        if policy is None or not bool(policy["armed"]):
+            return
+        if signal.price_currency != "USD" or signal.current_price is None:
+            return
+        holding = next(
+            (
+                item
+                for item in self.store.load_owned_holdings("solana")
+                if item.token_address == signal.token_address
+            ),
+            None,
+        )
+        if holding is None:
+            return
+        intent = self.profit_ladder.plan(
+            mint=signal.token_address,
+            symbol=signal.symbol,
+            stage=int(policy["stage"]),
+            balance_raw=balance.raw_amount,
+            decimals=balance.decimals,
+            current_price_usd=signal.current_price,
+            entry_price_usd=holding.entry_price,
+            original_cost_usd=holding.cost_amount,
+        )
+        if intent is None:
+            return
+        if self.auto_seller is None:
+            if intent.event_key not in self.auto_sell_dry_run_seen:
+                LOGGER.warning(
+                    "AUTO-SELL READY (DRY RUN) %s stage=%d reason=%s",
+                    intent.symbol,
+                    intent.stage,
+                    intent.reason,
+                )
+                self.auto_sell_dry_run_seen.add(intent.event_key)
+            return
+
+        try:
+            prepared = await self.auto_seller.prepare(intent)
+        except (ConnectionError, ValueError) as exc:
+            LOGGER.warning(
+                "AUTO-SELL NOT SUBMITTED %s stage=%d (%s)",
+                intent.symbol,
+                intent.stage,
+                exc,
+            )
+            return
+        claimed = self.store.begin_auto_sell_execution(
+            event_key=intent.event_key,
+            chain="solana",
+            token_address=intent.mint,
+            symbol=intent.symbol,
+            stage=intent.stage,
+            requested_raw=prepared.input_amount_raw,
+            expected_output_raw=prepared.expected_output_raw,
+        )
+        if not claimed:
+            return
+        try:
+            receipt = await self.auto_seller.execute(prepared)
+        except (ConnectionError, RuntimeError, ValueError) as exc:
+            self.store.freeze_auto_sell_execution(
+                event_key=intent.event_key, error=str(exc)
+            )
+            LOGGER.error(
+                "AUTO-SELL FROZEN FOR REVIEW %s stage=%d (%s)",
+                intent.symbol,
+                intent.stage,
+                exc,
+            )
+            if self.push_client is not None:
+                try:
+                    await self.push_client.send(
+                        title="🔴 Launch Guard: SELL NEEDS REVIEW",
+                        message=(
+                            f"TOKEN: {intent.symbol} • SOLANA\n"
+                            f"Stage: {intent.stage + 1}\n"
+                            f"No automatic retry will occur.\nReason: {exc}"
+                        ),
+                        sound="siren",
+                        priority=1,
+                    )
+                except ConnectionError as notification_exc:
+                    LOGGER.warning(
+                        "Could not send auto-sell review alert (%s)",
+                        notification_exc,
+                    )
+            return
+
+        self.store.complete_auto_sell_execution(
+            event_key=intent.event_key,
+            signature=receipt.signature,
+            next_stage=intent.stage + 1,
+        )
+        LOGGER.warning(
+            "AUTO-SELL CONFIRMED %s stage=%d signature=%s",
+            intent.symbol,
+            intent.stage,
+            receipt.signature,
+        )
+        if self.push_client is not None:
+            try:
+                await self.push_client.send(
+                    title="🟢 Launch Guard: SELL CONFIRMED",
+                    message=(
+                        f"TOKEN: {intent.symbol} • SOLANA\n"
+                        f"Stage: {intent.stage + 1}\n"
+                        f"Reason: {intent.reason}\n"
+                        f"Signature: {receipt.signature}"
+                    ),
+                    url=f"https://solscan.io/tx/{receipt.signature}",
+                    url_title="Open Solscan",
+                    sound="cashregister",
+                    priority=1,
+                )
+            except ConnectionError as notification_exc:
+                LOGGER.warning(
+                    "Sell confirmed, but the phone alert failed (%s)",
+                    notification_exc,
+                )
 
     async def run_recommendation_monitor(self) -> None:
         LOGGER.info(
@@ -1235,7 +1415,7 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "feed to run: Solana launches, wallet copy, both Solana feeds, "
             "Robinhood-only, all configured chains, every feed, or only "
-            "your read-only holdings"
+            "your holdings/profit ladder"
         ),
     )
     parser.add_argument(
@@ -1271,7 +1451,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--import-fomo-mint",
         metavar="MINT",
-        help="import an existing Solana Fomo holding for paper management",
+        help="import an existing Solana Fomo holding and USD cost basis",
     )
     parser.add_argument(
         "--import-symbol",
@@ -1297,9 +1477,37 @@ def build_parser() -> argparse.ArgumentParser:
         "--portfolio-window",
         action="store_true",
         help=(
-            "open a separate macOS Terminal with read-only sell guidance "
-            "for current holdings"
+            "open a separate macOS Terminal with holdings guidance and "
+            "profit-ladder status"
         ),
+    )
+    parser.add_argument(
+        "--store-fomo-solana-key",
+        action="store_true",
+        help=(
+            "securely prompt for the exported Fomo Solana key and store it "
+            "in the operating-system keychain"
+        ),
+    )
+    parser.add_argument(
+        "--verify-auto-sell-signer",
+        action="store_true",
+        help="verify that the keychain signer matches SOLANA_WALLET_ADDRESS",
+    )
+    parser.add_argument(
+        "--arm-auto-sell-mint",
+        metavar="MINT",
+        help="arm the 2x/3x automated profit ladder for one imported mint",
+    )
+    parser.add_argument(
+        "--disarm-auto-sell-mint",
+        metavar="MINT",
+        help="prevent new automated sells for one mint",
+    )
+    parser.add_argument(
+        "--auto-sell-status",
+        action="store_true",
+        help="show armed tokens and completed profit-ladder stages",
     )
     parser.add_argument(
         "--recommendations-display",
@@ -1449,6 +1657,33 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(message)s",
     )
 
+    if args.store_fomo_solana_key:
+        if not settings.solana_wallet_address:
+            raise SystemExit(
+                "set SOLANA_WALLET_ADDRESS before storing the signer"
+            )
+        try:
+            public_key = store_fomo_solana_key(
+                expected_public_key=settings.solana_wallet_address
+            )
+        except (ValueError, RuntimeError) as exc:
+            raise SystemExit(str(exc)) from exc
+        print(f"Stored signer for Solana wallet {public_key}")
+        return
+    if args.verify_auto_sell_signer:
+        if not settings.solana_wallet_address:
+            raise SystemExit(
+                "set SOLANA_WALLET_ADDRESS before verifying the signer"
+            )
+        try:
+            signer = KeyringSolanaSigner(
+                expected_public_key=settings.solana_wallet_address
+            )
+        except (ValueError, RuntimeError) as exc:
+            raise SystemExit(str(exc)) from exc
+        print(f"Signer verified for {signer.public_key}")
+        return
+
     if args.recommendations_display:
         run_recommendation_display(
             settings.recommendation_snapshot_path,
@@ -1463,9 +1698,21 @@ def main() -> None:
         return
 
     store = SQLiteStore(settings.database_path)
-    guard = LaunchGuard(settings, store)
+    guard: LaunchGuard | None = None
     try:
+        if args.arm_auto_sell_mint:
+            store.arm_auto_sell(args.arm_auto_sell_mint)
+            LOGGER.info("Auto-sell armed for %s", args.arm_auto_sell_mint)
+        elif args.disarm_auto_sell_mint:
+            store.disarm_auto_sell(args.disarm_auto_sell_mint)
+            LOGGER.info("Auto-sell disarmed for %s", args.disarm_auto_sell_mint)
+        elif args.auto_sell_status:
+            print(json.dumps(store.auto_sell_status(), indent=2))
+        else:
+            guard = LaunchGuard(settings, store)
+
         if args.import_fomo_mint:
+            assert guard is not None
             if args.import_token_amount is None or args.import_cost_usd is None:
                 raise ValueError(
                     "--import-token-amount and --import-cost-usd are required"
@@ -1487,6 +1734,7 @@ def main() -> None:
                 )
             )
         elif args.test_notification:
+            assert guard is not None
             if guard.notifier is None:
                 raise ValueError(
                     "Pushover is disabled; set PUSHOVER_ENABLED=true and "
@@ -1495,6 +1743,7 @@ def main() -> None:
             asyncio.run(guard.notifier.send_test())
             LOGGER.info("Pushover test notification sent")
         elif args.test_high_priority_notification:
+            assert guard is not None
             if guard.notifier is None:
                 raise ValueError(
                     "Pushover is disabled; set PUSHOVER_ENABLED=true and "
@@ -1505,8 +1754,9 @@ def main() -> None:
         elif args.summary:
             print(json.dumps(store.summary(), indent=2))
         elif args.demo:
+            assert guard is not None
             asyncio.run(run_demo(guard))
-        else:
+        elif guard is not None:
             if args.mode == "portfolio":
                 if (
                     not settings.solana_wallet_address

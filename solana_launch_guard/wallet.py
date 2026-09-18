@@ -42,6 +42,8 @@ class WalletTrade:
 class SolanaTokenHolding:
     mint: str
     amount: float
+    raw_amount: int = 0
+    decimals: int = 0
 
 
 class SolanaRpc:
@@ -74,6 +76,8 @@ class SolanaRpc:
             )
         )
         totals: dict[str, Decimal] = {}
+        raw_totals: dict[str, int] = {}
+        decimals_by_mint: dict[str, int] = {}
         successful = False
         for response in responses:
             if not isinstance(response, dict):
@@ -83,18 +87,32 @@ class SolanaRpc:
                 try:
                     info = item["account"]["data"]["parsed"]["info"]
                     mint = str(info["mint"])
-                    amount = Decimal(
-                        str(info["tokenAmount"]["uiAmountString"])
+                    token_amount = info["tokenAmount"]
+                    amount = Decimal(str(token_amount["uiAmountString"]))
+                    raw_value = token_amount.get("amount")
+                    decimals_value = token_amount.get("decimals")
+                    raw_amount = int(raw_value) if raw_value is not None else 0
+                    decimals = (
+                        int(decimals_value)
+                        if decimals_value is not None
+                        else 0
                     )
                 except (KeyError, TypeError, ValueError):
                     continue
                 if mint in IGNORED_MINTS or amount <= 0:
                     continue
                 totals[mint] = totals.get(mint, Decimal(0)) + amount
+                raw_totals[mint] = raw_totals.get(mint, 0) + raw_amount
+                decimals_by_mint[mint] = decimals
         if not successful:
             raise ConnectionError("Solana token balances are unavailable")
         return tuple(
-            SolanaTokenHolding(mint=mint, amount=float(amount))
+            SolanaTokenHolding(
+                mint=mint,
+                amount=float(amount),
+                raw_amount=raw_totals[mint],
+                decimals=decimals_by_mint[mint],
+            )
             for mint, amount in sorted(totals.items())
         )
 

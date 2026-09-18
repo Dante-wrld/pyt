@@ -241,6 +241,7 @@ def build_portfolio_snapshot(
     *,
     wallet: str | None,
     poll_seconds: float,
+    execution_mode: str = "read-only",
 ) -> dict[str, Any]:
     priority = {
         "EXIT WARNING": 4,
@@ -261,6 +262,7 @@ def build_portfolio_snapshot(
         "generated_at": time.time(),
         "wallet": wallet,
         "poll_seconds": poll_seconds,
+        "execution_mode": execution_mode,
         "signals": [asdict(item) for item in ordered],
     }
 
@@ -299,11 +301,20 @@ def format_portfolio_dashboard(
     ).astimezone().strftime("%Y-%m-%d %H:%M:%S")
     wallet = str(snapshot.get("wallet") or "manual/imported holdings")
     rows = snapshot.get("signals") or []
+    execution_mode = str(snapshot.get("execution_mode") or "read-only")
+    mode_label = {
+        "live": "AUTO-SELL LIVE",
+        "dry-run": "AUTO-SELL DRY RUN",
+    }.get(execution_mode, "READ-ONLY")
     lines = [
-        f"{bold}LAUNCH GUARD — MY HOLDINGS (READ-ONLY){reset}",
+        f"{bold}LAUNCH GUARD — MY HOLDINGS ({mode_label}){reset}",
         f"Wallet: {wallet}",
         f"Updated: {updated} | Holdings: {len(rows)}",
-        "Signals are advisory. No order can be signed or submitted.",
+        (
+            "Only armed 2x/3x profit-ladder events can submit a USDC sell."
+            if execution_mode == "live"
+            else "Signals are advisory. No order can be signed or submitted."
+        ),
         "",
     ]
     if not rows:

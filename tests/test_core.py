@@ -4,6 +4,7 @@ import asyncio
 from pathlib import Path
 
 import pytest
+from solders.keypair import Keypair
 
 from solana_launch_guard.app import _is_stock_token_symbol
 from solana_launch_guard.config import Settings
@@ -13,6 +14,13 @@ from solana_launch_guard.core import (
     RiskEngine,
     SQLiteStore,
     indicative_price,
+)
+from solana_launch_guard.execution import (
+    PreparedSell,
+    ProfitLadder,
+    SellIntent,
+    SolanaAutoSeller,
+    store_fomo_solana_key,
 )
 from solana_launch_guard.intelligence import CoinIntelligence
 from solana_launch_guard.market import DexScreenerOracle, MarketQuote
@@ -39,6 +47,231 @@ from solana_launch_guard.recommendations import (
 )
 from solana_launch_guard.strategy import AdaptiveStrategy
 from solana_launch_guard.wallet import SolanaRpc, parse_wallet_trades
+
+
+def test_profit_ladder_recovers_principal_then_sells_half() -> None:
+    ladder = ProfitLadder()
+    first = ladder.plan(
+        mint="MintProfit111",
+        symbol="WIN",
+        stage=0,
+        balance_raw=100_000_000,
+        decimals=6,
+        current_price_usd=2.10,
+        entry_price_usd=1.0,
+        original_cost_usd=100.0,
+    )
+
+    assert first is not None
+    assert first.amount_raw == 47_619_048
+    assert first.target_output_raw == 100_000_000
+    assert first.trigger_multiple == 2.0
+
+    second = ladder.plan(
+        mint="MintProfit111",
+        symbol="WIN",
+        stage=1,
+        balance_raw=52_380_952,
+        decimals=6,
+        current_price_usd=3.0,
+        entry_price_usd=1.0,
+        original_cost_usd=100.0,
+    )
+
+    assert second is not None
+    assert second.amount_raw == 26_190_476
+    assert second.target_output_raw == 78_571_428
+    assert ladder.plan(
+        mint="MintProfit111",
+        symbol="WIN",
+        stage=2,
+        balance_raw=1,
+        decimals=6,
+        current_price_usd=10,
+        entry_price_usd=1,
+        original_cost_usd=100,
+    ) is None
+
+
+def test_profit_ladder_requires_trigger_and_cost_basis() -> None:
+    ladder = ProfitLadder()
+    values = {
+        "mint": "MintProfit111",
+        "symbol": "WIN",
+        "stage": 0,
+        "balance_raw": 100_000_000,
+        "decimals": 6,
+        "current_price_usd": 1.99,
+        "entry_price_usd": 1.0,
+        "original_cost_usd": 100.0,
+    }
+    assert ladder.plan(**values) is None
+    values["current_price_usd"] = 2.1
+    values["original_cost_usd"] = None
+    assert ladder.plan(**values) is None
+
+
+def test_auto_seller_prepares_and_executes_confirmed_order() -> None:
+    class FakeSigner:
+        public_key = "Wallet111"
+
+        def sign(self, transaction_b64: str) -> str:
+            assert transaction_b64 == "unsigned"
+            return "signed"
+
+    class FakeClient:
+        async def order(self, **values: object) -> dict[str, object]:
+            amount = int(values["amount_raw"])
+            return {
+                "inputMint": values["input_mint"],
+                "outputMint": (
+                    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+                ),
+                "inAmount": str(amount),
+                "outAmount": str(amount * 2),
+                "otherAmountThreshold": str(amount * 2),
+                "priceImpact": 0.1,
+                "transaction": "unsigned",
+                "requestId": "request-1",
+                "lastValidBlockHeight": 123,
+            }
+
+        async def execute(self, **values: object) -> dict[str, object]:
+            assert values["signed_transaction"] == "signed"
+            return {
+                "status": "Success",
+                "code": 0,
+                "signature": "signature-1",
+                "totalInputAmount": "50000000",
+                "totalOutputAmount": "100000000",
+            }
+
+    intent = SellIntent(
+        mint="MintProfit111",
+        symbol="WIN",
+        stage=0,
+        event_key="event-1",
+        amount_raw=50_000_000,
+        balance_raw=100_000_000,
+        decimals=6,
+        trigger_multiple=2,
+        current_multiple=2.1,
+        target_output_raw=100_000_000,
+        reason="recover principal",
+    )
+    seller = SolanaAutoSeller(client=FakeClient(), signer=FakeSigner())
+    prepared = asyncio.run(seller.prepare(intent))
+    receipt = asyncio.run(seller.execute(prepared))
+
+    assert isinstance(prepared, PreparedSell)
+    assert prepared.minimum_output_raw == 100_000_000
+    assert receipt.signature == "signature-1"
+    assert receipt.output_amount_raw == 100_000_000
+
+
+def test_auto_seller_rejects_second_stage_quote_below_trigger() -> None:
+    class FakeSigner:
+        public_key = "Wallet111"
+
+        def sign(self, transaction_b64: str) -> str:
+            return transaction_b64
+
+    class FakeClient:
+        async def order(self, **values: object) -> dict[str, object]:
+            return {
+                "inputMint": values["input_mint"],
+                "outputMint": (
+                    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+                ),
+                "inAmount": str(values["amount_raw"]),
+                "outAmount": "74000000",
+                "otherAmountThreshold": "73000000",
+                "transaction": "unsigned",
+                "requestId": "request-2",
+            }
+
+        async def execute(self, **_values: object) -> dict[str, object]:
+            raise AssertionError("an unsafe quote must never execute")
+
+    intent = SellIntent(
+        mint="MintProfit111",
+        symbol="WIN",
+        stage=1,
+        event_key="event-2",
+        amount_raw=25_000_000,
+        balance_raw=50_000_000,
+        decimals=6,
+        trigger_multiple=3,
+        current_multiple=3.1,
+        target_output_raw=75_000_000,
+        reason="sell half",
+    )
+    seller = SolanaAutoSeller(client=FakeClient(), signer=FakeSigner())
+
+    with pytest.raises(ValueError, match="below the 3x trigger value"):
+        asyncio.run(seller.prepare(intent))
+
+
+def test_auto_sell_store_is_armed_and_idempotent(tmp_path: Path) -> None:
+    store = SQLiteStore(str(tmp_path / "auto-sell.db"))
+    store.save_owned_holding(
+        OwnedHolding(
+            chain="solana",
+            token_address="MintProfit111",
+            symbol="WIN",
+            quantity=100,
+            entry_price=1,
+            price_currency="USD",
+            cost_amount=100,
+        )
+    )
+    store.arm_auto_sell("MintProfit111")
+    policy = store.load_auto_sell_policy("MintProfit111")
+    assert policy is not None
+    assert policy["armed"] == 1
+    assert policy["stage"] == 0
+
+    values = {
+        "event_key": "event-1",
+        "chain": "solana",
+        "token_address": "MintProfit111",
+        "symbol": "WIN",
+        "stage": 0,
+        "requested_raw": 50,
+        "expected_output_raw": 100,
+    }
+    assert store.begin_auto_sell_execution(**values) is True
+    assert store.begin_auto_sell_execution(**values) is False
+    store.complete_auto_sell_execution(
+        event_key="event-1", signature="signature-1", next_stage=1
+    )
+    assert store.load_auto_sell_policy("MintProfit111")["stage"] == 1
+    store.close()
+
+
+def test_key_store_refuses_mismatched_wallet_before_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    keypair = Keypair()
+    wrote_secret = False
+
+    monkeypatch.setattr(
+        "solana_launch_guard.execution.getpass.getpass",
+        lambda _prompt: str(keypair),
+    )
+
+    def mark_write(*_values: object) -> None:
+        nonlocal wrote_secret
+        wrote_secret = True
+
+    monkeypatch.setattr(
+        "solana_launch_guard.execution.keyring.set_password", mark_write
+    )
+
+    with pytest.raises(ValueError, match="nothing was stored"):
+        store_fomo_solana_key(expected_public_key=str(Keypair().pubkey()))
+
+    assert wrote_secret is False
 
 
 def settings(database_path: Path, **overrides: object) -> Settings:

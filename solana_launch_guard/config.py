@@ -170,6 +170,13 @@ class Settings:
     portfolio_snapshot_path: str = "launch_guard_portfolio.json"
     portfolio_poll_seconds: float = 15.0
     portfolio_min_value_usd: float = 0.01
+    auto_sell_enabled: bool = False
+    auto_sell_live: bool = False
+    auto_sell_principal_multiple: float = 2.0
+    auto_sell_half_profit_multiple: float = 3.0
+    auto_sell_second_stage_fraction: float = 0.5
+    auto_sell_max_price_impact_pct: float = 5.0
+    jupiter_api_key: str | None = None
     ethereum_token_addresses: tuple[str, ...] = ()
     base_token_addresses: tuple[str, ...] = ()
     bnb_token_addresses: tuple[str, ...] = ()
@@ -322,6 +329,21 @@ class Settings:
             portfolio_min_value_usd=_float(
                 "PORTFOLIO_MIN_VALUE_USD", 0.01
             ),
+            auto_sell_enabled=_bool("AUTO_SELL_ENABLED", False),
+            auto_sell_live=_bool("AUTO_SELL_LIVE", False),
+            auto_sell_principal_multiple=_float(
+                "AUTO_SELL_PRINCIPAL_MULTIPLE", 2.0
+            ),
+            auto_sell_half_profit_multiple=_float(
+                "AUTO_SELL_HALF_PROFIT_MULTIPLE", 3.0
+            ),
+            auto_sell_second_stage_fraction=_float(
+                "AUTO_SELL_SECOND_STAGE_FRACTION", 0.5
+            ),
+            auto_sell_max_price_impact_pct=_float(
+                "AUTO_SELL_MAX_PRICE_IMPACT_PCT", 5.0
+            ),
+            jupiter_api_key=os.getenv("JUPITER_API_KEY") or None,
             ethereum_token_addresses=_addresses(
                 "ETHEREUM_TOKEN_ADDRESSES"
             ),
@@ -392,6 +414,33 @@ class Settings:
             raise ValueError("PRICE_POLL_SECONDS must be at least one")
         if self.portfolio_poll_seconds < 10:
             raise ValueError("PORTFOLIO_POLL_SECONDS must be at least 10")
+        if self.auto_sell_principal_multiple < 2:
+            raise ValueError(
+                "AUTO_SELL_PRINCIPAL_MULTIPLE must be at least 2"
+            )
+        if (
+            self.auto_sell_half_profit_multiple
+            <= self.auto_sell_principal_multiple
+        ):
+            raise ValueError(
+                "AUTO_SELL_HALF_PROFIT_MULTIPLE must exceed the principal level"
+            )
+        if not 0 < self.auto_sell_second_stage_fraction < 1:
+            raise ValueError(
+                "AUTO_SELL_SECOND_STAGE_FRACTION must be between 0 and 1"
+            )
+        if not 0 < self.auto_sell_max_price_impact_pct <= 10:
+            raise ValueError(
+                "AUTO_SELL_MAX_PRICE_IMPACT_PCT must be above 0 and at most 10"
+            )
+        if self.auto_sell_live and not self.auto_sell_enabled:
+            raise ValueError("AUTO_SELL_LIVE requires AUTO_SELL_ENABLED=true")
+        if self.auto_sell_live and not self.jupiter_api_key:
+            raise ValueError("AUTO_SELL_LIVE requires JUPITER_API_KEY")
+        if self.auto_sell_live and not self.solana_wallet_address:
+            raise ValueError(
+                "AUTO_SELL_LIVE requires SOLANA_WALLET_ADDRESS"
+            )
         if self.standard_trade_size_usd <= 0 or self.moonshot_trade_size_usd <= 0:
             raise ValueError("USD position sizes must be greater than zero")
         if self.max_total_exposure_usd < max(

@@ -1,0 +1,440 @@
+from __future__ import annotations
+
+import asyncio
+import base64
+import getpass
+import json
+import math
+import ssl
+import urllib.error
+import urllib.parse
+import urllib.request
+from dataclasses import dataclass
+from typing import Any, Protocol
+
+import certifi
+import keyring
+from keyring.errors import KeyringError
+from solders.keypair import Keypair
+from solders.message import to_bytes_versioned
+from solders.transaction import VersionedTransaction
+
+JUPITER_SWAP_BASE_URL = "https://api.jup.ag/swap/v2"
+USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+WRAPPED_SOL_MINT = "So11111111111111111111111111111111111111112"
+KEYRING_SERVICE = "solana-launch-guard"
+KEYRING_ACCOUNT = "fomo-solana-private-key"
+
+
+@dataclass(frozen=True, slots=True)
+class SellIntent:
+    mint: str
+    symbol: str
+    stage: int
+    event_key: str
+    amount_raw: int
+    balance_raw: int
+    decimals: int
+    trigger_multiple: float
+    current_multiple: float
+    target_output_raw: int | None
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedSell:
+    intent: SellIntent
+    transaction: str
+    request_id: str
+    input_amount_raw: int
+    expected_output_raw: int
+    minimum_output_raw: int
+    price_impact_pct: float
+    last_valid_block_height: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class SellReceipt:
+    intent: SellIntent
+    signature: str
+    input_amount_raw: int
+    output_amount_raw: int
+
+
+class OrderClient(Protocol):
+    async def order(
+        self, *, input_mint: str, amount_raw: int, taker: str
+    ) -> dict[str, Any]: ...
+
+    async def execute(
+        self,
+        *,
+        signed_transaction: str,
+        request_id: str,
+        last_valid_block_height: int | None,
+    ) -> dict[str, Any]: ...
+
+
+class TransactionSigner(Protocol):
+    @property
+    def public_key(self) -> str: ...
+
+    def sign(self, transaction_b64: str) -> str: ...
+
+
+class ProfitLadder:
+    """Two-stage ladder for an owned Solana token.
+
+    Stage 0 waits for a 2x price and sells enough tokens for the Jupiter
+    minimum output to cover the original USD cost. Stage 1 waits for a 3x
+    price (+200%) and sells half of the then-current token balance.
+    """
+
+    def __init__(
+        self,
+        *,
+        principal_trigger_multiple: float = 2.0,
+        half_profit_trigger_multiple: float = 3.0,
+        second_stage_fraction: float = 0.5,
+    ) -> None:
+        self.principal_trigger_multiple = principal_trigger_multiple
+        self.half_profit_trigger_multiple = half_profit_trigger_multiple
+        self.second_stage_fraction = second_stage_fraction
+
+    def plan(
+        self,
+        *,
+        mint: str,
+        symbol: str,
+        stage: int,
+        balance_raw: int,
+        decimals: int,
+        current_price_usd: float,
+        entry_price_usd: float | None,
+        original_cost_usd: float | None,
+    ) -> SellIntent | None:
+        if (
+            stage not in {0, 1}
+            or balance_raw <= 0
+            or decimals < 0
+            or current_price_usd <= 0
+            or entry_price_usd is None
+            or entry_price_usd <= 0
+            or original_cost_usd is None
+            or original_cost_usd <= 0
+        ):
+            return None
+
+        multiple = current_price_usd / entry_price_usd
+        if stage == 0:
+            if multiple < self.principal_trigger_multiple:
+                return None
+            units = original_cost_usd / current_price_usd
+            amount_raw = math.ceil(units * (10**decimals))
+            amount_raw = min(amount_raw, balance_raw)
+            if amount_raw <= 0:
+                return None
+            target_output_raw = math.ceil(original_cost_usd * 1_000_000)
+            reason = (
+                f"price reached {multiple:.3f}x; recover the original "
+                f"${original_cost_usd:.2f} into USDC"
+            )
+            trigger = self.principal_trigger_multiple
+        else:
+            if multiple < self.half_profit_trigger_multiple:
+                return None
+            amount_raw = math.floor(balance_raw * self.second_stage_fraction)
+            if amount_raw <= 0:
+                return None
+            target_output_raw = math.ceil(
+                amount_raw
+                / (10**decimals)
+                * entry_price_usd
+                * self.half_profit_trigger_multiple
+                * 1_000_000
+            )
+            reason = (
+                f"price reached {multiple:.3f}x; sell "
+                f"{self.second_stage_fraction:.0%} of the remaining tokens"
+            )
+            trigger = self.half_profit_trigger_multiple
+
+        return SellIntent(
+            mint=mint,
+            symbol=symbol,
+            stage=stage,
+            event_key=f"solana:{mint}:profit-ladder:{stage}",
+            amount_raw=amount_raw,
+            balance_raw=balance_raw,
+            decimals=decimals,
+            trigger_multiple=trigger,
+            current_multiple=multiple,
+            target_output_raw=target_output_raw,
+            reason=reason,
+        )
+
+
+class KeyringSolanaSigner:
+    def __init__(self, *, expected_public_key: str) -> None:
+        try:
+            secret = keyring.get_password(KEYRING_SERVICE, KEYRING_ACCOUNT)
+        except KeyringError as exc:
+            raise RuntimeError("could not read the system keychain") from exc
+        if not secret:
+            raise ValueError(
+                "Solana signing key is not in the system keychain; run "
+                "launch-guard --store-fomo-solana-key"
+            )
+        self._keypair = parse_solana_keypair(secret)
+        if str(self._keypair.pubkey()) != expected_public_key:
+            raise ValueError("keychain signer does not match SOLANA_WALLET_ADDRESS")
+
+    @property
+    def public_key(self) -> str:
+        return str(self._keypair.pubkey())
+
+    def sign(self, transaction_b64: str) -> str:
+        try:
+            transaction = VersionedTransaction.from_bytes(
+                base64.b64decode(transaction_b64, validate=True)
+            )
+        except (ValueError, TypeError) as exc:
+            raise ValueError("Jupiter returned an invalid transaction") from exc
+
+        required = transaction.message.header.num_required_signatures
+        signer_keys = transaction.message.account_keys[:required]
+        try:
+            signer_index = signer_keys.index(self._keypair.pubkey())
+        except ValueError as exc:
+            raise ValueError(
+                "configured wallet is not a required transaction signer"
+            ) from exc
+
+        signatures = list(transaction.signatures)
+        signatures[signer_index] = self._keypair.sign_message(
+            to_bytes_versioned(transaction.message)
+        )
+        signed = VersionedTransaction.populate(transaction.message, signatures)
+        return base64.b64encode(bytes(signed)).decode("ascii")
+
+
+def parse_solana_keypair(secret: str) -> Keypair:
+    value = secret.strip()
+    try:
+        if value.startswith("["):
+            raw = json.loads(value)
+            if not isinstance(raw, list) or len(raw) != 64:
+                raise ValueError
+            return Keypair.from_bytes(bytes(int(item) for item in raw))
+        return Keypair.from_base58_string(value)
+    except (ValueError, TypeError, json.JSONDecodeError) as exc:
+        raise ValueError(
+            "exported Solana key must be a base58 secret or 64-byte JSON array"
+        ) from exc
+
+
+def store_fomo_solana_key(*, expected_public_key: str) -> str:
+    secret = getpass.getpass(
+        "Paste the exported Fomo Solana private key (input is hidden): "
+    )
+    keypair = parse_solana_keypair(secret)
+    public_key = str(keypair.pubkey())
+    if public_key != expected_public_key:
+        raise ValueError(
+            "exported key does not match SOLANA_WALLET_ADDRESS; nothing was stored"
+        )
+    try:
+        keyring.set_password(KEYRING_SERVICE, KEYRING_ACCOUNT, secret.strip())
+    except KeyringError as exc:
+        raise RuntimeError("could not write to the system keychain") from exc
+    return public_key
+
+
+class JupiterSwapClient:
+    def __init__(self, *, api_key: str, timeout_seconds: float = 15) -> None:
+        self.api_key = api_key
+        self.timeout_seconds = timeout_seconds
+        self._ssl = ssl.create_default_context(cafile=certifi.where())
+
+    async def order(
+        self, *, input_mint: str, amount_raw: int, taker: str
+    ) -> dict[str, Any]:
+        query = urllib.parse.urlencode(
+            {
+                "inputMint": input_mint,
+                "outputMint": USDC_MINT,
+                "amount": str(amount_raw),
+                "taker": taker,
+            }
+        )
+        return await asyncio.to_thread(
+            self._request_json,
+            f"{JUPITER_SWAP_BASE_URL}/order?{query}",
+            None,
+        )
+
+    async def execute(
+        self,
+        *,
+        signed_transaction: str,
+        request_id: str,
+        last_valid_block_height: int | None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "signedTransaction": signed_transaction,
+            "requestId": request_id,
+        }
+        if last_valid_block_height is not None:
+            payload["lastValidBlockHeight"] = last_valid_block_height
+        return await asyncio.to_thread(
+            self._request_json,
+            f"{JUPITER_SWAP_BASE_URL}/execute",
+            payload,
+        )
+
+    def _request_json(self, url: str, payload: dict[str, Any] | None) -> dict[str, Any]:
+        data = json.dumps(payload).encode() if payload is not None else None
+        headers = {
+            "Accept": "application/json",
+            "User-Agent": "solana-launch-guard/0.14",
+            "x-api-key": self.api_key,
+        }
+        if data is not None:
+            headers["Content-Type"] = "application/json"
+        request = urllib.request.Request(
+            url,
+            data=data,
+            headers=headers,
+            method="POST" if data is not None else "GET",
+        )
+        try:
+            with urllib.request.urlopen(
+                request, timeout=self.timeout_seconds, context=self._ssl
+            ) as response:
+                result = json.load(response)
+        except urllib.error.HTTPError as exc:
+            raise ConnectionError(
+                f"Jupiter request was rejected (HTTP {exc.code})"
+            ) from exc
+        except (OSError, ValueError, urllib.error.URLError) as exc:
+            raise ConnectionError(f"Jupiter request failed: {exc}") from exc
+        if not isinstance(result, dict):
+            raise ConnectionError("Jupiter returned an invalid response")
+        return result
+
+
+class SolanaAutoSeller:
+    def __init__(
+        self,
+        *,
+        client: OrderClient,
+        signer: TransactionSigner,
+        max_price_impact_pct: float = 5.0,
+        max_principal_quote_attempts: int = 3,
+    ) -> None:
+        self.client = client
+        self.signer = signer
+        self.max_price_impact_pct = max_price_impact_pct
+        self.max_principal_quote_attempts = max_principal_quote_attempts
+
+    async def prepare(self, intent: SellIntent) -> PreparedSell:
+        amount_raw = intent.amount_raw
+        order: dict[str, Any] | None = None
+        for _ in range(self.max_principal_quote_attempts):
+            order = await self.client.order(
+                input_mint=intent.mint,
+                amount_raw=amount_raw,
+                taker=self.signer.public_key,
+            )
+            self._validate_order(order, intent.mint, amount_raw)
+            minimum_output = int(
+                order.get("otherAmountThreshold") or order.get("outAmount") or 0
+            )
+            if (
+                intent.target_output_raw is None
+                or minimum_output >= intent.target_output_raw
+            ):
+                break
+            if intent.stage != 0:
+                raise ValueError(
+                    "Jupiter minimum output fell below the 3x trigger value"
+                )
+            if minimum_output <= 0:
+                raise ValueError("Jupiter returned no usable USDC output")
+            scaled = math.ceil(amount_raw * intent.target_output_raw / minimum_output)
+            amount_raw = min(max(amount_raw + 1, scaled), intent.balance_raw)
+        else:
+            raise ValueError("principal recovery quote could not be satisfied")
+
+        assert order is not None
+        minimum_output = int(
+            order.get("otherAmountThreshold") or order.get("outAmount") or 0
+        )
+        if (
+            intent.target_output_raw is not None
+            and minimum_output < intent.target_output_raw
+        ):
+            raise ValueError(
+                "current balance cannot recover principal after fees/slippage"
+            )
+        price_impact = float(
+            order.get("priceImpact") or order.get("priceImpactPct") or 0
+        )
+        if price_impact > self.max_price_impact_pct:
+            raise ValueError(
+                f"Jupiter price impact {price_impact:.2f}% exceeds the "
+                f"{self.max_price_impact_pct:.2f}% limit"
+            )
+        transaction = str(order.get("transaction") or "")
+        request_id = str(order.get("requestId") or "")
+        if not transaction or not request_id:
+            code = order.get("errorCode")
+            message = order.get("errorMessage") or "transaction unavailable"
+            raise ValueError(f"Jupiter order {code}: {message}")
+        last_valid = order.get("lastValidBlockHeight")
+        return PreparedSell(
+            intent=intent,
+            transaction=transaction,
+            request_id=request_id,
+            input_amount_raw=amount_raw,
+            expected_output_raw=int(order.get("outAmount") or 0),
+            minimum_output_raw=minimum_output,
+            price_impact_pct=price_impact,
+            last_valid_block_height=(
+                int(last_valid) if last_valid is not None else None
+            ),
+        )
+
+    async def execute(self, prepared: PreparedSell) -> SellReceipt:
+        signed = self.signer.sign(prepared.transaction)
+        result = await self.client.execute(
+            signed_transaction=signed,
+            request_id=prepared.request_id,
+            last_valid_block_height=prepared.last_valid_block_height,
+        )
+        status = str(result.get("status") or "")
+        code = int(result.get("code") or 0)
+        signature = str(result.get("signature") or "")
+        if status != "Success" or code != 0 or not signature:
+            detail = result.get("error") or "transaction did not confirm"
+            raise RuntimeError(f"Jupiter execution uncertain/failed ({code}): {detail}")
+        return SellReceipt(
+            intent=prepared.intent,
+            signature=signature,
+            input_amount_raw=int(
+                result.get("totalInputAmount") or prepared.input_amount_raw
+            ),
+            output_amount_raw=int(
+                result.get("totalOutputAmount") or result.get("outputAmountResult") or 0
+            ),
+        )
+
+    def _validate_order(
+        self, order: dict[str, Any], input_mint: str, amount_raw: int
+    ) -> None:
+        if order.get("inputMint") not in {None, input_mint}:
+            raise ValueError("Jupiter order input mint mismatch")
+        if order.get("outputMint") not in {None, USDC_MINT}:
+            raise ValueError("Jupiter order output mint mismatch")
+        if int(order.get("inAmount") or amount_raw) != amount_raw:
+            raise ValueError("Jupiter order input amount mismatch")

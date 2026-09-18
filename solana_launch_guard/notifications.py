@@ -96,7 +96,7 @@ class PushoverClient:
             data=json.dumps(payload).encode(),
             headers={
                 "Content-Type": "application/json",
-                "User-Agent": "solana-launch-guard/0.13",
+                "User-Agent": "solana-launch-guard/0.14",
             },
             method="POST",
         )
@@ -193,8 +193,8 @@ class DecisionNotifier:
         return await self.client.send(
             title="Launch Guard test",
             message=(
-                "Phone notifications are connected. Launch Guard remains "
-                "read-only and will never place a trade."
+                "Phone notifications are connected. Automated selling stays "
+                "off unless it is explicitly enabled and a token is armed."
             ),
             sound="magic",
         )

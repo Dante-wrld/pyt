@@ -4,14 +4,16 @@ build-backend = "hatchling.build"
 
 [project]
 name = "solana-launch-guard"
-version = "0.13.0"
-description = "Read-only multichain token monitor with decision alerts"
+version = "0.14.0"
+description = "Multichain token monitor with guarded Solana profit-ladder sells"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 dependencies = [
   "certifi>=2025.8.3",
   "websockets>=15,<17",
+  "keyring>=25,<26",
+  "solders>=0.29,<0.30",
 ]
 
 [project.optional-dependencies]
