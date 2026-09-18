@@ -26,6 +26,10 @@ KEYRING_SERVICE = "solana-launch-guard"
 KEYRING_ACCOUNT = "fomo-solana-private-key"
 
 
+class QuoteGuardError(ValueError):
+    """A Jupiter quote exceeded a configured price-impact or slippage cap."""
+
+
 @dataclass(frozen=True, slots=True)
 class SellIntent:
     mint: str
@@ -57,6 +61,8 @@ class PreparedSell:
     fee_bps: int | None = None
     quoted_price_impact_pct: float | None = None
     quoted_slippage_bps: int | None = None
+    reported_slippage_bps: int | None = None
+    threshold_slippage_bps: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +79,8 @@ class PreflightReceipt:
     units_consumed: int | None
     log_count: int
     broadcast: bool = False
+    adaptive_attempts: int = 1
+    adaptive_rejections: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,6 +108,8 @@ class PreparedBuy:
     fee_bps: int | None = None
     quoted_price_impact_pct: float | None = None
     quoted_slippage_bps: int | None = None
+    reported_slippage_bps: int | None = None
+    threshold_slippage_bps: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -349,16 +359,17 @@ class PortfolioSignalExitPlanner:
         )
 
 
-def _effective_slippage_bps(
+def _slippage_bps_components(
     order: dict[str, Any], expected_output: int, minimum_output: int
-) -> int:
-    reported = int(order.get("slippageBps") or 0)
+) -> tuple[int, int, int]:
+    reported = max(0, int(order.get("slippageBps") or 0))
+    threshold = 0
     if expected_output <= 0 or minimum_output <= 0:
-        return reported
+        return reported, reported, threshold
     threshold = math.ceil(
         max(0, expected_output - minimum_output) * 10_000 / expected_output
     )
-    return max(reported, threshold)
+    return max(reported, threshold), reported, threshold
 
 
 def _evaluated_price_impact_pct(value: float, floor_percentages: bool) -> float:
@@ -504,7 +515,7 @@ class JupiterSwapClient:
         data = json.dumps(payload).encode() if payload is not None else None
         headers = {
             "Accept": "application/json",
-            "User-Agent": "solana-launch-guard/0.17",
+            "User-Agent": "solana-launch-guard/0.19",
             "x-api-key": self.api_key,
         }
         if data is not None:
@@ -607,21 +618,29 @@ class SolanaAutoSeller:
             quoted_price_impact, self.floor_percentages
         )
         if abs(price_impact) > self.max_price_impact_pct:
-            raise ValueError(
+            raise QuoteGuardError(
                 f"Jupiter price impact {price_impact:.2f}% exceeds the "
-                f"{self.max_price_impact_pct:.2f}% limit"
+                f"{self.max_price_impact_pct:.2f}% limit "
+                f"(exact quote {quoted_price_impact:.6f}%)"
             )
         expected_output = int(order.get("outAmount") or 0)
-        quoted_slippage_bps = _effective_slippage_bps(
+        (
+            quoted_slippage_bps,
+            reported_slippage_bps,
+            threshold_slippage_bps,
+        ) = _slippage_bps_components(
             order, expected_output, minimum_output
         )
         slippage_bps = _evaluated_slippage_bps(
             quoted_slippage_bps, self.floor_percentages
         )
         if slippage_bps > self.max_slippage_bps:
-            raise ValueError(
+            raise QuoteGuardError(
                 f"Jupiter slippage {slippage_bps} bps exceeds the "
-                f"{self.max_slippage_bps} bps limit"
+                f"{self.max_slippage_bps} bps limit "
+                f"(exact effective {quoted_slippage_bps}; reported "
+                f"{reported_slippage_bps}; output threshold "
+                f"{threshold_slippage_bps})"
             )
         transaction = str(order.get("transaction") or "")
         request_id = str(order.get("requestId") or "")
@@ -651,6 +670,8 @@ class SolanaAutoSeller:
             ),
             quoted_price_impact_pct=quoted_price_impact,
             quoted_slippage_bps=quoted_slippage_bps,
+            reported_slippage_bps=reported_slippage_bps,
+            threshold_slippage_bps=threshold_slippage_bps,
         )
 
     async def execute(self, prepared: PreparedSell) -> SellReceipt:
@@ -697,6 +718,48 @@ class SolanaAutoSeller:
             prepared=prepared,
             units_consumed=int(units) if units is not None else None,
             log_count=len(logs) if isinstance(logs, list) else 0,
+        )
+
+    async def preflight_adaptive(
+        self,
+        intent: SellIntent,
+        simulator: TransactionSimulator,
+        *,
+        minimum_amount_raw: int,
+        max_attempts: int,
+    ) -> PreflightReceipt:
+        """Halve a portfolio-signal sell until its guarded quote can simulate."""
+        if intent.target_output_raw is not None:
+            return await self.preflight(intent, simulator)
+        if max_attempts < 1:
+            raise ValueError("adaptive sell max attempts must be at least one")
+        minimum_amount_raw = min(
+            intent.amount_raw, max(1, minimum_amount_raw)
+        )
+        amount_raw = intent.amount_raw
+        rejections: list[str] = []
+        for attempt in range(1, max_attempts + 1):
+            attempt_intent = replace(intent, amount_raw=amount_raw)
+            try:
+                receipt = await self.preflight(attempt_intent, simulator)
+            except QuoteGuardError as exc:
+                rejections.append(f"{amount_raw}: {exc}")
+                if amount_raw <= minimum_amount_raw:
+                    break
+                next_amount = max(minimum_amount_raw, amount_raw // 2)
+                if next_amount >= amount_raw:
+                    break
+                amount_raw = next_amount
+                continue
+            return replace(
+                receipt,
+                adaptive_attempts=attempt,
+                adaptive_rejections=tuple(rejections),
+            )
+        detail = rejections[-1] if rejections else "no quote was accepted"
+        raise QuoteGuardError(
+            "adaptive sell found no safe chunk after "
+            f"{len(rejections)} quote attempt(s); last rejection: {detail}"
         )
 
     def _validate_order(
@@ -758,20 +821,28 @@ class SolanaAutoBuyer:
             quoted_price_impact, self.floor_percentages
         )
         if abs(price_impact) > self.max_price_impact_pct:
-            raise ValueError(
+            raise QuoteGuardError(
                 f"Jupiter price impact {price_impact:.2f}% exceeds the "
-                f"{self.max_price_impact_pct:.2f}% limit"
+                f"{self.max_price_impact_pct:.2f}% limit "
+                f"(exact quote {quoted_price_impact:.6f}%)"
             )
-        quoted_slippage_bps = _effective_slippage_bps(
+        (
+            quoted_slippage_bps,
+            reported_slippage_bps,
+            threshold_slippage_bps,
+        ) = _slippage_bps_components(
             order, expected_output, minimum_output
         )
         slippage_bps = _evaluated_slippage_bps(
             quoted_slippage_bps, self.floor_percentages
         )
         if slippage_bps > self.max_slippage_bps:
-            raise ValueError(
+            raise QuoteGuardError(
                 f"Jupiter slippage {slippage_bps} bps exceeds the "
-                f"{self.max_slippage_bps} bps limit"
+                f"{self.max_slippage_bps} bps limit "
+                f"(exact effective {quoted_slippage_bps}; reported "
+                f"{reported_slippage_bps}; output threshold "
+                f"{threshold_slippage_bps})"
             )
         transaction = str(order.get("transaction") or "")
         request_id = str(order.get("requestId") or "")
@@ -801,6 +872,8 @@ class SolanaAutoBuyer:
             ),
             quoted_price_impact_pct=quoted_price_impact,
             quoted_slippage_bps=quoted_slippage_bps,
+            reported_slippage_bps=reported_slippage_bps,
+            threshold_slippage_bps=threshold_slippage_bps,
         )
 
     async def execute(self, prepared: PreparedBuy) -> BuyReceipt:

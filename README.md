@@ -3,14 +3,16 @@
 A safety-first Python monitor, paper trader, and opt-in guarded Solana
 buyer/automatic seller for multichain crypto tokens.
 
-Version 0.17 adds off-by-default automatic selection of fresh, confirmed
-Solana `BUY NOW`/`BUY ZONE` candidates and optional wallet-wide execution of
-`TAKE PARTIAL`, `PROTECT PROFIT`, and `EXIT WARNING` rules. Every unattended
-order must pass a Jupiter price-impact cap, a separate slippage cap, local
-signing, and Solana RPC simulation before broadcast. Principal remains limited
-to two $5 USDC seed purchases and two active bot-managed positions. Direct
-on-chain swaps use Jupiter; Launch Guard does not log in to or control Fomo's
-app or website.
+Launch Guard can automatically select fresh, confirmed Solana `BUY NOW`/`BUY
+ZONE` candidates and optionally execute wallet-wide `TAKE PARTIAL`, `PROTECT
+PROFIT`, and `EXIT WARNING` rules. Version 0.19 adds off-by-default adaptive
+wallet-exit chunks: an unsafe quote is halved without weakening either guard,
+and confirmed progress persists across polling cycles and restarts. Every
+unattended order must pass a Jupiter price-impact cap, a separate slippage cap,
+local signing, and Solana RPC simulation before broadcast. Principal remains
+limited to two $5 USDC seed purchases and two active bot-managed positions.
+Direct on-chain swaps use Jupiter; Launch Guard does not log in to or control
+Fomo's app or website.
 
 ## What it does
 
@@ -163,6 +165,9 @@ pytest
 | `AUTO_SELL_SECOND_STAGE_FRACTION` | `0.5` | Fraction of the remaining token balance sold at the second stage |
 | `AUTO_SELL_MAX_PRICE_IMPACT_PCT` | `5.0` | Reject a Jupiter order above this reported price impact |
 | `AUTO_SELL_MAX_SLIPPAGE_BPS` | `500` | Reject sell quotes whose reported or output-threshold slippage exceeds 5% |
+| `AUTO_SELL_ADAPTIVE_CHUNKS` | `false` | Allow wallet-wide signal exits to halve an unsafe amount and continue a persisted target over later polls |
+| `AUTO_SELL_MIN_CHUNK_FRACTION` | `0.01` | Smallest adaptive chunk as a fraction of the current token balance |
+| `AUTO_SELL_MAX_CHUNK_ATTEMPTS` | `8` | Maximum guarded quote sizes tried during one polling cycle |
 | `AUTO_SELL_PORTFOLIO_SIGNALS` | `false` | Permit owned-wallet `TAKE PARTIAL`, `PROTECT PROFIT`, and `EXIT WARNING` rules in dry-run/live mode |
 | `AUTO_SELL_TAKE_PARTIAL_FRACTION` | `0.5` | Fraction sold once for `TAKE PARTIAL` |
 | `AUTO_SELL_PROTECT_PROFIT_FRACTION` | `1.0` | Fraction sold once for `PROTECT PROFIT` |
@@ -507,6 +512,9 @@ AUTO_SELL_EXIT_WARNING_FRACTION=1.0
 AUTO_SELL_MIN_VALUE_USD=1.0
 AUTO_SELL_MAX_PRICE_IMPACT_PCT=5.0
 AUTO_SELL_MAX_SLIPPAGE_BPS=500
+AUTO_SELL_ADAPTIVE_CHUNKS=false
+AUTO_SELL_MIN_CHUNK_FRACTION=0.01
+AUTO_SELL_MAX_CHUNK_ATTEMPTS=8
 AUTO_SELL_EXCLUDED_MINTS=EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v
 ```
 
@@ -523,6 +531,21 @@ block works even when no cost basis was imported:
 launch-guard --disarm-auto-sell-mint TOKEN_MINT
 launch-guard --allow-owned-auto-sell-mint TOKEN_MINT
 ```
+
+When `AUTO_SELL_ADAPTIVE_CHUNKS=true`, this preflight starts with the configured
+`TAKE PARTIAL` amount and halves only after a price-impact or slippage rejection.
+It stops at `AUTO_SELL_MIN_CHUNK_FRACTION` or the attempt limit. The result shows
+`configured_fraction`, `selected_fraction`, `adaptive_attempts`, and every
+rejected quote. It also separates Jupiter's reported slippage from the slippage
+derived from the minimum-output threshold. A passing smaller chunk does not
+weaken either configured cap.
+
+For live wallet-wide signals, Launch Guard submits at most one simulated chunk
+per token per portfolio polling cycle. The original target and confirmed total
+are stored in SQLite, so a restart continues only the unsold remainder. An
+uncertain execution freezes the whole batch for review. Profit-ladder principal
+recovery is not adaptively chunked because its minimum principal output must be
+satisfied by one guarded order.
 
 ### Guarded automated buys
 

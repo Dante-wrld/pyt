@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -28,10 +29,12 @@ from solana_launch_guard.execution import (
     BuyIntent,
     JupiterSwapClient,
     PortfolioSignalExitPlanner,
+    PreflightReceipt,
     PreparedBuy,
     PreparedSell,
     ProfitLadder,
     SellIntent,
+    SellReceipt,
     SolanaAutoBuyer,
     SolanaAutoSeller,
     store_fomo_solana_key,
@@ -453,6 +456,132 @@ def test_auto_seller_can_floor_guard_percentages_when_opted_in() -> None:
     assert prepared.quoted_slippage_bps == 599
 
 
+def test_auto_seller_adaptive_preflight_halves_until_guard_passes() -> None:
+    requested: list[int] = []
+
+    class FakeSigner:
+        public_key = "Wallet111"
+
+        def sign(self, transaction_b64: str) -> str:
+            return f"signed:{transaction_b64}"
+
+    class FakeClient:
+        async def order(self, **values: object) -> dict[str, object]:
+            amount = int(values["amount_raw"])
+            requested.append(amount)
+            return {
+                "inputMint": values["input_mint"],
+                "outputMint": USDC_MINT,
+                "inAmount": str(amount),
+                "outAmount": "10000000",
+                "otherAmountThreshold": "9500000",
+                "priceImpact": 1.0,
+                "slippageBps": 1000 if amount > 50 else 500,
+                "transaction": f"unsigned-{amount}",
+                "requestId": f"request-{amount}",
+            }
+
+    class FakeSimulator:
+        async def simulate_transaction(
+            self, signed_transaction_b64: str
+        ) -> dict[str, object]:
+            assert signed_transaction_b64 == "signed:unsigned-50"
+            return {"err": None, "logs": ["ok"], "unitsConsumed": 77}
+
+    intent = SellIntent(
+        mint="MintOwned111",
+        symbol="OWN",
+        stage=12,
+        event_key="signal-exit:chunk:0",
+        amount_raw=100,
+        balance_raw=100,
+        decimals=0,
+        trigger_multiple=0,
+        current_multiple=0,
+        target_output_raw=None,
+        reason="exit warning",
+    )
+    seller = SolanaAutoSeller(
+        client=FakeClient(), signer=FakeSigner(), max_slippage_bps=500
+    )
+
+    receipt = asyncio.run(
+        seller.preflight_adaptive(
+            intent,
+            FakeSimulator(),
+            minimum_amount_raw=10,
+            max_attempts=4,
+        )
+    )
+
+    assert requested == [100, 50]
+    assert receipt.prepared.input_amount_raw == 50
+    assert receipt.adaptive_attempts == 2
+    assert len(receipt.adaptive_rejections) == 1
+    assert "reported 1000" in receipt.adaptive_rejections[0]
+
+
+def test_auto_seller_adaptive_preflight_stops_without_signing_unsafe_quote() -> None:
+    requested: list[int] = []
+
+    class FakeSigner:
+        public_key = "Wallet111"
+
+        def sign(self, transaction_b64: str) -> str:
+            raise AssertionError("an unsafe quote must not be signed")
+
+    class FakeClient:
+        async def order(self, **values: object) -> dict[str, object]:
+            amount = int(values["amount_raw"])
+            requested.append(amount)
+            return {
+                "inputMint": values["input_mint"],
+                "outputMint": USDC_MINT,
+                "inAmount": str(amount),
+                "outAmount": "10000000",
+                "otherAmountThreshold": "9500000",
+                "priceImpact": 1.0,
+                "slippageBps": 1000,
+                "transaction": f"unsigned-{amount}",
+                "requestId": f"request-{amount}",
+            }
+
+    class FakeSimulator:
+        async def simulate_transaction(
+            self, signed_transaction_b64: str
+        ) -> dict[str, object]:
+            raise AssertionError("an unsafe quote must not be simulated")
+
+    intent = SellIntent(
+        mint="MintOwned111",
+        symbol="OWN",
+        stage=12,
+        event_key="signal-exit:chunk:0",
+        amount_raw=100,
+        balance_raw=100,
+        decimals=0,
+        trigger_multiple=0,
+        current_multiple=0,
+        target_output_raw=None,
+        reason="exit warning",
+    )
+    seller = SolanaAutoSeller(
+        client=FakeClient(), signer=FakeSigner(), max_slippage_bps=500
+    )
+
+    with pytest.raises(ValueError, match="found no safe chunk"):
+        asyncio.run(
+            seller.preflight_adaptive(
+                intent,
+                FakeSimulator(),
+                minimum_amount_raw=25,
+                max_attempts=8,
+            )
+        )
+
+    assert requested == [100, 50, 25]
+
+
 def test_jupiter_preflight_order_excludes_rfq_router(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -784,6 +913,111 @@ def test_auto_sell_store_is_armed_and_idempotent(tmp_path: Path) -> None:
     store.close()
 
 
+def test_auto_sell_batch_persists_confirmed_chunk_progress(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(str(tmp_path / "sell-batch.db"))
+    batch_values = {
+        "batch_key": "solana:MintOwned111:portfolio-signal:exit-warning",
+        "chain": "solana",
+        "token_address": "MintOwned111",
+        "symbol": "OWN",
+        "stage": 12,
+        "target_raw": 100,
+        "full_exit": True,
+    }
+    batch = store.load_or_create_auto_sell_batch(**batch_values)
+    assert batch["status"] == "ACTIVE"
+    assert batch["sold_raw"] == 0
+
+    first_key = f"{batch_values['batch_key']}:chunk:0"
+    assert store.begin_auto_sell_execution(
+        event_key=first_key,
+        chain="solana",
+        token_address="MintOwned111",
+        symbol="OWN",
+        stage=12,
+        requested_raw=40,
+        expected_output_raw=4_000_000,
+    )
+    assert not store.complete_auto_sell_chunk(
+        batch_key=str(batch_values["batch_key"]),
+        event_key=first_key,
+        signature="sig-1",
+        sold_raw=40,
+    )
+    batch = store.load_or_create_auto_sell_batch(**batch_values)
+    assert batch["sold_raw"] == 40
+    assert batch["next_chunk_index"] == 1
+    assert batch["status"] == "ACTIVE"
+
+    second_key = f"{batch_values['batch_key']}:chunk:1"
+    assert store.begin_auto_sell_execution(
+        event_key=second_key,
+        chain="solana",
+        token_address="MintOwned111",
+        symbol="OWN",
+        stage=12,
+        requested_raw=60,
+        expected_output_raw=6_000_000,
+    )
+    assert store.complete_auto_sell_chunk(
+        batch_key=str(batch_values["batch_key"]),
+        event_key=second_key,
+        signature="sig-2",
+        sold_raw=60,
+    )
+    batch = store.load_or_create_auto_sell_batch(**batch_values)
+    assert batch["sold_raw"] == 100
+    assert batch["next_chunk_index"] == 2
+    assert batch["status"] == "CONFIRMED"
+    assert batch["last_signature"] == "sig-2"
+    store.close()
+
+
+def test_auto_sell_batch_freezes_after_uncertain_execution(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(str(tmp_path / "sell-batch-review.db"))
+    batch_values = {
+        "batch_key": "solana:MintOwned111:portfolio-signal:exit-warning",
+        "chain": "solana",
+        "token_address": "MintOwned111",
+        "symbol": "OWN",
+        "stage": 12,
+        "target_raw": 100,
+        "full_exit": True,
+    }
+    store.load_or_create_auto_sell_batch(**batch_values)
+    event_key = f"{batch_values['batch_key']}:chunk:0"
+    assert store.begin_auto_sell_execution(
+        event_key=event_key,
+        chain="solana",
+        token_address="MintOwned111",
+        symbol="OWN",
+        stage=12,
+        requested_raw=40,
+        expected_output_raw=4_000_000,
+    )
+
+    store.freeze_auto_sell_chunk(
+        batch_key=str(batch_values["batch_key"]),
+        event_key=event_key,
+        error="confirmation unavailable",
+    )
+
+    batch = store.load_or_create_auto_sell_batch(**batch_values)
+    execution = store.connection.execute(
+        "SELECT status, error FROM auto_sell_executions WHERE event_key = ?",
+        (event_key,),
+    ).fetchone()
+    assert batch["status"] == "REVIEW"
+    assert batch["error"] == "confirmation unavailable"
+    assert execution["status"] == "REVIEW"
+    assert execution["error"] == "confirmation unavailable"
+    store.close()
+
+
 def test_auto_sell_per_mint_block_works_without_cost_basis(
     tmp_path: Path,
 ) -> None:
@@ -1071,15 +1305,16 @@ def test_owned_auto_sell_preflight_never_broadcasts_without_cost_basis(
             assert api_key == "jupiter-key"
 
         async def order(self, **values: object) -> dict[str, object]:
-            assert values["amount_raw"] == 50_000_000
+            amount_raw = int(values["amount_raw"])
+            assert amount_raw in {50_000_000, 25_000_000}
             return {
                 "inputMint": "MintUnknown111",
                 "outputMint": USDC_MINT,
-                "inAmount": "50000000",
+                "inAmount": str(amount_raw),
                 "outAmount": "10000000",
                 "otherAmountThreshold": "9500000",
                 "priceImpact": 5.03,
-                "slippageBps": 503,
+                "slippageBps": 1000 if amount_raw > 25_000_000 else 503,
                 "transaction": "unsigned",
                 "requestId": "owned-preflight",
             }
@@ -1097,6 +1332,7 @@ def test_owned_auto_sell_preflight_never_broadcasts_without_cost_basis(
         auto_sell_enabled=True,
         auto_sell_portfolio_signals=True,
         auto_trade_floor_percentages=True,
+        auto_sell_adaptive_chunks=True,
     )
 
     result = asyncio.run(
@@ -1106,7 +1342,10 @@ def test_owned_auto_sell_preflight_never_broadcasts_without_cost_basis(
     assert result["result"] == "PASSED"
     assert result["broadcast"] is False
     assert result["configured_fraction"] == 0.5
-    assert result["input_tokens"] == 50
+    assert result["selected_fraction"] == 0.25
+    assert result["adaptive_attempts"] == 2
+    assert len(result["adaptive_rejections"]) == 1
+    assert result["input_tokens"] == 25
     assert result["price_impact_pct"] == 5
     assert result["quoted_price_impact_pct"] == 5.03
     assert result["slippage_bps"] == 500
@@ -1962,6 +2201,129 @@ def test_owned_portfolio_exit_can_trigger_without_cost_basis(
         "solana:MintOwned111:portfolio-signal:exit-warning"
         in guard.auto_sell_dry_run_seen
     )
+    store.close()
+
+
+def test_live_portfolio_exit_executes_one_persistent_chunk_per_poll(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(str(tmp_path / "owned-live-chunks.db"))
+    config = settings(
+        tmp_path / "owned-live-chunks.db",
+        auto_sell_enabled=True,
+        auto_sell_live=False,
+        auto_sell_portfolio_signals=True,
+        auto_sell_adaptive_chunks=True,
+        auto_sell_min_chunk_fraction=0.01,
+        auto_sell_max_chunk_attempts=8,
+    )
+    guard = LaunchGuard(config, store)
+    prepared_amounts: list[int] = []
+
+    class FakeSeller:
+        async def preflight_adaptive(
+            self,
+            intent: SellIntent,
+            _simulator: object,
+            *,
+            minimum_amount_raw: int,
+            max_attempts: int,
+        ) -> PreflightReceipt:
+            assert minimum_amount_raw > 0
+            assert max_attempts == 8
+            selected_raw = (
+                40_000_000
+                if intent.amount_raw > 60_000_000
+                else intent.amount_raw
+            )
+            selected_intent = replace(intent, amount_raw=selected_raw)
+            prepared_amounts.append(selected_raw)
+            return PreflightReceipt(
+                prepared=PreparedSell(
+                    intent=selected_intent,
+                    transaction="unsigned",
+                    request_id=f"request-{len(prepared_amounts)}",
+                    input_amount_raw=selected_raw,
+                    expected_output_raw=selected_raw // 10,
+                    minimum_output_raw=selected_raw // 11,
+                    price_impact_pct=1.0,
+                    last_valid_block_height=123,
+                    slippage_bps=500,
+                ),
+                units_consumed=200_000,
+                log_count=10,
+                adaptive_attempts=2 if len(prepared_amounts) == 1 else 1,
+            )
+
+        async def execute(self, prepared: PreparedSell) -> SellReceipt:
+            return SellReceipt(
+                intent=prepared.intent,
+                signature=f"sig-{len(prepared_amounts)}",
+                input_amount_raw=prepared.input_amount_raw,
+                output_amount_raw=prepared.expected_output_raw,
+            )
+
+    guard.auto_seller = FakeSeller()  # type: ignore[assignment]
+    signal = PortfolioSignal(
+        chain="solana",
+        token_address="MintOwned111",
+        symbol="OWN",
+        quantity=100,
+        current_price=0.1,
+        price_currency="USD",
+        current_value_usd=10.0,
+        pnl_pct=None,
+        decision="EXIT WARNING",
+        reason="momentum reversal",
+        price_change_m5_pct=-10,
+        buys_m5=2,
+        sells_m5=8,
+        liquidity_usd=20_000,
+        entry_price=None,
+        peak_price=0.12,
+    )
+
+    asyncio.run(
+        guard._maybe_auto_sell(
+            signal,
+            SolanaTokenHolding(
+                mint="MintOwned111",
+                amount=100,
+                raw_amount=100_000_000,
+                decimals=6,
+            ),
+        )
+    )
+    batch_values = {
+        "batch_key": "solana:MintOwned111:portfolio-signal:exit-warning",
+        "chain": "solana",
+        "token_address": "MintOwned111",
+        "symbol": "OWN",
+        "stage": 12,
+        "target_raw": 100_000_000,
+        "full_exit": True,
+    }
+    batch = store.load_or_create_auto_sell_batch(**batch_values)
+    assert batch["status"] == "ACTIVE"
+    assert batch["sold_raw"] == 40_000_000
+    assert batch["next_chunk_index"] == 1
+
+    asyncio.run(
+        guard._maybe_auto_sell(
+            signal,
+            SolanaTokenHolding(
+                mint="MintOwned111",
+                amount=60,
+                raw_amount=60_000_000,
+                decimals=6,
+            ),
+        )
+    )
+    batch = store.load_or_create_auto_sell_batch(**batch_values)
+    assert prepared_amounts == [40_000_000, 60_000_000]
+    assert batch["status"] == "CONFIRMED"
+    assert batch["sold_raw"] == 100_000_000
+    assert batch["next_chunk_index"] == 2
     store.close()
 
 
