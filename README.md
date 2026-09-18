@@ -1,8 +1,13 @@
-# Solana Launch Guard
+# Launch Guard
 
-A safety-first Python monitor and paper trader for newly created Pump.fun tokens.
+A safety-first Python monitor and paper trader for Solana launches and
+Robinhood Chain crypto tokens.
 
-Version 0.6 **never signs or submits transactions**. It can monitor new-token events or a public Solana trader wallet, apply configurable gates, rank intelligence-qualified paper candidates, open simulated positions, follow prices through a public market-data endpoint, and record decisions and P&L in SQLite.
+Version 0.7 **never signs or submits transactions**. It can monitor Pump.fun
+new-token events, a public Solana trader wallet, and Robinhood Chain token
+profiles; apply configurable gates; rank intelligence-qualified paper
+candidates; open simulated Solana positions; and record decisions and P&L in
+SQLite.
 
 ## What it does
 
@@ -10,6 +15,8 @@ Version 0.6 **never signs or submits transactions**. It can monitor new-token ev
 - Rejects launches that lack enough pricing data or violate configured limits.
 - Scores observed launches with separate safety and momentum components.\n- Uses a CORE tier for stronger setups and a $5 MOONSHOT tier for higher-risk setups.\n- Limits position size, concurrent positions, and total exposure.
 - Prints a gold top-10 paper watchlist and continuously re-ranks it using bounded live price momentum.
+- Discovers Robinhood Chain crypto-token profiles, filters official Robinhood
+  Stock Token contracts, and prints the exact `0x` contract plus a Fomo link.
 - Simulates take-profit and stop-loss exits using subsequent trade events.
 - Persists launches, decisions, positions, and fills in `launch_guard.db`.
 - Reconnects after WebSocket failures.
@@ -87,6 +94,8 @@ pytest
 | `RECOMMENDATION_POLL_SECONDS` | `15` | Seconds between quote refreshes and ranking updates |
 | `RECOMMENDATION_TTL_SECONDS` | `1800` | Seconds before a candidate ages out of the watchlist |
 | `COLOR_OUTPUT` | `true` | Use gold ANSI terminal output when supported |
+| `ROBINHOOD_TOKEN_ADDRESSES` | empty | Comma-separated Robinhood Chain `0x` contracts to monitor in addition to discovery |
+| `ROBINHOOD_POLL_SECONDS` | `15` | Seconds between Robinhood Chain discovery passes (minimum 15) |
 
 The defaults are engineering examples, **not financial recommendations**. They should be evaluated in paper mode over a meaningful sample before any live-execution module is considered.
 
@@ -124,6 +133,9 @@ Official references:
 
 - [PumpPortal real-time data](https://pumpportal.fun/data-api/real-time/)
 - [Solana token verification guidance](https://solana.com/docs/tokens/how-to-verify-a-token)
+- [Robinhood Chain connection details](https://docs.robinhood.com/chain/connecting/)
+- [Robinhood Chain Stock Token registry](https://api.robinhood.com/rhj/assets)
+- [DEX Screener API reference](https://docs.dexscreener.com/api/reference)
 
 
 ## Intelligent launch filter
@@ -185,6 +197,41 @@ visible coin uses a different color, and duplicate mints or case-insensitive
 duplicate symbols are reduced to the highest-ranked entry. It also shows the
 number of candidates still waiting for evaluation. The window closes its live
 display when the main scanner process stops.
+
+### Fomo Robinhood Chain recommendations
+
+Run the Robinhood Chain scanner with the separate recommendation window:
+
+```bash
+launch-guard --mode robinhood --recommendations-window
+```
+
+Run Solana launches, Solana wallet copy monitoring, and Robinhood Chain
+discovery together:
+
+```bash
+launch-guard --mode all --recommendations-window
+```
+
+The scanner reads DEX Screener's latest and recently updated Robinhood Chain
+token profiles, then scores each token's most liquid Robinhood Chain pair. A
+qualifying row is labeled `chain=RH`, uses a USD price, shows the exact EVM
+contract, and includes a Fomo URL. Add specific contracts to `.env` when you
+want them monitored even if they are not present in the current profile feed:
+
+```dotenv
+ROBINHOOD_TOKEN_ADDRESSES=0xContractOne,0xContractTwo
+```
+
+Official Robinhood Stock Token contracts are removed using Robinhood's live
+asset registry. This matters because Stock Tokens are jurisdiction-restricted
+securities and are not the memecoin/crypto-token feed this mode is designed
+for.
+
+DEX Screener discovery does not prove that Fomo currently exposes or permits a
+trade for every contract. Open the printed Fomo link and verify the chain,
+contract, quote, slippage, and fees before taking any manual action. The bot
+does not log in to Fomo and does not buy anything.
 
 
 ## Adaptive exits and re-entry
