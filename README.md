@@ -2,7 +2,7 @@
 
 A safety-first Python monitor and paper trader for newly created Pump.fun tokens.
 
-Version 0.5 **never signs or submits transactions**. It can monitor new-token events or a public Solana trader wallet, apply configurable gates, rank intelligence-qualified paper candidates, open simulated positions, follow prices through a public market-data endpoint, and record decisions and P&L in SQLite.
+Version 0.6 **never signs or submits transactions**. It can monitor new-token events or a public Solana trader wallet, apply configurable gates, rank intelligence-qualified paper candidates, open simulated positions, follow prices through a public market-data endpoint, and record decisions and P&L in SQLite.
 
 ## What it does
 
@@ -170,6 +170,21 @@ launch-guard --mode both
 
 The label is a paper-trading model signal, not a statement that a token will
 rise. Rankings can reverse quickly, and the bot does not submit a real order.
+
+### Separate macOS recommendation window
+
+Use this command to keep scanner diagnostics in the original Terminal while a
+second Terminal displays only the current recommendation board:
+
+```bash
+launch-guard --mode both --recommendations-window
+```
+
+The second window clears and redraws instead of appending repeated boards. Each
+visible coin uses a different color, and duplicate mints or case-insensitive
+duplicate symbols are reduced to the highest-ranked entry. It also shows the
+number of candidates still waiting for evaluation. The window closes its live
+display when the main scanner process stops.
 
 
 ## Adaptive exits and re-entry

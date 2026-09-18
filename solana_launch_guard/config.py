@@ -109,6 +109,7 @@ class Settings:
     recommendation_poll_seconds: float = 15.0
     recommendation_ttl_seconds: float = 1800.0
     color_output: bool = True
+    recommendation_snapshot_path: str = "launch_guard_recommendations.json"
 
     @classmethod
     def from_env(cls, dotenv_path: str = ".env") -> "Settings":
@@ -180,6 +181,10 @@ class Settings:
                 "RECOMMENDATION_TTL_SECONDS", 1800.0
             ),
             color_output=_bool("COLOR_OUTPUT", True),
+            recommendation_snapshot_path=os.getenv(
+                "RECOMMENDATION_SNAPSHOT_PATH",
+                "launch_guard_recommendations.json",
+            ),
         )
         settings.validate()
         return settings
