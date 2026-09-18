@@ -155,6 +155,7 @@ pytest
 | `PORTFOLIO_POLL_SECONDS` | `15` | Seconds between holdings checks (minimum 10) |
 | `PORTFOLIO_MIN_VALUE_USD` | `0.01` | Hide priced wallet dust below this estimated USD value |
 | `PORTFOLIO_SNAPSHOT_PATH` | `launch_guard_portfolio.json` | Local snapshot used by the holdings window |
+| `AUTO_TRADE_FLOOR_PERCENTAGES` | `false` | Opt in to truncating quote percentages to whole percentage points before display and enforcement |
 | `AUTO_SELL_ENABLED` | `false` | Evaluate armed 2x/3x ladder events; stays dry-run unless live mode is also enabled |
 | `AUTO_SELL_LIVE` | `false` | Permit locally signed Jupiter sell submission for armed tokens |
 | `AUTO_SELL_PRINCIPAL_MULTIPLE` | `2.0` | Entry-price multiple that triggers principal recovery |
@@ -383,6 +384,14 @@ or Jupiter cannot build a transaction, no sale is submitted. A token that
 jumps directly beyond 3x still completes the principal-recovery stage first,
 then becomes eligible for stage 2 on a later poll.
 
+`AUTO_TRADE_FLOOR_PERCENTAGES=true` deliberately loosens both buy and sell
+guards: a quoted magnitude from 5.00% through 5.99% is evaluated and displayed
+as 5%, and 599 basis points is evaluated and displayed as 500 basis points.
+Preflight output retains the exact source values as
+`quoted_price_impact_pct` and `quoted_slippage_bps`. The default remains
+`false` so configured caps are exact unless this behavior is explicitly
+enabled.
+
 Set up one guarded token at a time:
 
 1. Create a Jupiter API key in the [Jupiter developer portal](https://developers.jup.ag/portal).
@@ -490,6 +499,7 @@ Configure wallet-wide rules in dry-run first:
 ```dotenv
 AUTO_SELL_ENABLED=true
 AUTO_SELL_LIVE=false
+AUTO_TRADE_FLOOR_PERCENTAGES=false
 AUTO_SELL_PORTFOLIO_SIGNALS=true
 AUTO_SELL_TAKE_PARTIAL_FRACTION=0.5
 AUTO_SELL_PROTECT_PROFIT_FRACTION=1.0
@@ -552,6 +562,7 @@ Configure dry-run buying first:
 ```dotenv
 AUTO_BUY_ENABLED=true
 AUTO_BUY_LIVE=false
+AUTO_TRADE_FLOOR_PERCENTAGES=false
 AUTO_BUY_DISCOVERY=true
 AUTO_BUY_DISCOVERY_MIN_SCORE=70
 AUTO_BUY_DISCOVERY_MIN_LIQUIDITY_USD=50000

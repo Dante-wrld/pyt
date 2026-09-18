@@ -403,6 +403,56 @@ def test_auto_seller_rejects_quote_above_slippage_limit() -> None:
         asyncio.run(seller.prepare(intent))
 
 
+def test_auto_seller_can_floor_guard_percentages_when_opted_in() -> None:
+    class FakeSigner:
+        public_key = "Wallet111"
+
+        def sign(self, transaction_b64: str) -> str:
+            return transaction_b64
+
+    class FakeClient:
+        async def order(self, **values: object) -> dict[str, object]:
+            return {
+                "inputMint": values["input_mint"],
+                "outputMint": USDC_MINT,
+                "inAmount": str(values["amount_raw"]),
+                "outAmount": "10000000",
+                "otherAmountThreshold": "9500000",
+                "priceImpact": -5.99,
+                "slippageBps": 599,
+                "transaction": "unsigned",
+                "requestId": "request-floored-sell",
+            }
+
+    intent = SellIntent(
+        mint="MintOwned111",
+        symbol="OWN",
+        stage=10,
+        event_key="signal-partial",
+        amount_raw=50_000_000,
+        balance_raw=100_000_000,
+        decimals=6,
+        trigger_multiple=0,
+        current_multiple=0,
+        target_output_raw=None,
+        reason="take partial",
+    )
+    seller = SolanaAutoSeller(
+        client=FakeClient(),
+        signer=FakeSigner(),
+        max_price_impact_pct=5,
+        max_slippage_bps=500,
+        floor_percentages=True,
+    )
+
+    prepared = asyncio.run(seller.prepare(intent))
+
+    assert prepared.price_impact_pct == -5
+    assert prepared.quoted_price_impact_pct == -5.99
+    assert prepared.slippage_bps == 500
+    assert prepared.quoted_slippage_bps == 599
+
+
 def test_jupiter_preflight_order_excludes_rfq_router(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -608,6 +658,50 @@ def test_auto_buyer_rejects_jupiter_twenty_percent_slippage() -> None:
 
     with pytest.raises(ValueError, match="slippage 2000 bps"):
         asyncio.run(buyer.prepare(intent))
+
+
+def test_auto_buyer_can_floor_guard_percentages_when_opted_in() -> None:
+    class FakeSigner:
+        public_key = "Wallet111"
+
+        def sign(self, transaction_b64: str) -> str:
+            return transaction_b64
+
+    class FakeClient:
+        async def order(self, **values: object) -> dict[str, object]:
+            return {
+                "inputMint": USDC_MINT,
+                "outputMint": values["output_mint"],
+                "inAmount": str(values["amount_raw"]),
+                "outAmount": "250000000",
+                "otherAmountThreshold": "237500000",
+                "priceImpact": 5.03,
+                "slippageBps": 503,
+                "transaction": "unsigned-buy",
+                "requestId": "request-floored-buy",
+            }
+
+    intent = BuyIntent(
+        mint="MintBuy111",
+        symbol="BUY",
+        event_key="buy-floored",
+        amount_usdc_raw=5_000_000,
+        funding_source="seed",
+    )
+    buyer = SolanaAutoBuyer(
+        client=FakeClient(),
+        signer=FakeSigner(),
+        max_price_impact_pct=5,
+        max_slippage_bps=500,
+        floor_percentages=True,
+    )
+
+    prepared = asyncio.run(buyer.prepare(intent))
+
+    assert prepared.price_impact_pct == 5
+    assert prepared.quoted_price_impact_pct == 5.03
+    assert prepared.slippage_bps == 500
+    assert prepared.quoted_slippage_bps == 503
 
 
 def test_auto_seller_rejects_second_stage_quote_below_trigger() -> None:
@@ -984,8 +1078,8 @@ def test_owned_auto_sell_preflight_never_broadcasts_without_cost_basis(
                 "inAmount": "50000000",
                 "outAmount": "10000000",
                 "otherAmountThreshold": "9500000",
-                "priceImpact": 0.5,
-                "slippageBps": 500,
+                "priceImpact": 5.03,
+                "slippageBps": 503,
                 "transaction": "unsigned",
                 "requestId": "owned-preflight",
             }
@@ -1002,6 +1096,7 @@ def test_owned_auto_sell_preflight_never_broadcasts_without_cost_basis(
         jupiter_api_key="jupiter-key",
         auto_sell_enabled=True,
         auto_sell_portfolio_signals=True,
+        auto_trade_floor_percentages=True,
     )
 
     result = asyncio.run(
@@ -1012,7 +1107,10 @@ def test_owned_auto_sell_preflight_never_broadcasts_without_cost_basis(
     assert result["broadcast"] is False
     assert result["configured_fraction"] == 0.5
     assert result["input_tokens"] == 50
+    assert result["price_impact_pct"] == 5
+    assert result["quoted_price_impact_pct"] == 5.03
     assert result["slippage_bps"] == 500
+    assert result["quoted_slippage_bps"] == 503
     assert result["simulation_units_consumed"] == 321
     store.close()
 
