@@ -410,7 +410,9 @@ def test_pullback_zone_is_anchored_and_alerts_once() -> None:
         volume=15_000,
         change=15,
     )
-    book = RecommendationBook(pool_size=10, ttl_seconds=60)
+    book = RecommendationBook(
+        pool_size=10, ttl_seconds=60, entry_confirmation_polls=1
+    )
     candidate = book.add(initial, CoinIntelligence().score(initial), now=0)
 
     assert candidate is not None
@@ -504,6 +506,71 @@ def test_pullback_started_is_detected_and_alerted_once() -> None:
     assert "decision=PULLBACK STARTED" in output
 
 
+def test_entry_requires_three_consecutive_confirmations() -> None:
+    quote = market_quote(
+        liquidity=50_000,
+        market_cap=100_000,
+        buys=60,
+        sells=20,
+        volume=15_000,
+        change=5,
+    )
+    book = RecommendationBook(pool_size=10, ttl_seconds=60)
+    candidate = book.add(quote, CoinIntelligence().score(quote), now=0)
+
+    assert candidate is not None
+    assert candidate.decision == "ENTRY PENDING"
+    assert candidate.entry_confirmation_count == 1
+
+    book.update(quote, now=5)
+    assert candidate.decision == "ENTRY PENDING"
+    assert candidate.entry_confirmation_count == 2
+
+    book.update(quote, now=10)
+    assert candidate.decision == "BUY NOW"
+    assert candidate.entry_confirmation_count == 3
+    assert "confirmed for 3 consecutive checks" in candidate.decision_reason
+    assert candidate.planned_entry_price == pytest.approx(quote.price_sol)
+    assert candidate.planned_stop_price == pytest.approx(quote.price_sol * 0.8)
+    assert candidate.planned_target_price == pytest.approx(quote.price_sol * 1.4)
+    assert candidate.planned_reward_risk_ratio == pytest.approx(2)
+
+
+def test_falling_volume_blocks_entry_confirmation() -> None:
+    initial = market_quote(
+        liquidity=50_000,
+        market_cap=100_000,
+        buys=60,
+        sells=20,
+        volume=15_000,
+        change=15,
+    )
+    book = RecommendationBook(pool_size=10, ttl_seconds=60)
+    candidate = book.add(initial, CoinIntelligence().score(initial), now=0)
+    assert candidate is not None
+    assert candidate.decision == "WAIT FOR PULLBACK"
+
+    weak_pullback = MarketQuote(
+        mint=initial.mint,
+        symbol=initial.symbol,
+        price_sol=initial.price_sol * 0.95,
+        liquidity_usd=initial.liquidity_usd,
+        market_cap_usd=initial.market_cap_usd,
+        pair_address=initial.pair_address,
+        pair_created_at_ms=initial.pair_created_at_ms,
+        buys_m5=40,
+        sells_m5=20,
+        volume_m5_usd=5_000,
+        price_change_m5_pct=2,
+    )
+    book.update(weak_pullback, now=5)
+
+    assert candidate.volume_label == "FALLING"
+    assert candidate.decision == "WATCH"
+    assert candidate.decision_reason == "entry blocked: five-minute volume is falling"
+    assert candidate.entry_confirmation_count == 0
+
+
 def test_entry_decision_avoids_heavy_selloff() -> None:
     initial = market_quote(
         liquidity=50_000,
@@ -513,7 +580,9 @@ def test_entry_decision_avoids_heavy_selloff() -> None:
         volume=15_000,
         change=5,
     )
-    book = RecommendationBook(pool_size=10, ttl_seconds=60)
+    book = RecommendationBook(
+        pool_size=10, ttl_seconds=60, entry_confirmation_polls=1
+    )
     candidate = book.add(initial, CoinIntelligence().score(initial), now=0)
     assert candidate is not None
     assert candidate.decision == "BUY NOW"
@@ -556,7 +625,9 @@ def test_phone_notifications_deduplicate_and_respect_cooldown(
         volume=15_000,
         change=15,
     )
-    book = RecommendationBook(pool_size=10, ttl_seconds=60)
+    book = RecommendationBook(
+        pool_size=10, ttl_seconds=60, entry_confirmation_polls=1
+    )
     candidate = book.add(initial, CoinIntelligence().score(initial), now=0)
     assert candidate is not None
     assert candidate.decision == "WAIT FOR PULLBACK"

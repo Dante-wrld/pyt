@@ -130,6 +130,11 @@ class Settings:
     pullback_zone_min_pct: float = 4.0
     pullback_zone_max_pct: float = 6.0
     pullback_started_pct: float = 2.0
+    entry_confirmation_polls: int = 3
+    entry_min_signal_score: int = 65
+    entry_min_liquidity_retention_pct: float = 80.0
+    entry_require_nonfalling_volume: bool = True
+    min_entry_reward_risk_ratio: float = 2.0
     buy_now_min_ratio: float = 1.2
     avoid_entry_momentum_pct: float = -8.0
     avoid_entry_sell_pressure_ratio: float = 2.0
@@ -241,6 +246,17 @@ class Settings:
             pullback_zone_min_pct=_float("PULLBACK_ZONE_MIN_PCT", 4.0),
             pullback_zone_max_pct=_float("PULLBACK_ZONE_MAX_PCT", 6.0),
             pullback_started_pct=_float("PULLBACK_STARTED_PCT", 2.0),
+            entry_confirmation_polls=_int("ENTRY_CONFIRMATION_POLLS", 3),
+            entry_min_signal_score=_int("ENTRY_MIN_SIGNAL_SCORE", 65),
+            entry_min_liquidity_retention_pct=_float(
+                "ENTRY_MIN_LIQUIDITY_RETENTION_PCT", 80.0
+            ),
+            entry_require_nonfalling_volume=_bool(
+                "ENTRY_REQUIRE_NONFALLING_VOLUME", True
+            ),
+            min_entry_reward_risk_ratio=_float(
+                "MIN_ENTRY_REWARD_RISK_RATIO", 2.0
+            ),
             buy_now_min_ratio=_float("BUY_NOW_MIN_RATIO", 1.2),
             avoid_entry_momentum_pct=float(
                 os.getenv("AVOID_ENTRY_MOMENTUM_PCT", "-8")
@@ -372,6 +388,19 @@ class Settings:
                 "PULLBACK_STARTED_PCT must be positive and below "
                 "PULLBACK_ZONE_MIN_PCT"
             )
+        if self.entry_confirmation_polls < 2:
+            raise ValueError("ENTRY_CONFIRMATION_POLLS must be at least 2")
+        if not 0 <= self.entry_min_signal_score <= 100:
+            raise ValueError("ENTRY_MIN_SIGNAL_SCORE must be 0 through 100")
+        if not 0 < self.entry_min_liquidity_retention_pct <= 100:
+            raise ValueError(
+                "ENTRY_MIN_LIQUIDITY_RETENTION_PCT must be above 0 and at "
+                "most 100"
+            )
+        if self.min_entry_reward_risk_ratio < 1:
+            raise ValueError(
+                "MIN_ENTRY_REWARD_RISK_RATIO must be at least 1"
+            )
         if self.pullback_trigger_pct <= 0:
             raise ValueError("PULLBACK_TRIGGER_PCT must be positive")
         if self.buy_now_min_ratio <= 0:
@@ -385,6 +414,7 @@ class Settings:
         allowed_alerts = {
             "BUY NOW",
             "BUY ZONE",
+            "ENTRY PENDING",
             "PULLBACK STARTED",
             "WAIT FOR PULLBACK",
             "WATCH",

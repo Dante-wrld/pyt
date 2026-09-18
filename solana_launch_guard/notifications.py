@@ -91,7 +91,7 @@ class PushoverClient:
             data=json.dumps(payload).encode(),
             headers={
                 "Content-Type": "application/json",
-                "User-Agent": "solana-launch-guard/0.10",
+                "User-Agent": "solana-launch-guard/0.11",
             },
             method="POST",
         )
@@ -196,6 +196,7 @@ def format_candidate_notification(
     presentation = {
         "BUY NOW": ("🟢", "QUALIFIED ENTRY", "magic"),
         "BUY ZONE": ("🟢", "ENTRY ZONE REACHED", "cashregister"),
+        "ENTRY PENDING": ("🟡", "ENTRY CONFIRMING", "pushover"),
         "PULLBACK STARTED": ("🔵", "PULLBACK STARTED", "siren"),
         "WAIT FOR PULLBACK": ("🔵", "WAIT FOR PULLBACK", "pushover"),
         "WATCH": ("🟡", "WATCH", "pushover"),
@@ -209,6 +210,9 @@ def format_candidate_notification(
     lines = [
         f"TOKEN: {candidate.symbol} • {chain}",
         f"Score: {candidate.signal_score}/100",
+        "Entry confirmation: "
+        f"{candidate.entry_confirmation_count}/"
+        f"{candidate.entry_confirmation_required}",
         f"Current: {price_prefix}{candidate.current_price:.12g}",
     ]
     if candidate.entry_zone_low is not None and candidate.entry_zone_high is not None:
@@ -216,6 +220,14 @@ def format_candidate_notification(
             "Entry zone: "
             f"{price_prefix}{candidate.entry_zone_low:.12g}–"
             f"{price_prefix}{candidate.entry_zone_high:.12g}"
+        )
+    if candidate.planned_entry_price is not None:
+        lines.append(
+            "Paper risk plan: entry "
+            f"{price_prefix}{candidate.planned_entry_price:.12g}, stop "
+            f"{price_prefix}{(candidate.planned_stop_price or 0):.12g}, "
+            f"target {price_prefix}{(candidate.planned_target_price or 0):.12g} "
+            f"({candidate.planned_reward_risk_ratio:.2f}R)"
         )
     lines.extend(
         (

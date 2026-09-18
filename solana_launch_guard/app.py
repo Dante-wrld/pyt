@@ -88,6 +88,21 @@ class LaunchGuard:
             pullback_zone_min_pct=settings.pullback_zone_min_pct,
             pullback_zone_max_pct=settings.pullback_zone_max_pct,
             pullback_started_pct=settings.pullback_started_pct,
+            entry_confirmation_polls=settings.entry_confirmation_polls,
+            entry_min_signal_score=settings.entry_min_signal_score,
+            entry_min_liquidity_retention_pct=(
+                settings.entry_min_liquidity_retention_pct
+            ),
+            entry_require_nonfalling_volume=(
+                settings.entry_require_nonfalling_volume
+            ),
+            core_stop_loss_pct=settings.stop_loss_pct,
+            core_take_profit_pct=settings.take_profit_pct,
+            moonshot_stop_loss_pct=settings.moonshot_stop_loss_pct,
+            moonshot_take_profit_pct=settings.moonshot_take_profit_pct,
+            min_entry_reward_risk_ratio=(
+                settings.min_entry_reward_risk_ratio
+            ),
             buy_now_min_ratio=settings.buy_now_min_ratio,
             avoid_momentum_pct=settings.avoid_entry_momentum_pct,
             avoid_sell_pressure_ratio=(

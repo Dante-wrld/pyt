@@ -3,7 +3,7 @@
 A safety-first Python monitor and paper trader for Solana launches and
 multichain crypto tokens.
 
-Version 0.10 **never signs or submits transactions**. It can monitor Pump.fun
+Version 0.11 **never signs or submits transactions**. It can monitor Pump.fun
 new-token events, public Solana and EVM wallet activity, HyperCore holdings and
 fills, and token profiles on Ethereum, Base, BNB Smart Chain, BOB, Monad,
 Robinhood Chain, and HyperEVM. It applies configurable gates, ranks intelligence-qualified paper
@@ -19,9 +19,10 @@ candidates, opens simulated Solana positions, and records activity in SQLite.
 - Uses a CORE tier for stronger setups and a $5 MOONSHOT tier for higher-risk setups.
 - Limits position size, concurrent positions, and total exposure.
 - Prints a gold top-10 paper watchlist and continuously re-ranks it using bounded live price momentum.
-- Classifies qualified tokens as `BUY NOW`, `WAIT FOR PULLBACK`,
-  `PULLBACK STARTED`, `BUY ZONE`, `WATCH`, or `AVOID` and alerts when a
-  tracked pullback starts and when an anchored entry zone is reached.
+- Classifies qualified tokens as `ENTRY PENDING`, `BUY NOW`,
+  `WAIT FOR PULLBACK`, `PULLBACK STARTED`, `BUY ZONE`, `WATCH`, or `AVOID`.
+- Requires repeated entry confirmation and blocks entries when live score,
+  liquidity retention, or volume quality deteriorates.
 - Optionally sends explainable, state-change-deduplicated Pushover alerts to
   your phone without connecting to a trading account.
 - Discovers crypto-token profiles across seven EVM networks and prints the chain,
@@ -109,6 +110,11 @@ pytest
 | `PULLBACK_ZONE_MIN_PCT` | `4` | Shallow edge of the preferred pullback range |
 | `PULLBACK_ZONE_MAX_PCT` | `6` | Deep edge of the preferred pullback range |
 | `PULLBACK_STARTED_PCT` | `2` | Drop from the tracked peak that changes the state to `PULLBACK STARTED` |
+| `ENTRY_CONFIRMATION_POLLS` | `3` | Consecutive qualifying polls required before a final entry signal |
+| `ENTRY_MIN_SIGNAL_SCORE` | `65` | Minimum live score during entry confirmation |
+| `ENTRY_MIN_LIQUIDITY_RETENTION_PCT` | `80` | Minimum percentage of observed liquidity that must remain |
+| `ENTRY_REQUIRE_NONFALLING_VOLUME` | `true` | Block final entry signals while five-minute volume is falling |
+| `MIN_ENTRY_REWARD_RISK_RATIO` | `2` | Minimum paper objective relative to the configured stop distance |
 | `BUY_NOW_MIN_RATIO` | `1.2` | Minimum five-minute buyer/seller ratio for `BUY NOW` |
 | `AVOID_ENTRY_MOMENTUM_PCT` | `-8` | Falling five-minute move used by the adverse-entry gate |
 | `AVOID_ENTRY_SELL_PRESSURE_RATIO` | `2` | Seller/buyer pressure required with falling momentum for `AVOID` |
@@ -241,20 +247,22 @@ display when the main scanner process stops.
 The board is a read-only decision-support system:
 
 ```text
-DISCOVER → SCORE → WAIT → PULLBACK → BUY ZONE → ALERT → YOU BUY MANUALLY
+DISCOVER → SCORE → WAIT → CONFIRM → BUY ZONE → ALERT → YOU DECIDE
 ```
 
-Each qualified token receives one of six states:
+Each qualified token receives one of seven states:
 
-- `BUY NOW`: the setup passed the intelligence gates, recent price change is
-  non-negative, buyer flow is sufficient, and the move is not extended;
+- `ENTRY PENDING`: entry conditions are present but have not yet survived the
+  configured number of consecutive checks;
+- `BUY NOW`: an unextended setup passed all entry gates for three consecutive
+  checks by default;
 - `WAIT FOR PULLBACK`: price or five-minute momentum crossed the configured
   extension threshold, so Launch Guard anchors a preferred entry zone 4–6%
   below that price;
 - `PULLBACK STARTED`: price has fallen at least the configured amount from its
   tracked peak but remains above the anchored entry zone;
-- `BUY ZONE`: price entered the anchored zone with non-negative five-minute
-  movement and buyers at least matching sellers;
+- `BUY ZONE`: price entered the anchored zone and passed the score, liquidity,
+  volume, momentum, and buyer-flow gates for the required consecutive checks;
 - `WATCH`: confirmation is incomplete or price fell through the entry zone;
 - `AVOID`: liquidity fell below the safety floor, liquidity collapsed by more
   than 35%, or falling momentum coincides with heavy sell pressure.
@@ -264,6 +272,17 @@ from every lower quote. The separate Terminal displays current price, preferred
 entry range, remaining pullback, momentum, liquidity, volume direction, risk,
 and the reason for the current state. Transitions into `PULLBACK STARTED` and
 `BUY ZONE` produce one-time alerts for those transitions.
+
+The entry process is inspired by general risk-discipline and probabilistic
+thinking principles commonly discussed in trading literature. It is not a
+replica of, or strategy endorsed by, any particular author. Requiring repeated
+evidence reduces one-poll signal flips but cannot prevent a market from
+reversing after a confirmed entry.
+
+When an entry becomes confirmed, the board anchors a paper-only entry, stop,
+and first objective. The objective is never below the configured minimum
+reward-to-risk multiple. These levels are a consistency framework rather than
+a forecast; Launch Guard does not place the stop or target on any exchange.
 
 These states are deterministic heuristics based on incomplete market data—not
 predictions or instructions to trade. Launch Guard still never requests a

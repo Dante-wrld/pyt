@@ -47,6 +47,12 @@ class RecommendationCandidate:
     entry_zone_low: float | None = None
     entry_zone_high: float | None = None
     peak_price: float = 0.0
+    entry_confirmation_count: int = 0
+    entry_confirmation_signal: str = ""
+    entry_confirmation_required: int = 1
+    planned_entry_price: float | None = None
+    planned_stop_pct: float = 20.0
+    planned_target_pct: float = 40.0
 
     @property
     def rise_pct(self) -> float:
@@ -87,6 +93,7 @@ class RecommendationCandidate:
         return {
             "BUY ZONE": 4,
             "BUY NOW": 3,
+            "ENTRY PENDING": 2,
             "PULLBACK STARTED": 2,
             "WAIT FOR PULLBACK": 2,
             "WATCH": 1,
@@ -124,6 +131,24 @@ class RecommendationCandidate:
         if self.peak_price <= 0 or self.current_price >= self.peak_price:
             return 0.0
         return (self.peak_price - self.current_price) / self.peak_price * 100.0
+
+    @property
+    def planned_stop_price(self) -> float | None:
+        if self.planned_entry_price is None:
+            return None
+        return self.planned_entry_price * (1 - self.planned_stop_pct / 100.0)
+
+    @property
+    def planned_target_price(self) -> float | None:
+        if self.planned_entry_price is None:
+            return None
+        return self.planned_entry_price * (1 + self.planned_target_pct / 100.0)
+
+    @property
+    def planned_reward_risk_ratio(self) -> float:
+        if self.planned_stop_pct <= 0:
+            return 0.0
+        return self.planned_target_pct / self.planned_stop_pct
 
     @property
     def momentum_label(self) -> str:
@@ -180,6 +205,15 @@ class RecommendationBook:
         pullback_zone_min_pct: float = 4.0,
         pullback_zone_max_pct: float = 6.0,
         pullback_started_pct: float = 2.0,
+        entry_confirmation_polls: int = 3,
+        entry_min_signal_score: int = 65,
+        entry_min_liquidity_retention_pct: float = 80.0,
+        entry_require_nonfalling_volume: bool = True,
+        core_stop_loss_pct: float = 20.0,
+        core_take_profit_pct: float = 30.0,
+        moonshot_stop_loss_pct: float = 40.0,
+        moonshot_take_profit_pct: float = 5_000.0,
+        min_entry_reward_risk_ratio: float = 2.0,
         buy_now_min_ratio: float = 1.2,
         avoid_momentum_pct: float = -8.0,
         avoid_sell_pressure_ratio: float = 2.0,
@@ -191,6 +225,17 @@ class RecommendationBook:
         self.pullback_zone_min_pct = pullback_zone_min_pct
         self.pullback_zone_max_pct = pullback_zone_max_pct
         self.pullback_started_pct = pullback_started_pct
+        self.entry_confirmation_polls = entry_confirmation_polls
+        self.entry_min_signal_score = entry_min_signal_score
+        self.entry_min_liquidity_retention_pct = (
+            entry_min_liquidity_retention_pct
+        )
+        self.entry_require_nonfalling_volume = entry_require_nonfalling_volume
+        self.core_stop_loss_pct = core_stop_loss_pct
+        self.core_take_profit_pct = core_take_profit_pct
+        self.moonshot_stop_loss_pct = moonshot_stop_loss_pct
+        self.moonshot_take_profit_pct = moonshot_take_profit_pct
+        self.min_entry_reward_risk_ratio = min_entry_reward_risk_ratio
         self.buy_now_min_ratio = buy_now_min_ratio
         self.avoid_momentum_pct = avoid_momentum_pct
         self.avoid_sell_pressure_ratio = avoid_sell_pressure_ratio
@@ -215,6 +260,16 @@ class RecommendationBook:
             self.update(quote, now=timestamp)
             return existing
 
+        stop_pct = (
+            self.moonshot_stop_loss_pct
+            if result.tier == "MOONSHOT"
+            else self.core_stop_loss_pct
+        )
+        configured_target_pct = (
+            self.moonshot_take_profit_pct
+            if result.tier == "MOONSHOT"
+            else self.core_take_profit_pct
+        )
         candidate = RecommendationCandidate(
             mint=quote.mint,
             symbol=quote.symbol,
@@ -235,6 +290,12 @@ class RecommendationBook:
             observed_at=timestamp,
             updated_at=timestamp,
             peak_price=price,
+            entry_confirmation_required=self.entry_confirmation_polls,
+            planned_stop_pct=stop_pct,
+            planned_target_pct=max(
+                configured_target_pct,
+                stop_pct * self.min_entry_reward_risk_ratio,
+            ),
         )
         self._refresh_decision(candidate)
         self.candidates[quote.recommendation_key] = candidate
@@ -339,6 +400,80 @@ class RecommendationBook:
         )
         del self.candidates[lowest.key]
 
+    @staticmethod
+    def _reset_entry_confirmation(candidate: RecommendationCandidate) -> None:
+        candidate.entry_confirmation_count = 0
+        candidate.entry_confirmation_signal = ""
+
+    def _set_non_entry(
+        self,
+        candidate: RecommendationCandidate,
+        decision: str,
+        reason: str,
+    ) -> None:
+        self._reset_entry_confirmation(candidate)
+        candidate.decision = decision
+        candidate.decision_reason = reason
+
+    def _entry_block_reason(
+        self, candidate: RecommendationCandidate
+    ) -> str | None:
+        if candidate.signal_score < self.entry_min_signal_score:
+            return (
+                f"signal score {candidate.signal_score} is below entry minimum "
+                f"{self.entry_min_signal_score}"
+            )
+        initial_liquidity = candidate.initial_liquidity_usd or 0.0
+        current_liquidity = candidate.liquidity_usd or 0.0
+        if initial_liquidity > 0:
+            retained_pct = current_liquidity / initial_liquidity * 100.0
+            if retained_pct < self.entry_min_liquidity_retention_pct:
+                return (
+                    f"liquidity retention {retained_pct:.1f}% is below entry "
+                    f"minimum {self.entry_min_liquidity_retention_pct:.1f}%"
+                )
+        if (
+            self.entry_require_nonfalling_volume
+            and candidate.volume_label == "FALLING"
+        ):
+            return "five-minute volume is falling"
+        return None
+
+    def _propose_entry(
+        self,
+        candidate: RecommendationCandidate,
+        decision: str,
+        reason: str,
+    ) -> None:
+        blocked = self._entry_block_reason(candidate)
+        if blocked is not None:
+            self._set_non_entry(
+                candidate,
+                "WATCH",
+                f"entry blocked: {blocked}",
+            )
+            return
+        if candidate.entry_confirmation_signal == decision:
+            candidate.entry_confirmation_count += 1
+        else:
+            candidate.entry_confirmation_signal = decision
+            candidate.entry_confirmation_count = 1
+        if candidate.entry_confirmation_count < self.entry_confirmation_polls:
+            candidate.decision = "ENTRY PENDING"
+            candidate.decision_reason = (
+                f"{decision} confirmation "
+                f"{candidate.entry_confirmation_count}/"
+                f"{self.entry_confirmation_polls}: {reason}"
+            )
+            return
+        candidate.decision = decision
+        if candidate.entry_confirmation_count == self.entry_confirmation_polls:
+            candidate.planned_entry_price = candidate.current_price
+        candidate.decision_reason = (
+            f"confirmed for {candidate.entry_confirmation_count} consecutive "
+            f"checks: {reason}"
+        )
+
     def _refresh_decision(self, candidate: RecommendationCandidate) -> None:
         liquidity = candidate.liquidity_usd or 0.0
         initial_liquidity = candidate.initial_liquidity_usd or liquidity
@@ -354,13 +489,13 @@ class RecommendationBook:
             initial_liquidity > 0 and liquidity < initial_liquidity * 0.65
         )
         if liquidity_failure or liquidity_collapse or severe_selloff:
-            candidate.decision = "AVOID"
             if liquidity_failure:
-                candidate.decision_reason = "liquidity below the safety floor"
+                reason = "liquidity below the safety floor"
             elif liquidity_collapse:
-                candidate.decision_reason = "liquidity fell more than 35%"
+                reason = "liquidity fell more than 35%"
             else:
-                candidate.decision_reason = "falling price with heavy selling"
+                reason = "falling price with heavy selling"
+            self._set_non_entry(candidate, "AVOID", reason)
             return
 
         zone_low = candidate.entry_zone_low
@@ -371,33 +506,40 @@ class RecommendationBook:
                     candidate.pullback_from_peak_pct
                     >= self.pullback_started_pct
                 ):
-                    candidate.decision = "PULLBACK STARTED"
-                    candidate.decision_reason = (
+                    self._set_non_entry(
+                        candidate,
+                        "PULLBACK STARTED",
                         "price is retreating from its tracked peak toward the "
-                        "entry zone"
+                        "entry zone",
                     )
                 else:
-                    candidate.decision = "WAIT FOR PULLBACK"
-                    candidate.decision_reason = (
-                        "price remains above anchored entry zone"
+                    self._set_non_entry(
+                        candidate,
+                        "WAIT FOR PULLBACK",
+                        "price remains above anchored entry zone",
                     )
                 return
             if zone_low <= candidate.current_price <= zone_high:
                 if (
                     change is not None
                     and change >= 0
-                    and candidate.buy_sell_ratio >= 1.0
+                    and candidate.buy_sell_ratio >= self.buy_now_min_ratio
                 ):
-                    candidate.decision = "BUY ZONE"
-                    candidate.decision_reason = (
-                        "price entered the zone with recovery confirmation"
+                    self._propose_entry(
+                        candidate,
+                        "BUY ZONE",
+                        "price entered the zone with recovery confirmation",
                     )
                 else:
-                    candidate.decision = "WATCH"
-                    candidate.decision_reason = "in range, but recovery is unconfirmed"
+                    self._set_non_entry(
+                        candidate,
+                        "WATCH",
+                        "in range, but recovery is unconfirmed",
+                    )
                 return
-            candidate.decision = "WATCH"
-            candidate.decision_reason = "price fell through the entry zone"
+            self._set_non_entry(
+                candidate, "WATCH", "price fell through the entry zone"
+            )
             return
 
         overextended = (
@@ -417,8 +559,11 @@ class RecommendationBook:
             candidate.peak_price = max(
                 candidate.peak_price, candidate.current_price
             )
-            candidate.decision = "WAIT FOR PULLBACK"
-            candidate.decision_reason = "momentum is strong but price is extended"
+            self._set_non_entry(
+                candidate,
+                "WAIT FOR PULLBACK",
+                "momentum is strong but price is extended",
+            )
             return
 
         if (
@@ -426,12 +571,16 @@ class RecommendationBook:
             and change >= 0
             and candidate.buy_sell_ratio >= self.buy_now_min_ratio
         ):
-            candidate.decision = "BUY NOW"
-            candidate.decision_reason = "qualified setup without an extended move"
+            self._propose_entry(
+                candidate,
+                "BUY NOW",
+                "qualified setup without an extended move",
+            )
             return
 
-        candidate.decision = "WATCH"
-        candidate.decision_reason = "waiting for price and buyer confirmation"
+        self._set_non_entry(
+            candidate, "WATCH", "waiting for price and buyer confirmation"
+        )
 
 
 def format_recommendations(
@@ -464,14 +613,26 @@ def format_recommendations(
             f"price={price_prefix}{item.current_price:.12g} "
             f"{address_label}={item.mint}"
         )
+        lines.append(
+            f"    confirmation={item.entry_confirmation_count}/"
+            f"{item.entry_confirmation_required} "
+            f"reason={item.decision_reason}"
+        )
+        if item.planned_entry_price is not None:
+            lines.append(
+                f"    paper plan entry={price_prefix}"
+                f"{item.planned_entry_price:.12g} stop={price_prefix}"
+                f"{(item.planned_stop_price or 0):.12g} target={price_prefix}"
+                f"{(item.planned_target_price or 0):.12g} "
+                f"reward/risk={item.planned_reward_risk_ratio:.2f}"
+            )
         if item.entry_zone_low is not None and item.entry_zone_high is not None:
             pullback = item.pullback_needed_pct or (0.0, 0.0)
             lines.append(
                 f"    entry={price_prefix}{item.entry_zone_low:.12g}-"
                 f"{price_prefix}{item.entry_zone_high:.12g} "
                 f"from_peak={item.pullback_from_peak_pct:.1f}% "
-                f"pullback={pullback[0]:.1f}%-{pullback[1]:.1f}% "
-                f"reason={item.decision_reason}"
+                f"pullback={pullback[0]:.1f}%-{pullback[1]:.1f}%"
             )
         if item.fomo_url:
             lines.append(f"    fomo={item.fomo_url}")
@@ -501,6 +662,16 @@ def build_snapshot(
                 "entry_zone_high": candidate.entry_zone_high,
                 "decision": candidate.decision,
                 "pullback_from_peak_pct": candidate.pullback_from_peak_pct,
+                "entry_confirmation_count": candidate.entry_confirmation_count,
+                "entry_confirmation_required": (
+                    candidate.entry_confirmation_required
+                ),
+                "planned_entry_price": candidate.planned_entry_price,
+                "planned_stop_price": candidate.planned_stop_price,
+                "planned_target_price": candidate.planned_target_price,
+                "planned_reward_risk_ratio": (
+                    candidate.planned_reward_risk_ratio
+                ),
             }
             for candidate in (alerts or [])
         ],
@@ -527,6 +698,16 @@ def build_snapshot(
                 "liquidity_label": candidate.liquidity_label,
                 "volume_label": candidate.volume_label,
                 "risk_label": candidate.risk_label,
+                "entry_confirmation_count": candidate.entry_confirmation_count,
+                "entry_confirmation_required": (
+                    candidate.entry_confirmation_required
+                ),
+                "planned_entry_price": candidate.planned_entry_price,
+                "planned_stop_price": candidate.planned_stop_price,
+                "planned_target_price": candidate.planned_target_price,
+                "planned_reward_risk_ratio": (
+                    candidate.planned_reward_risk_ratio
+                ),
                 "fomo_url": candidate.fomo_url,
                 "market_url": candidate.market_url,
             }
@@ -579,7 +760,7 @@ def format_dashboard(snapshot: dict[str, Any], *, color: bool = True) -> str:
     lines = [
         f"{bold}LAUNCH GUARD — READ-ONLY DECISION SUPPORT{reset}",
         f"Status: {status} | Updated: {updated} | Pending scans: {pending}",
-        "DISCOVER → SCORE → WAIT / BUY ZONE → ALERT → YOU BUY MANUALLY",
+        "DISCOVER → SCORE → CONFIRM → BUY ZONE → ALERT → YOU DECIDE",
         "Model signals only; no profit guarantee and no automatic purchase.",
         "",
     ]
@@ -633,6 +814,11 @@ def format_dashboard(snapshot: dict[str, Any], *, color: bool = True) -> str:
                 f"| risk={(raw.get('risk_label') or 'HIGH')!s}{reset}"
             ),
             (
+                f"{prefix}    entry confirmation="
+                f"{int(raw.get('entry_confirmation_count') or 0)}/"
+                f"{int(raw.get('entry_confirmation_required') or 1)}{reset}"
+            ),
+            (
                 f"{prefix}    rise={float(raw.get('rise_pct') or 0):+8.2f}% "
                 f"m5={float(raw.get('price_change_m5_pct') or 0):+8.2f}% "
                 f"liquidity={liquidity} "
@@ -653,6 +839,25 @@ def format_dashboard(snapshot: dict[str, Any], *, color: bool = True) -> str:
                 f"{(raw.get('mint') or '')!s}{reset}"
             ),
         ]
+        planned_entry = raw.get("planned_entry_price")
+        planned_stop = raw.get("planned_stop_price")
+        planned_target = raw.get("planned_target_price")
+        if (
+            planned_entry is not None
+            and planned_stop is not None
+            and planned_target is not None
+        ):
+            detail_lines.insert(
+                2,
+                (
+                    f"{prefix}    paper plan: entry={price_prefix}"
+                    f"{float(planned_entry):.12g} stop={price_prefix}"
+                    f"{float(planned_stop):.12g} target={price_prefix}"
+                    f"{float(planned_target):.12g} | reward/risk="
+                    f"{float(raw.get('planned_reward_risk_ratio') or 0):.2f}"
+                    f"{reset}"
+                ),
+            )
         zone_low = raw.get("entry_zone_low")
         zone_high = raw.get("entry_zone_high")
         if zone_low is not None and zone_high is not None:
