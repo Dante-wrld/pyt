@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import io
+import sqlite3
 import time
+import urllib.error
 from dataclasses import replace
 from pathlib import Path
 
@@ -15,6 +18,7 @@ from solana_launch_guard.app import (
     preflight_auto_buy,
     preflight_auto_sell,
     preflight_owned_auto_sell,
+    reconcile_auto_sell_review,
 )
 from solana_launch_guard.config import Settings
 from solana_launch_guard.core import (
@@ -27,6 +31,8 @@ from solana_launch_guard.core import (
 from solana_launch_guard.execution import (
     USDC_MINT,
     BuyIntent,
+    JupiterExecutionError,
+    JupiterRequestError,
     JupiterSwapClient,
     PortfolioSignalExitPlanner,
     PreflightReceipt,
@@ -608,6 +614,100 @@ def test_jupiter_preflight_order_excludes_rfq_router(
     assert "excludeRouters=jupiterz" in requested_url
 
 
+def test_jupiter_http_error_preserves_only_sanitized_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    signature = "5" * 64
+    signed_transaction = "A" * 500
+    body = (
+        "{"
+        '"status":"Failed",'
+        '"code":-2,'
+        '"error":"invalid signed transaction private-api-key",'
+        f'"signature":"{signature}",'
+        f'"signedTransaction":"{signed_transaction}"'
+        "}"
+    ).encode()
+
+    def reject(*_args: object, **_values: object) -> object:
+        raise urllib.error.HTTPError(
+            "https://api.jup.ag/swap/v2/execute",
+            400,
+            "Bad Request",
+            None,
+            io.BytesIO(body),
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", reject)
+    client = JupiterSwapClient(api_key="private-api-key")
+
+    with pytest.raises(JupiterRequestError) as caught:
+        client._request_json(
+            "https://api.jup.ag/swap/v2/execute",
+            {
+                "signedTransaction": signed_transaction,
+                "requestId": "request-1",
+            },
+        )
+
+    assert caught.value.http_status == 400
+    assert caught.value.code == -2
+    assert caught.value.signature == signature
+    assert "invalid signed transaction" in str(caught.value)
+    assert "[redacted-api-key]" in str(caught.value)
+    assert signed_transaction not in str(caught.value)
+    assert "private-api-key" not in str(caught.value)
+
+
+def test_auto_seller_failure_preserves_jupiter_signature() -> None:
+    class FakeSigner:
+        public_key = "Wallet111"
+
+        def sign(self, transaction_b64: str) -> str:
+            assert transaction_b64 == "unsigned"
+            return "signed"
+
+    class FakeClient:
+        async def execute(self, **_values: object) -> dict[str, object]:
+            return {
+                "status": "Failed",
+                "code": -1,
+                "signature": "failed-signature",
+                "error": "request expired",
+            }
+
+    intent = SellIntent(
+        mint="MintOwned111",
+        symbol="OWN",
+        stage=12,
+        event_key="event-1",
+        amount_raw=100,
+        balance_raw=100,
+        decimals=0,
+        trigger_multiple=0,
+        current_multiple=0,
+        target_output_raw=None,
+        reason="exit warning",
+    )
+    prepared = PreparedSell(
+        intent=intent,
+        transaction="unsigned",
+        request_id="request-1",
+        input_amount_raw=100,
+        expected_output_raw=10,
+        minimum_output_raw=9,
+        price_impact_pct=1,
+        last_valid_block_height=123,
+    )
+    seller = SolanaAutoSeller(client=FakeClient(), signer=FakeSigner())
+
+    with pytest.raises(JupiterExecutionError) as caught:
+        asyncio.run(seller.execute(prepared))
+
+    assert caught.value.code == -1
+    assert caught.value.signature == "failed-signature"
+
+
 def test_auto_buyer_prepares_executes_and_uses_usdc() -> None:
     class FakeSigner:
         public_key = "Wallet111"
@@ -1015,6 +1115,231 @@ def test_auto_sell_batch_freezes_after_uncertain_execution(
     assert batch["error"] == "confirmation unavailable"
     assert execution["status"] == "REVIEW"
     assert execution["error"] == "confirmation unavailable"
+    store.close()
+
+
+def test_auto_sell_review_requires_balance_match_then_pauses_before_resume(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(str(tmp_path / "sell-review-resolution.db"))
+    batch_key = "solana:MintOwned111:portfolio-signal:exit-warning"
+    batch_values = {
+        "batch_key": batch_key,
+        "chain": "solana",
+        "token_address": "MintOwned111",
+        "symbol": "OWN",
+        "stage": 12,
+        "target_raw": 100,
+        "full_exit": True,
+    }
+    store.load_or_create_auto_sell_batch(**batch_values)
+    event_key = f"{batch_key}:chunk:0"
+    assert store.begin_auto_sell_execution(
+        event_key=event_key,
+        chain="solana",
+        token_address="MintOwned111",
+        symbol="OWN",
+        stage=12,
+        requested_raw=100,
+        expected_output_raw=4_000_000,
+        balance_before_raw=100,
+    )
+    store.freeze_auto_sell_chunk(
+        batch_key=batch_key,
+        event_key=event_key,
+        error="HTTP 400: request expired",
+    )
+
+    reviews = store.auto_sell_review_status()
+    assert reviews["batches"][0]["status"] == "REVIEW"
+    assert reviews["executions"][0]["balance_before_raw"] == 100
+    with pytest.raises(ValueError, match="explicit no-transaction"):
+        store.resolve_auto_sell_review(
+            batch_key=batch_key,
+            confirmed_no_transaction=False,
+            verified_balance_raw=100,
+        )
+    with pytest.raises(ValueError, match="current on-chain balance differs"):
+        store.resolve_auto_sell_review(
+            batch_key=batch_key,
+            confirmed_no_transaction=True,
+            verified_balance_raw=99,
+        )
+
+    batch = store.resolve_auto_sell_review(
+        batch_key=batch_key,
+        confirmed_no_transaction=True,
+        verified_balance_raw=100,
+    )
+    assert batch["status"] == "PAUSED"
+    assert batch["next_chunk_index"] == 1
+    execution = store.load_auto_sell_review(batch_key)["execution"]
+    assert execution["status"] == "CLEARED_NO_TRANSACTION"
+    with pytest.raises(ValueError, match="stopped-monitor"):
+        store.resume_auto_sell_batch(
+            batch_key=batch_key, confirmed_monitor_stopped=False
+        )
+
+    batch = store.resume_auto_sell_batch(
+        batch_key=batch_key, confirmed_monitor_stopped=True
+    )
+    assert batch["status"] == "ACTIVE"
+    assert batch["next_chunk_index"] == 1
+    assert store.begin_auto_sell_execution(
+        event_key=f"{batch_key}:chunk:1",
+        chain="solana",
+        token_address="MintOwned111",
+        symbol="OWN",
+        stage=12,
+        requested_raw=100,
+        expected_output_raw=4_000_000,
+        balance_before_raw=100,
+    )
+    store.close()
+
+
+def test_auto_sell_review_with_signature_cannot_be_resolved(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(str(tmp_path / "sell-review-signature.db"))
+    batch_key = "solana:MintOwned111:portfolio-signal:exit-warning"
+    store.load_or_create_auto_sell_batch(
+        batch_key=batch_key,
+        chain="solana",
+        token_address="MintOwned111",
+        symbol="OWN",
+        stage=12,
+        target_raw=100,
+        full_exit=True,
+    )
+    event_key = f"{batch_key}:chunk:0"
+    assert store.begin_auto_sell_execution(
+        event_key=event_key,
+        chain="solana",
+        token_address="MintOwned111",
+        symbol="OWN",
+        stage=12,
+        requested_raw=100,
+        expected_output_raw=4_000_000,
+        balance_before_raw=100,
+    )
+    store.freeze_auto_sell_chunk(
+        batch_key=batch_key,
+        event_key=event_key,
+        error="failed after submission",
+        signature="possible-signature",
+    )
+
+    with pytest.raises(ValueError, match="inspect it on-chain"):
+        store.resolve_auto_sell_review(
+            batch_key=batch_key,
+            confirmed_no_transaction=True,
+            verified_balance_raw=100,
+        )
+    store.close()
+
+
+def test_auto_sell_review_reconciliation_supports_legacy_full_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wallet = str(Keypair().pubkey())
+    store = SQLiteStore(str(tmp_path / "sell-review-reconcile.db"))
+    batch_key = "solana:MintOwned111:portfolio-signal:exit-warning"
+    store.load_or_create_auto_sell_batch(
+        batch_key=batch_key,
+        chain="solana",
+        token_address="MintOwned111",
+        symbol="OWN",
+        stage=12,
+        target_raw=105_187_579_353,
+        full_exit=True,
+    )
+    event_key = f"{batch_key}:chunk:0"
+    assert store.begin_auto_sell_execution(
+        event_key=event_key,
+        chain="solana",
+        token_address="MintOwned111",
+        symbol="OWN",
+        stage=12,
+        requested_raw=105_187_579_353,
+        expected_output_raw=1_000_000,
+    )
+    store.freeze_auto_sell_chunk(
+        batch_key=batch_key,
+        event_key=event_key,
+        error="Jupiter request was rejected (HTTP 400)",
+    )
+
+    class FakeRpc:
+        def __init__(self, _url: str) -> None:
+            pass
+
+        async def token_balance(
+            self, owner: str, mint: str
+        ) -> SolanaTokenHolding:
+            assert owner == wallet
+            assert mint == "MintOwned111"
+            return SolanaTokenHolding(
+                mint=mint,
+                amount=105_187.579353,
+                raw_amount=105_187_579_353,
+                decimals=6,
+            )
+
+    monkeypatch.setattr("solana_launch_guard.app.SolanaRpc", FakeRpc)
+    config = settings(
+        tmp_path / "sell-review-reconcile.db",
+        solana_wallet_address=wallet,
+        auto_sell_enabled=True,
+        auto_sell_live=False,
+        auto_buy_live=False,
+    )
+
+    result = asyncio.run(
+        reconcile_auto_sell_review(config, store, batch_key)
+    )
+
+    assert result["result"] == "BALANCE_UNCHANGED"
+    assert result["balance_before_source"] == "inferred_full_exit_remainder"
+    assert result["balance_unchanged"] is True
+    assert result["eligible_to_resolve"] is True
+    assert result["broadcast"] is False
+    store.close()
+
+
+def test_auto_sell_review_schema_migrates_from_v019(tmp_path: Path) -> None:
+    database_path = tmp_path / "v019-review.db"
+    connection = sqlite3.connect(database_path)
+    connection.execute(
+        """
+        CREATE TABLE auto_sell_executions (
+            event_key TEXT PRIMARY KEY,
+            chain TEXT NOT NULL,
+            token_address TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            stage INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            requested_raw INTEGER NOT NULL,
+            expected_output_raw INTEGER,
+            signature TEXT,
+            error TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    store = SQLiteStore(str(database_path))
+    columns = {
+        str(row["name"])
+        for row in store.connection.execute(
+            "PRAGMA table_info(auto_sell_executions)"
+        ).fetchall()
+    }
+
+    assert "balance_before_raw" in columns
     store.close()
 
 
