@@ -1,12 +1,15 @@
 .env
 .venv/
+.testvenv/
 __pycache__/
 *.py[cod]
 *.db
 launch_guard_portfolio.json
 launch_guard_recommendations.json
 .pytest_cache/
+.ruff_cache/
 .coverage
 dist/
 build/
 *.egg-info/
+upload/

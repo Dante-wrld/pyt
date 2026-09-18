@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import logging
+import math
 import os
 import shlex
 import ssl
@@ -11,6 +12,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Mapping
+from dataclasses import replace
 from typing import Any
 
 import certifi
@@ -986,9 +988,58 @@ class LaunchGuard:
                 self.auto_sell_dry_run_seen.add(intent.event_key)
             return
 
+        batch_key: str | None = None
+        batch_full_exit = False
+        if (
+            source == "portfolio signal"
+            and self.settings.auto_sell_adaptive_chunks
+        ):
+            batch_key = intent.event_key
+            batch = self.store.load_or_create_auto_sell_batch(
+                batch_key=batch_key,
+                chain="solana",
+                token_address=intent.mint,
+                symbol=intent.symbol,
+                stage=intent.stage,
+                target_raw=intent.amount_raw,
+                full_exit=intent.amount_raw >= intent.balance_raw,
+            )
+            if batch["status"] != "ACTIVE":
+                return
+            remaining_raw = int(batch["target_raw"]) - int(batch["sold_raw"])
+            requested_raw = min(remaining_raw, balance.raw_amount)
+            if requested_raw <= 0:
+                return
+            chunk_index = int(batch["next_chunk_index"])
+            batch_full_exit = bool(batch["full_exit"])
+            intent = replace(
+                intent,
+                event_key=f"{batch_key}:chunk:{chunk_index}",
+                amount_raw=requested_raw,
+                balance_raw=balance.raw_amount,
+                reason=(
+                    f"{intent.reason}; adaptive chunk {chunk_index + 1}, "
+                    f"remaining target {remaining_raw} raw units"
+                ),
+            )
+
         rpc = SolanaRpc(self.settings.solana_rpc_http_url)
         try:
-            simulation = await self.auto_seller.preflight(intent, rpc)
+            if batch_key is not None:
+                minimum_raw = math.ceil(
+                    balance.raw_amount
+                    * self.settings.auto_sell_min_chunk_fraction
+                )
+                simulation = await self.auto_seller.preflight_adaptive(
+                    intent,
+                    rpc,
+                    minimum_amount_raw=minimum_raw,
+                    max_attempts=(
+                        self.settings.auto_sell_max_chunk_attempts
+                    ),
+                )
+            else:
+                simulation = await self.auto_seller.preflight(intent, rpc)
             prepared = simulation.prepared
         except (ConnectionError, RuntimeError, ValueError) as exc:
             LOGGER.warning(
@@ -1012,9 +1063,16 @@ class LaunchGuard:
         try:
             receipt = await self.auto_seller.execute(prepared)
         except (ConnectionError, RuntimeError, ValueError) as exc:
-            self.store.freeze_auto_sell_execution(
-                event_key=intent.event_key, error=str(exc)
-            )
+            if batch_key is not None:
+                self.store.freeze_auto_sell_chunk(
+                    batch_key=batch_key,
+                    event_key=intent.event_key,
+                    error=str(exc),
+                )
+            else:
+                self.store.freeze_auto_sell_execution(
+                    event_key=intent.event_key, error=str(exc)
+                )
             LOGGER.error(
                 "AUTO-SELL FROZEN FOR REVIEW %s stage=%d (%s)",
                 intent.symbol,
@@ -1040,14 +1098,31 @@ class LaunchGuard:
                     )
             return
 
-        self.store.complete_auto_sell_execution(
-            event_key=intent.event_key,
-            signature=receipt.signature,
-            next_stage=intent.stage + 1,
-        )
+        batch_complete = False
+        if batch_key is not None:
+            batch_complete = self.store.complete_auto_sell_chunk(
+                batch_key=batch_key,
+                event_key=intent.event_key,
+                signature=receipt.signature,
+                sold_raw=receipt.input_amount_raw,
+            )
+        else:
+            self.store.complete_auto_sell_execution(
+                event_key=intent.event_key,
+                signature=receipt.signature,
+                next_stage=intent.stage + 1,
+            )
         managed_complete = (
             (source == "profit ladder" and intent.stage + 1 >= 2)
-            or receipt.input_amount_raw >= intent.balance_raw
+            or (
+                batch_key is not None
+                and batch_complete
+                and batch_full_exit
+            )
+            or (
+                batch_key is None
+                and receipt.input_amount_raw >= intent.balance_raw
+            )
         )
         reinvestment = self.store.record_auto_buy_sale(
             token_address=intent.mint,
@@ -1057,9 +1132,13 @@ class LaunchGuard:
             managed_complete=managed_complete,
         )
         LOGGER.warning(
-            "AUTO-SELL CONFIRMED %s source=%s signature=%s",
+            "AUTO-SELL CONFIRMED %s source=%s input_raw=%d "
+            "adaptive_attempts=%d batch_complete=%s signature=%s",
             intent.symbol,
             source,
+            receipt.input_amount_raw,
+            simulation.adaptive_attempts,
+            batch_complete,
             receipt.signature,
         )
         if self.push_client is not None:
@@ -1915,6 +1994,8 @@ async def preflight_auto_sell(
         "mode": prepared.mode,
         "slippage_bps": prepared.slippage_bps,
         "quoted_slippage_bps": prepared.quoted_slippage_bps,
+        "reported_slippage_bps": prepared.reported_slippage_bps,
+        "threshold_slippage_bps": prepared.threshold_slippage_bps,
         "fee_bps": prepared.fee_bps,
         "simulation_units_consumed": receipt.units_consumed,
         "simulation_log_count": receipt.log_count,
@@ -1974,7 +2055,17 @@ async def preflight_owned_auto_sell(
         max_slippage_bps=settings.auto_sell_max_slippage_bps,
         floor_percentages=settings.auto_trade_floor_percentages,
     )
-    receipt = await seller.preflight(intent, rpc)
+    if settings.auto_sell_adaptive_chunks:
+        receipt = await seller.preflight_adaptive(
+            intent,
+            rpc,
+            minimum_amount_raw=math.ceil(
+                balance.raw_amount * settings.auto_sell_min_chunk_fraction
+            ),
+            max_attempts=settings.auto_sell_max_chunk_attempts,
+        )
+    else:
+        receipt = await seller.preflight(intent, rpc)
     prepared = receipt.prepared
     return {
         "result": "PASSED",
@@ -1984,6 +2075,9 @@ async def preflight_owned_auto_sell(
         "symbol": symbol,
         "representative_rule": "TAKE PARTIAL",
         "configured_fraction": settings.auto_sell_take_partial_fraction,
+        "selected_fraction": prepared.input_amount_raw / balance.raw_amount,
+        "adaptive_attempts": receipt.adaptive_attempts,
+        "adaptive_rejections": list(receipt.adaptive_rejections),
         "input_amount_raw": prepared.input_amount_raw,
         "input_tokens": prepared.input_amount_raw / (10**balance.decimals),
         "expected_output_usdc": prepared.expected_output_raw / 1_000_000,
@@ -1994,6 +2088,8 @@ async def preflight_owned_auto_sell(
         "mode": prepared.mode,
         "slippage_bps": prepared.slippage_bps,
         "quoted_slippage_bps": prepared.quoted_slippage_bps,
+        "reported_slippage_bps": prepared.reported_slippage_bps,
+        "threshold_slippage_bps": prepared.threshold_slippage_bps,
         "fee_bps": prepared.fee_bps,
         "simulation_units_consumed": receipt.units_consumed,
         "simulation_log_count": receipt.log_count,
@@ -2068,6 +2164,8 @@ async def preflight_auto_buy(
         "mode": prepared.mode,
         "slippage_bps": prepared.slippage_bps,
         "quoted_slippage_bps": prepared.quoted_slippage_bps,
+        "reported_slippage_bps": prepared.reported_slippage_bps,
+        "threshold_slippage_bps": prepared.threshold_slippage_bps,
         "fee_bps": prepared.fee_bps,
         "simulation_units_consumed": receipt.units_consumed,
         "simulation_log_count": receipt.log_count,

@@ -180,6 +180,9 @@ class Settings:
     auto_sell_second_stage_fraction: float = 0.5
     auto_sell_max_price_impact_pct: float = 5.0
     auto_sell_max_slippage_bps: int = 500
+    auto_sell_adaptive_chunks: bool = False
+    auto_sell_min_chunk_fraction: float = 0.01
+    auto_sell_max_chunk_attempts: int = 8
     auto_sell_portfolio_signals: bool = False
     auto_sell_take_partial_fraction: float = 0.5
     auto_sell_protect_profit_fraction: float = 1.0
@@ -372,6 +375,15 @@ class Settings:
             auto_sell_max_slippage_bps=_int(
                 "AUTO_SELL_MAX_SLIPPAGE_BPS", 500
             ),
+            auto_sell_adaptive_chunks=_bool(
+                "AUTO_SELL_ADAPTIVE_CHUNKS", False
+            ),
+            auto_sell_min_chunk_fraction=_float(
+                "AUTO_SELL_MIN_CHUNK_FRACTION", 0.01
+            ),
+            auto_sell_max_chunk_attempts=_int(
+                "AUTO_SELL_MAX_CHUNK_ATTEMPTS", 8
+            ),
             auto_sell_portfolio_signals=_bool(
                 "AUTO_SELL_PORTFOLIO_SIGNALS", False
             ),
@@ -516,6 +528,14 @@ class Settings:
         if not 1 <= self.auto_sell_max_slippage_bps <= 2_000:
             raise ValueError(
                 "AUTO_SELL_MAX_SLIPPAGE_BPS must be from 1 through 2000"
+            )
+        if not 0 < self.auto_sell_min_chunk_fraction <= 0.25:
+            raise ValueError(
+                "AUTO_SELL_MIN_CHUNK_FRACTION must be above 0 and at most 0.25"
+            )
+        if not 1 <= self.auto_sell_max_chunk_attempts <= 12:
+            raise ValueError(
+                "AUTO_SELL_MAX_CHUNK_ATTEMPTS must be from 1 through 12"
             )
         for name, value in (
             ("AUTO_SELL_TAKE_PARTIAL_FRACTION", self.auto_sell_take_partial_fraction),

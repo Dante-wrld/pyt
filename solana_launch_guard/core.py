@@ -481,6 +481,23 @@ class SQLiteStore:
                 updated_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS auto_sell_batches (
+                batch_key TEXT PRIMARY KEY,
+                chain TEXT NOT NULL,
+                token_address TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                stage INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                target_raw INTEGER NOT NULL,
+                full_exit INTEGER NOT NULL DEFAULT 0,
+                sold_raw INTEGER NOT NULL DEFAULT 0,
+                next_chunk_index INTEGER NOT NULL DEFAULT 0,
+                last_signature TEXT,
+                error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS auto_buy_policies (
                 chain TEXT NOT NULL,
                 token_address TEXT NOT NULL,
@@ -931,6 +948,116 @@ class SQLiteStore:
         )
         self.connection.commit()
         return cursor.rowcount == 1
+
+    def load_or_create_auto_sell_batch(
+        self,
+        *,
+        batch_key: str,
+        chain: str,
+        token_address: str,
+        symbol: str,
+        stage: int,
+        target_raw: int,
+        full_exit: bool,
+    ) -> dict[str, Any]:
+        if target_raw <= 0:
+            raise ValueError("auto-sell batch target must be positive")
+        now = utc_now()
+        self.connection.execute(
+            """
+            INSERT OR IGNORE INTO auto_sell_batches(
+                batch_key, chain, token_address, symbol, stage, status,
+                target_raw, full_exit, sold_raw, next_chunk_index,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, 'ACTIVE', ?, ?, 0, 0, ?, ?)
+            """,
+            (
+                batch_key,
+                chain,
+                token_address,
+                symbol,
+                stage,
+                target_raw,
+                int(full_exit),
+                now,
+                now,
+            ),
+        )
+        self.connection.commit()
+        row = self.connection.execute(
+            "SELECT * FROM auto_sell_batches WHERE batch_key = ?",
+            (batch_key,),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("could not load the auto-sell batch")
+        return dict(row)
+
+    def complete_auto_sell_chunk(
+        self,
+        *,
+        batch_key: str,
+        event_key: str,
+        signature: str,
+        sold_raw: int,
+    ) -> bool:
+        if sold_raw <= 0:
+            raise ValueError("confirmed auto-sell chunk must be positive")
+        execution = self.connection.execute(
+            "SELECT status FROM auto_sell_executions WHERE event_key = ?",
+            (event_key,),
+        ).fetchone()
+        batch = self.connection.execute(
+            "SELECT * FROM auto_sell_batches WHERE batch_key = ?",
+            (batch_key,),
+        ).fetchone()
+        if execution is None or execution["status"] != "PENDING":
+            raise ValueError("auto-sell chunk execution is not pending")
+        if batch is None or batch["status"] != "ACTIVE":
+            raise ValueError("auto-sell batch is not active")
+        total_sold = min(
+            int(batch["target_raw"]), int(batch["sold_raw"]) + sold_raw
+        )
+        completed = total_sold >= int(batch["target_raw"])
+        now = utc_now()
+        with self.connection:
+            self.connection.execute(
+                "UPDATE auto_sell_executions SET status = 'CONFIRMED', "
+                "signature = ?, updated_at = ? WHERE event_key = ?",
+                (signature, now, event_key),
+            )
+            self.connection.execute(
+                """
+                UPDATE auto_sell_batches
+                SET status = ?, sold_raw = ?, next_chunk_index = ?,
+                    last_signature = ?, updated_at = ?
+                WHERE batch_key = ? AND status = 'ACTIVE'
+                """,
+                (
+                    "CONFIRMED" if completed else "ACTIVE",
+                    total_sold,
+                    int(batch["next_chunk_index"]) + 1,
+                    signature,
+                    now,
+                    batch_key,
+                ),
+            )
+        return completed
+
+    def freeze_auto_sell_chunk(
+        self, *, batch_key: str, event_key: str, error: str
+    ) -> None:
+        now = utc_now()
+        with self.connection:
+            self.connection.execute(
+                "UPDATE auto_sell_executions SET status = 'REVIEW', error = ?, "
+                "updated_at = ? WHERE event_key = ? AND status = 'PENDING'",
+                (error[:500], now, event_key),
+            )
+            self.connection.execute(
+                "UPDATE auto_sell_batches SET status = 'REVIEW', error = ?, "
+                "updated_at = ? WHERE batch_key = ? AND status = 'ACTIVE'",
+                (error[:500], now, batch_key),
+            )
 
     def complete_auto_sell_execution(
         self, *, event_key: str, signature: str, next_stage: int
