@@ -845,6 +845,7 @@ class LaunchGuard:
                         (
                             "ethereum",
                             "base",
+                            "bsc",
                             "bob",
                             "monad",
                             "robinhood",
