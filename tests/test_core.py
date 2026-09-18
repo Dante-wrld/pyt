@@ -17,6 +17,10 @@ from solana_launch_guard.core import (
 from solana_launch_guard.intelligence import CoinIntelligence
 from solana_launch_guard.market import DexScreenerOracle, MarketQuote
 from solana_launch_guard.multichain import EvmRpc, HyperCoreWatcher
+from solana_launch_guard.notifications import (
+    DecisionNotifier,
+    format_candidate_notification,
+)
 from solana_launch_guard.recommendations import (
     RecommendationBook,
     build_snapshot,
@@ -479,6 +483,115 @@ def test_entry_decision_avoids_heavy_selloff() -> None:
 
     assert candidate.decision == "AVOID"
     assert candidate.decision_reason == "falling price with heavy selling"
+
+
+def test_phone_notifications_deduplicate_and_respect_cooldown(
+    tmp_path: Path,
+) -> None:
+    class FakeClient:
+        def __init__(self) -> None:
+            self.messages: list[dict[str, object]] = []
+
+        async def send(self, **payload: object) -> str:
+            self.messages.append(payload)
+            return f"request-{len(self.messages)}"
+
+    initial = market_quote(
+        liquidity=50_000,
+        market_cap=100_000,
+        buys=60,
+        sells=20,
+        volume=15_000,
+        change=15,
+    )
+    book = RecommendationBook(pool_size=10, ttl_seconds=60)
+    candidate = book.add(initial, CoinIntelligence().score(initial), now=0)
+    assert candidate is not None
+    assert candidate.decision == "WAIT FOR PULLBACK"
+
+    store = SQLiteStore(tmp_path / "notifications.db")
+    client = FakeClient()
+    clock = [1_000.0]
+    notifier = DecisionNotifier(
+        client=client,
+        store=store,
+        decisions=("WAIT FOR PULLBACK", "BUY ZONE"),
+        min_score=60,
+        cooldown_seconds=300,
+        clock=lambda: clock[0],
+    )
+
+    assert asyncio.run(notifier.maybe_send(candidate)) is True
+    assert asyncio.run(notifier.maybe_send(candidate)) is False
+    assert len(client.messages) == 1
+
+    pullback = MarketQuote(
+        mint=initial.mint,
+        symbol=initial.symbol,
+        price_sol=initial.price_sol * 0.95,
+        liquidity_usd=initial.liquidity_usd,
+        market_cap_usd=initial.market_cap_usd,
+        pair_address=initial.pair_address,
+        pair_created_at_ms=initial.pair_created_at_ms,
+        buys_m5=40,
+        sells_m5=20,
+        volume_m5_usd=18_000,
+        price_change_m5_pct=2,
+    )
+    book.update(pullback, now=5)
+    assert candidate.decision == "BUY ZONE"
+
+    clock[0] = 1_200
+    assert asyncio.run(notifier.maybe_send(candidate)) is True
+    assert len(client.messages) == 2
+    assert store.last_notification("pushover", candidate.key) == (
+        "BUY ZONE",
+        1_200,
+    )
+
+    above_zone = MarketQuote(
+        mint=initial.mint,
+        symbol=initial.symbol,
+        price_sol=initial.price_sol,
+        liquidity_usd=initial.liquidity_usd,
+        market_cap_usd=initial.market_cap_usd,
+        pair_address=initial.pair_address,
+        pair_created_at_ms=initial.pair_created_at_ms,
+        buys_m5=40,
+        sells_m5=20,
+        volume_m5_usd=18_000,
+        price_change_m5_pct=4,
+    )
+    book.update(above_zone, now=6)
+    assert candidate.decision == "WAIT FOR PULLBACK"
+    clock[0] = 1_300
+    assert asyncio.run(notifier.maybe_send(candidate)) is False
+    clock[0] = 1_501
+    assert asyncio.run(notifier.maybe_send(candidate)) is True
+    assert len(client.messages) == 3
+    store.close()
+
+
+def test_phone_notification_explains_signal() -> None:
+    quote = market_quote(
+        liquidity=50_000,
+        market_cap=100_000,
+        buys=60,
+        sells=20,
+        volume=15_000,
+        change=15,
+    )
+    book = RecommendationBook(pool_size=10, ttl_seconds=60)
+    candidate = book.add(quote, CoinIntelligence().score(quote), now=0)
+    assert candidate is not None
+
+    title, message, sound = format_candidate_notification(candidate)
+
+    assert "WAIT FOR PULLBACK" in title
+    assert "Entry zone:" in message
+    assert "Reason:" in message
+    assert candidate.symbol in message
+    assert sound == "pushover"
 
 
 def test_robinhood_quote_uses_usd_and_exact_contract(
