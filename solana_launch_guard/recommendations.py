@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -15,10 +15,12 @@ from .market import MarketQuote
 class RecommendationCandidate:
     mint: str
     symbol: str
+    chain: str
     tier: str
     intelligence_score: int
-    initial_price_sol: float
-    current_price_sol: float
+    initial_price: float
+    current_price: float
+    price_currency: str
     liquidity_usd: float | None
     price_change_m5_pct: float | None
     buy_sell_ratio: float
@@ -27,7 +29,18 @@ class RecommendationCandidate:
 
     @property
     def rise_pct(self) -> float:
-        return (self.current_price_sol / self.initial_price_sol - 1.0) * 100.0
+        return (self.current_price / self.initial_price - 1.0) * 100.0
+
+    @property
+    def key(self) -> str:
+        address = self.mint.lower() if self.chain == "robinhood" else self.mint
+        return f"{self.chain}:{address}"
+
+    @property
+    def fomo_url(self) -> str | None:
+        if self.chain != "robinhood":
+            return None
+        return f"https://fomo.family/tokens/robinhood/{self.mint}"
 
     @property
     def signal_score(self) -> int:
@@ -60,10 +73,11 @@ class RecommendationBook:
         *,
         now: float | None = None,
     ) -> RecommendationCandidate | None:
-        if not result.accepted or quote.price_sol <= 0:
+        price = quote.recommendation_price
+        if not result.accepted or price <= 0:
             return None
         timestamp = time.monotonic() if now is None else now
-        existing = self.candidates.get(quote.mint)
+        existing = self.candidates.get(quote.recommendation_key)
         if existing is not None:
             self.update(quote, now=timestamp)
             return existing
@@ -71,28 +85,31 @@ class RecommendationBook:
         candidate = RecommendationCandidate(
             mint=quote.mint,
             symbol=quote.symbol,
+            chain=quote.chain,
             tier=result.tier,
             intelligence_score=result.total_score,
-            initial_price_sol=quote.price_sol,
-            current_price_sol=quote.price_sol,
+            initial_price=price,
+            current_price=price,
+            price_currency=quote.recommendation_currency,
             liquidity_usd=quote.liquidity_usd,
             price_change_m5_pct=quote.price_change_m5_pct,
             buy_sell_ratio=quote.buy_sell_ratio,
             observed_at=timestamp,
             updated_at=timestamp,
         )
-        self.candidates[quote.mint] = candidate
+        self.candidates[quote.recommendation_key] = candidate
         self._trim()
         return candidate
 
     def update(
         self, quote: MarketQuote, *, now: float | None = None
     ) -> RecommendationCandidate | None:
-        candidate = self.candidates.get(quote.mint)
-        if candidate is None or quote.price_sol <= 0:
+        candidate = self.candidates.get(quote.recommendation_key)
+        price = quote.recommendation_price
+        if candidate is None or price <= 0:
             return None
         candidate.symbol = quote.symbol
-        candidate.current_price_sol = quote.price_sol
+        candidate.current_price = price
         candidate.liquidity_usd = quote.liquidity_usd
         candidate.price_change_m5_pct = quote.price_change_m5_pct
         candidate.buy_sell_ratio = quote.buy_sell_ratio
@@ -102,12 +119,12 @@ class RecommendationBook:
     def expire(self, *, now: float | None = None) -> None:
         timestamp = time.monotonic() if now is None else now
         expired = [
-            mint
-            for mint, candidate in self.candidates.items()
+            key
+            for key, candidate in self.candidates.items()
             if timestamp - candidate.observed_at > self.ttl_seconds
         ]
-        for mint in expired:
-            del self.candidates[mint]
+        for key in expired:
+            del self.candidates[key]
 
     def ranked(self, limit: int = 10) -> list[RecommendationCandidate]:
         ordered = sorted(
@@ -124,10 +141,15 @@ class RecommendationBook:
         seen_symbols: set[str] = set()
         for candidate in ordered:
             symbol_key = candidate.symbol.strip().casefold()
-            if candidate.mint in seen_mints or symbol_key in seen_symbols:
+            mint_key = (
+                candidate.mint.casefold()
+                if candidate.chain == "robinhood"
+                else candidate.mint
+            )
+            if mint_key in seen_mints or symbol_key in seen_symbols:
                 continue
             unique.append(candidate)
-            seen_mints.add(candidate.mint)
+            seen_mints.add(mint_key)
             seen_symbols.add(symbol_key)
             if len(unique) >= limit:
                 break
@@ -140,7 +162,7 @@ class RecommendationBook:
             self.candidates.values(),
             key=lambda item: (item.signal_score, item.observed_at),
         )
-        del self.candidates[lowest.mint]
+        del self.candidates[lowest.key]
 
 
 def format_recommendations(
@@ -161,12 +183,19 @@ def format_recommendations(
             else "unknown"
         )
         m5_change = item.price_change_m5_pct or 0.0
+        chain_label = "RH" if item.chain == "robinhood" else "SOL"
+        price_prefix = "$" if item.price_currency == "USD" else ""
+        address_label = "contract" if item.chain == "robinhood" else "mint"
         lines.append(
             f"#{rank:02d} {item.symbol:<10} tier={item.tier:<8} "
+            f"chain={chain_label:<3} "
             f"signal={item.signal_score:3d} rise={item.rise_pct:+7.2f}% "
             f"m5={m5_change:+7.2f}% liquidity={liquidity} "
-            f"price={item.current_price_sol:.12g} mint={item.mint}"
+            f"price={price_prefix}{item.current_price:.12g} "
+            f"{address_label}={item.mint}"
         )
+        if item.fomo_url:
+            lines.append(f"    fomo={item.fomo_url}")
     lines.append(reset)
     return "\n".join(lines)
 
@@ -186,12 +215,15 @@ def build_snapshot(
                 "rank": rank,
                 "mint": candidate.mint,
                 "symbol": candidate.symbol,
+                "chain": candidate.chain,
                 "tier": candidate.tier,
                 "signal_score": candidate.signal_score,
                 "rise_pct": candidate.rise_pct,
                 "price_change_m5_pct": candidate.price_change_m5_pct or 0.0,
                 "liquidity_usd": candidate.liquidity_usd,
-                "price_sol": candidate.current_price_sol,
+                "price": candidate.current_price,
+                "price_currency": candidate.price_currency,
+                "fomo_url": candidate.fomo_url,
             }
             for rank, candidate in enumerate(candidates, start=1)
         ],
@@ -226,7 +258,9 @@ def format_dashboard(snapshot: dict[str, Any], *, color: bool = True) -> str:
     age = max(0.0, time.time() - generated_at)
     stale = age > poll_seconds * 2 + 5
     updated = (
-        datetime.fromtimestamp(generated_at).strftime("%Y-%m-%d %H:%M:%S")
+        datetime.fromtimestamp(generated_at, tz=timezone.utc)
+        .astimezone()
+        .strftime("%Y-%m-%d %H:%M:%S")
         if generated_at
         else "waiting"
     )
@@ -257,22 +291,36 @@ def format_dashboard(snapshot: dict[str, Any], *, color: bool = True) -> str:
             if liquidity_raw is not None
             else "unknown"
         )
+        chain = str(raw.get("chain") or "solana")
+        chain_label = "RH" if chain == "robinhood" else "SOL"
+        currency = str(raw.get("price_currency") or "SOL")
+        price = float(raw.get("price") or raw.get("price_sol") or 0)
+        price_prefix = "$" if currency == "USD" else ""
+        address_label = "contract" if chain == "robinhood" else "mint"
+        detail_lines = [
+            (
+                f"{prefix}#{int(raw.get('rank') or index + 1):02d} "
+                f"{(raw.get('symbol') or 'UNKNOWN')!s:<12} "
+                f"chain={chain_label:<3} "
+                f"tier={(raw.get('tier') or 'UNKNOWN')!s:<8} "
+                f"signal={int(raw.get('signal_score') or 0):3d}{reset}"
+            ),
+            (
+                f"{prefix}    rise={float(raw.get('rise_pct') or 0):+8.2f}% "
+                f"m5={float(raw.get('price_change_m5_pct') or 0):+8.2f}% "
+                f"liquidity={liquidity} "
+                f"price={price_prefix}{price:.12g}{reset}"
+            ),
+            (
+                f"{prefix}    {address_label}="
+                f"{(raw.get('mint') or '')!s}{reset}"
+            ),
+        ]
+        fomo_url = str(raw.get("fomo_url") or "")
+        if fomo_url:
+            detail_lines.append(f"{prefix}    fomo={fomo_url}{reset}")
+        detail_lines.append("")
         lines.extend(
-            [
-                (
-                    f"{prefix}#{int(raw.get('rank') or index + 1):02d} "
-                    f"{str(raw.get('symbol') or 'UNKNOWN'):<12} "
-                    f"tier={str(raw.get('tier') or 'UNKNOWN'):<8} "
-                    f"signal={int(raw.get('signal_score') or 0):3d}{reset}"
-                ),
-                (
-                    f"{prefix}    rise={float(raw.get('rise_pct') or 0):+8.2f}% "
-                    f"m5={float(raw.get('price_change_m5_pct') or 0):+8.2f}% "
-                    f"liquidity={liquidity} "
-                    f"price={float(raw.get('price_sol') or 0):.12g}{reset}"
-                ),
-                f"{prefix}    mint={str(raw.get('mint') or '')}{reset}",
-                "",
-            ]
+            detail_lines
         )
     return "\n".join(lines).rstrip()
