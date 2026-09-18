@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "solana-launch-guard"
-version = "0.6.0"
-description = "Safety-first Pump.fun new-token monitor and paper trader"
+version = "0.7.0"
+description = "Safety-first Solana and Robinhood Chain token monitor"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
