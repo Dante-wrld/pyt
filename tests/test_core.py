@@ -16,7 +16,11 @@ from solana_launch_guard.intelligence import CoinIntelligence
 from solana_launch_guard.market import MarketQuote
 from solana_launch_guard.recommendations import (
     RecommendationBook,
+    build_snapshot,
+    format_dashboard,
     format_recommendations,
+    read_snapshot,
+    write_snapshot,
 )
 from solana_launch_guard.strategy import AdaptiveStrategy
 from solana_launch_guard.wallet import parse_wallet_trades
@@ -326,6 +330,66 @@ def test_recommendations_expire_old_candidates() -> None:
     book.add(quote, CoinIntelligence().score(quote), now=0)
     book.expire(now=11)
     assert book.ranked() == []
+
+
+def test_recommendations_deduplicate_repeated_symbol() -> None:
+    first = market_quote(
+        liquidity=50_000,
+        market_cap=100_000,
+        buys=60,
+        sells=20,
+        volume=15_000,
+        change=15,
+    )
+    second = MarketQuote(
+        mint="DifferentMintSameSymbol",
+        symbol=first.symbol.lower(),
+        price_sol=first.price_sol,
+        liquidity_usd=first.liquidity_usd,
+        market_cap_usd=first.market_cap_usd,
+        pair_address="PairDuplicate",
+        pair_created_at_ms=first.pair_created_at_ms,
+        buys_m5=first.buys_m5,
+        sells_m5=first.sells_m5,
+        volume_m5_usd=first.volume_m5_usd,
+        price_change_m5_pct=first.price_change_m5_pct,
+    )
+    intelligence = CoinIntelligence()
+    book = RecommendationBook(pool_size=10, ttl_seconds=60)
+    book.add(first, intelligence.score(first), now=0)
+    book.add(second, intelligence.score(second), now=1)
+
+    ranked = book.ranked(limit=10)
+
+    assert len(ranked) == 1
+    assert ranked[0].symbol.casefold() == "score"
+
+
+def test_snapshot_round_trip_and_colored_dashboard(tmp_path: Path) -> None:
+    quote = market_quote(
+        liquidity=50_000,
+        market_cap=100_000,
+        buys=60,
+        sells=20,
+        volume=15_000,
+        change=15,
+    )
+    book = RecommendationBook(pool_size=10, ttl_seconds=60)
+    book.add(quote, CoinIntelligence().score(quote), now=0)
+    snapshot = build_snapshot(book.ranked(), pending_count=4, poll_seconds=15)
+    path = tmp_path / "recommendations.json"
+
+    write_snapshot(path, snapshot)
+    restored = read_snapshot(path)
+
+    assert restored is not None
+    assert restored["pending_count"] == 4
+    assert len(restored["candidates"]) == 1
+    output = format_dashboard(restored, color=True)
+    assert "LAUNCH GUARD — PAPER BUY WATCHLIST" in output
+    assert "Pending scans: 4" in output
+    assert "mint=MintScore111" in output
+    assert "\033[38;5;45m" in output
 
 
 def strategy_position() -> object:
