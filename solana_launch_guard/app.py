@@ -20,6 +20,14 @@ from .config import Settings
 from .core import Launch, PaperBroker, RiskEngine, SQLiteStore
 from .intelligence import CoinIntelligence
 from .market import DexScreenerOracle, MarketQuote
+from .multichain import (
+    EvmRpc,
+    EvmTransfer,
+    EvmWalletWatcher,
+    HyperCoreFill,
+    HyperCoreState,
+    HyperCoreWatcher,
+)
 from .recommendations import (
     RecommendationBook,
     build_snapshot,
@@ -32,6 +40,21 @@ from .strategy import AdaptiveStrategy
 from .wallet import SolanaRpc, WalletTrade, WalletWatcher
 
 LOGGER = logging.getLogger("solana_launch_guard")
+
+
+def _is_stock_token_symbol(
+    symbol: str, stock_symbols: frozenset[str]
+) -> bool:
+    """Conservatively recognize direct and wrapped Robinhood stock symbols."""
+    normalized = symbol.strip().casefold()
+    if normalized in stock_symbols:
+        return True
+    return (
+        len(normalized) > 2
+        and normalized.startswith("w")
+        and normalized.endswith("x")
+        and normalized[1:-1] in stock_symbols
+    )
 
 
 class LaunchGuard:
@@ -54,8 +77,8 @@ class LaunchGuard:
             ),
         )
         self.candidate_tasks: set[asyncio.Task[Any]] = set()
-        self.robinhood_pending_count = 0
-        self.robinhood_last_result: dict[str, tuple[str, int]] = {}
+        self.multichain_pending_count = 0
+        self.multichain_last_result: dict[str, tuple[str, int]] = {}
         self.recommendation_console_output = True
         self.recommendations = RecommendationBook(
             pool_size=settings.recommendation_pool_size,
@@ -585,7 +608,7 @@ class LaunchGuard:
             snapshot = build_snapshot(
                 ranked,
                 pending_count=(
-                    len(self.candidate_tasks) + self.robinhood_pending_count
+                    len(self.candidate_tasks) + self.multichain_pending_count
                 ),
                 poll_seconds=self.settings.recommendation_poll_seconds,
             )
@@ -598,65 +621,90 @@ class LaunchGuard:
 
             await asyncio.sleep(self.settings.recommendation_poll_seconds)
 
-    async def run_robinhood_feed(self) -> None:
+    async def run_multichain_feed(self, chains: tuple[str, ...]) -> None:
         LOGGER.info(
-            "Robinhood Chain paper-recommendation feed active "
-            "(chain ID 4663; no automatic orders)"
+            "Multichain paper-recommendation feed active: %s "
+            "(no automatic orders)",
+            ", ".join(chains),
         )
         while True:
-            discovered, stock_tokens = await asyncio.gather(
-                self.oracle.discover_token_profiles("robinhood"),
-                self.oracle.robinhood_stock_token_addresses(),
+            discovery_results = await asyncio.gather(
+                *(self.oracle.discover_token_profiles(chain) for chain in chains)
             )
-            if stock_tokens is None:
+            stock_tokens = await self.oracle.robinhood_stock_token_addresses()
+            stock_symbols = await self.oracle.robinhood_stock_token_symbols()
+            if (
+                stock_tokens is None or stock_symbols is None
+            ) and "robinhood" in chains:
                 LOGGER.warning(
                     "Robinhood Stock Token registry unavailable; "
-                    "skipping this discovery pass"
+                    "skipping Robinhood candidates this pass"
                 )
-                await asyncio.sleep(self.settings.robinhood_poll_seconds)
-                continue
-            addresses: dict[str, str] = {
-                address.casefold(): address
-                for address in self.settings.robinhood_token_addresses
-            }
-            for address in discovered:
-                addresses.setdefault(address.casefold(), address)
 
-            eligible = [
-                address
-                for key, address in addresses.items()
-                if key not in stock_tokens
-            ]
-            self.robinhood_pending_count = len(eligible)
+            work: list[tuple[str, str]] = []
+            configured = self.settings.multichain_token_addresses
+            for chain, discovered in zip(chains, discovery_results, strict=True):
+                if chain == "robinhood" and stock_tokens is None:
+                    continue
+                addresses: dict[str, str] = {
+                    address.casefold(): address
+                    for address in configured.get(chain, ())
+                }
+                for address in discovered:
+                    addresses.setdefault(address.casefold(), address)
+                for key, address in addresses.items():
+                    if chain == "robinhood" and key in (stock_tokens or ()):
+                        continue
+                    work.append((chain, address))
+
+            self.multichain_pending_count = len(work)
             semaphore = asyncio.Semaphore(5)
 
             async def fetch(
-                address: str, limiter: asyncio.Semaphore = semaphore
-            ) -> tuple[str, MarketQuote | None]:
+                chain: str,
+                address: str,
+                limiter: asyncio.Semaphore = semaphore,
+            ) -> tuple[str, str, MarketQuote | None]:
                 async with limiter:
-                    quote = await self.oracle.quote(
-                        address, chain="robinhood"
-                    )
-                return address, quote
+                    quote = await self.oracle.quote(address, chain=chain)
+                return chain, address, quote
 
             try:
-                quotes = await asyncio.gather(*(fetch(item) for item in eligible))
-                for address, quote in quotes:
+                quotes = await asyncio.gather(
+                    *(fetch(chain, address) for chain, address in work)
+                )
+                for chain, address, quote in quotes:
+                    if (
+                        quote is not None
+                        and stock_symbols is not None
+                        and _is_stock_token_symbol(
+                            quote.symbol, stock_symbols
+                        )
+                    ):
+                        LOGGER.info(
+                            "%s REJECT %-10s contract=%s "
+                            "reason=tokenized stock symbol",
+                            chain.upper(),
+                            quote.symbol,
+                            address,
+                        )
+                        continue
                     result = self.intelligence.score(quote)
                     symbol = quote.symbol if quote else address[:10]
-                    result_key = address.casefold()
+                    result_key = f"{chain}:{address.casefold()}"
                     current_result = (result.tier, result.total_score)
-                    previous_result = self.robinhood_last_result.get(result_key)
+                    previous_result = self.multichain_last_result.get(result_key)
                     if current_result != previous_result:
                         LOGGER.info(
-                            "RH %-9s %-10s score=%d contract=%s %s",
+                            "%s %-9s %-10s score=%d contract=%s %s",
+                            chain.upper(),
                             result.tier,
                             symbol,
                             result.total_score,
                             address,
                             "; ".join(result.reasons),
                         )
-                        self.robinhood_last_result[result_key] = current_result
+                        self.multichain_last_result[result_key] = current_result
 
                     if quote is None or not result.accepted:
                         continue
@@ -671,9 +719,113 @@ class LaunchGuard:
                     )
                     self.recommendations.add(quote, result)
             finally:
-                self.robinhood_pending_count = 0
+                self.multichain_pending_count = 0
 
-            await asyncio.sleep(self.settings.robinhood_poll_seconds)
+            await asyncio.sleep(self.settings.multichain_poll_seconds)
+
+    async def handle_evm_transfer(self, transfer: EvmTransfer) -> None:
+        quote = await self.oracle.quote(
+            transfer.contract, chain=transfer.chain
+        )
+        price_usd = quote.price_usd if quote else None
+        inserted = self.store.save_wallet_event(
+            chain=transfer.chain,
+            wallet=transfer.wallet,
+            event_id=transfer.event_id,
+            block_number=transfer.block_number,
+            token_address=transfer.contract,
+            symbol=transfer.symbol,
+            direction=transfer.direction,
+            token_amount=transfer.token_amount,
+            price_usd=price_usd,
+            source="EVM_TRANSFER",
+        )
+        if not inserted:
+            return
+        LOGGER.info(
+            "WALLET %-4s chain=%s token=%s amount=%.8g contract=%s tx=%s",
+            transfer.direction,
+            transfer.chain,
+            transfer.symbol,
+            transfer.token_amount,
+            transfer.contract,
+            transfer.transaction_hash,
+        )
+        if quote is not None:
+            result = self.intelligence.score(quote)
+            if result.accepted:
+                self.recommendations.add(quote, result)
+
+    async def handle_hypercore_fill(self, fill: HyperCoreFill) -> None:
+        direction = "BUY" if fill.side.upper() == "B" else "SELL"
+        inserted = self.store.save_wallet_event(
+            chain="hypercore",
+            wallet=fill.wallet,
+            event_id=fill.fill_id,
+            block_number=None,
+            token_address=fill.coin,
+            symbol=fill.coin,
+            direction=direction,
+            token_amount=fill.size,
+            price_usd=fill.price,
+            source="HYPERCORE_FILL",
+        )
+        if inserted:
+            LOGGER.info(
+                "HYPERCORE %-4s coin=%s size=%.8g price=$%.8g fill=%s",
+                direction,
+                fill.coin,
+                fill.size,
+                fill.price,
+                fill.fill_id,
+            )
+
+    async def handle_hypercore_state(self, state: HyperCoreState) -> None:
+        spot = ", ".join(
+            f"{coin}={amount:.8g}" for coin, amount in state.spot_balances
+        ) or "none"
+        perps = ", ".join(
+            f"{coin}={size:+.8g}" for coin, size in state.perp_positions
+        ) or "none"
+        LOGGER.info("HYPERCORE HOLDINGS spot=[%s] perps=[%s]", spot, perps)
+
+    def build_multichain_wallet_tasks(self) -> list[asyncio.Task[Any]]:
+        tasks: list[asyncio.Task[Any]] = []
+        wallet = self.settings.evm_wallet_address
+        if wallet:
+            for chain, rpc_url in self.settings.evm_rpc_urls.items():
+                if not rpc_url:
+                    LOGGER.warning(
+                        "%s wallet monitoring inactive: RPC URL is empty", chain
+                    )
+                    continue
+                watcher = EvmWalletWatcher(
+                    chain=chain,
+                    rpc=EvmRpc(rpc_url),
+                    wallet=wallet,
+                    callback=self.handle_evm_transfer,
+                    poll_seconds=self.settings.evm_wallet_poll_seconds,
+                )
+                tasks.append(asyncio.create_task(watcher.run_forever()))
+        else:
+            LOGGER.warning(
+                "No EVM_WALLET_ADDRESS configured; EVM wallet monitoring inactive"
+            )
+
+        hyperliquid = self.settings.hyperliquid_address
+        if hyperliquid:
+            watcher = HyperCoreWatcher(
+                wallet=hyperliquid,
+                fill_callback=self.handle_hypercore_fill,
+                state_callback=self.handle_hypercore_state,
+                poll_seconds=self.settings.evm_wallet_poll_seconds,
+            )
+            tasks.append(asyncio.create_task(watcher.run_forever()))
+        else:
+            LOGGER.warning(
+                "No HYPERLIQUID_ADDRESS configured; HyperCore monitoring inactive"
+            )
+        return tasks
 
     async def run(self, mode: str) -> None:
         tasks: list[asyncio.Task[Any]] = [
@@ -682,10 +834,34 @@ class LaunchGuard:
         if mode in {"launches", "both", "all"}:
             tasks.append(asyncio.create_task(self.run_launch_feed()))
 
-        if mode in {"robinhood", "all"}:
-            tasks.append(asyncio.create_task(self.run_robinhood_feed()))
+        if mode == "robinhood":
+            tasks.append(
+                asyncio.create_task(self.run_multichain_feed(("robinhood",)))
+            )
+        if mode in {"multichain", "all"}:
+            tasks.append(
+                asyncio.create_task(
+                    self.run_multichain_feed(
+                        (
+                            "ethereum",
+                            "base",
+                            "bob",
+                            "monad",
+                            "robinhood",
+                            "hyperevm",
+                        )
+                    )
+                )
+            )
+            tasks.extend(self.build_multichain_wallet_tasks())
 
-        if mode in {"launches", "both", "robinhood", "all"}:
+        if mode in {
+            "launches",
+            "both",
+            "robinhood",
+            "multichain",
+            "all",
+        }:
             tasks.append(asyncio.create_task(self.run_recommendation_monitor()))
 
         if mode in {"copy", "both", "all"}:
@@ -768,11 +944,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--mode",
-        choices=("launches", "copy", "both", "robinhood", "all"),
+        choices=(
+            "launches",
+            "copy",
+            "both",
+            "robinhood",
+            "multichain",
+            "all",
+        ),
         default="launches",
         help=(
             "feed to run: Solana launches, wallet copy, both Solana feeds, "
-            "Robinhood Chain recommendations, or all feeds"
+            "Robinhood-only, all configured chains, or every feed"
         ),
     )
     parser.add_argument(
@@ -789,6 +972,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--trader-info",
         metavar="WALLET",
         help="show stored activity for a watched public wallet and exit",
+    )
+    parser.add_argument(
+        "--wallet-info",
+        metavar="PUBLIC_ADDRESS",
+        help="show stored multichain wallet activity and exit",
     )
     parser.add_argument(
         "--import-fomo-mint",
@@ -923,13 +1111,25 @@ def main() -> None:
             )
         elif args.trader_info:
             print(json.dumps(store.trader_info(args.trader_info), indent=2))
+        elif args.wallet_info:
+            print(
+                json.dumps(
+                    store.multichain_wallet_info(args.wallet_info), indent=2
+                )
+            )
         elif args.summary:
             print(json.dumps(store.summary(), indent=2))
         elif args.demo:
             asyncio.run(run_demo(guard))
         else:
             if args.recommendations_window:
-                if args.mode not in {"launches", "both", "robinhood", "all"}:
+                if args.mode not in {
+                    "launches",
+                    "both",
+                    "robinhood",
+                    "multichain",
+                    "all",
+                }:
                     raise ValueError(
                         "--recommendations-window requires a recommendation mode"
                     )
