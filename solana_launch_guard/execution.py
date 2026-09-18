@@ -87,7 +87,7 @@ class PreparedSell:
     expected_output_raw: int
     minimum_output_raw: int
     price_impact_pct: float
-    last_valid_block_height: int | None
+    last_valid_block_height: str | None
     router: str | None = None
     mode: str | None = None
     slippage_bps: int | None = None
@@ -134,7 +134,7 @@ class PreparedBuy:
     expected_output_raw: int
     minimum_output_raw: int
     price_impact_pct: float
-    last_valid_block_height: int | None
+    last_valid_block_height: str | None
     router: str | None = None
     mode: str | None = None
     slippage_bps: int | None = None
@@ -177,7 +177,7 @@ class OrderClient(Protocol):
         *,
         signed_transaction: str,
         request_id: str,
-        last_valid_block_height: int | None,
+        last_valid_block_height: str | None,
     ) -> dict[str, Any]: ...
 
 
@@ -419,6 +419,16 @@ def _evaluated_slippage_bps(value: int, floor_percentages: bool) -> int:
     return value // 100 * 100
 
 
+def _last_valid_block_height(value: Any) -> str | None:
+    """Normalize Jupiter's optional block height as a decimal string."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text.isdecimal():
+        raise ValueError("Jupiter returned an invalid lastValidBlockHeight")
+    return text
+
+
 class KeyringSolanaSigner:
     def __init__(self, *, expected_public_key: str) -> None:
         try:
@@ -530,13 +540,19 @@ class JupiterSwapClient:
         *,
         signed_transaction: str,
         request_id: str,
-        last_valid_block_height: int | None,
+        last_valid_block_height: str | None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "signedTransaction": signed_transaction,
             "requestId": request_id,
         }
         if last_valid_block_height is not None:
+            if not isinstance(last_valid_block_height, str) or not (
+                last_valid_block_height.isdecimal()
+            ):
+                raise ValueError(
+                    "Jupiter lastValidBlockHeight must be a decimal string"
+                )
             payload["lastValidBlockHeight"] = last_valid_block_height
         return await asyncio.to_thread(
             self._request_json,
@@ -609,7 +625,7 @@ class JupiterSwapClient:
         data = json.dumps(payload).encode() if payload is not None else None
         headers = {
             "Accept": "application/json",
-            "User-Agent": "solana-launch-guard/0.20",
+            "User-Agent": "solana-launch-guard/0.20.1",
             "x-api-key": self.api_key,
         }
         if data is not None:
@@ -761,9 +777,7 @@ class SolanaAutoSeller:
             expected_output_raw=expected_output,
             minimum_output_raw=minimum_output,
             price_impact_pct=price_impact,
-            last_valid_block_height=(
-                int(last_valid) if last_valid is not None else None
-            ),
+            last_valid_block_height=_last_valid_block_height(last_valid),
             router=str(order.get("router")) if order.get("router") else None,
             mode=str(order.get("mode")) if order.get("mode") else None,
             slippage_bps=slippage_bps,
@@ -967,9 +981,7 @@ class SolanaAutoBuyer:
             expected_output_raw=expected_output,
             minimum_output_raw=minimum_output,
             price_impact_pct=price_impact,
-            last_valid_block_height=(
-                int(last_valid) if last_valid is not None else None
-            ),
+            last_valid_block_height=_last_valid_block_height(last_valid),
             router=str(order.get("router")) if order.get("router") else None,
             mode=str(order.get("mode")) if order.get("mode") else None,
             slippage_bps=slippage_bps,

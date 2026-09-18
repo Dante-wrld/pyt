@@ -231,11 +231,12 @@ def test_auto_seller_prepares_and_executes_confirmed_order() -> None:
                 "priceImpact": 0.1,
                 "transaction": "unsigned",
                 "requestId": "request-1",
-                "lastValidBlockHeight": 123,
+                "lastValidBlockHeight": "123",
             }
 
         async def execute(self, **values: object) -> dict[str, object]:
             assert values["signed_transaction"] == "signed"
+            assert values["last_valid_block_height"] == "123"
             return {
                 "status": "Success",
                 "code": 0,
@@ -614,6 +615,44 @@ def test_jupiter_preflight_order_excludes_rfq_router(
     assert "excludeRouters=jupiterz" in requested_url
 
 
+def test_jupiter_execute_sends_block_height_as_string(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = JupiterSwapClient(api_key="key")
+    requested_payload: dict[str, object] = {}
+
+    def fake_request(
+        url: str, payload: dict[str, object] | None
+    ) -> dict[str, object]:
+        nonlocal requested_payload
+        assert url.endswith("/execute")
+        assert payload is not None
+        requested_payload = payload
+        return {"status": "Failed", "code": -1}
+
+    monkeypatch.setattr(client, "_request_json", fake_request)
+
+    asyncio.run(
+        client.execute(
+            signed_transaction="signed",
+            request_id="request-1",
+            last_valid_block_height="123456789",
+        )
+    )
+
+    assert requested_payload["lastValidBlockHeight"] == "123456789"
+    assert isinstance(requested_payload["lastValidBlockHeight"], str)
+
+    with pytest.raises(ValueError, match="must be a decimal string"):
+        asyncio.run(
+            client.execute(
+                signed_transaction="signed",
+                request_id="request-2",
+                last_valid_block_height=123456789,  # type: ignore[arg-type]
+            )
+        )
+
+
 def test_jupiter_http_error_preserves_only_sanitized_evidence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -697,7 +736,7 @@ def test_auto_seller_failure_preserves_jupiter_signature() -> None:
         expected_output_raw=10,
         minimum_output_raw=9,
         price_impact_pct=1,
-        last_valid_block_height=123,
+        last_valid_block_height="123",
     )
     seller = SolanaAutoSeller(client=FakeClient(), signer=FakeSigner())
 
@@ -730,11 +769,12 @@ def test_auto_buyer_prepares_executes_and_uses_usdc() -> None:
                 "priceImpact": -0.5,
                 "transaction": "unsigned-buy",
                 "requestId": "request-buy",
-                "lastValidBlockHeight": 321,
+                "lastValidBlockHeight": "321",
             }
 
         async def execute(self, **values: object) -> dict[str, object]:
             assert values["signed_transaction"] == "signed-buy"
+            assert values["last_valid_block_height"] == "321"
             return {
                 "status": "Success",
                 "code": 0,
@@ -2572,7 +2612,7 @@ def test_live_portfolio_exit_executes_one_persistent_chunk_per_poll(
                     expected_output_raw=selected_raw // 10,
                     minimum_output_raw=selected_raw // 11,
                     price_impact_pct=1.0,
-                    last_valid_block_height=123,
+                    last_valid_block_height="123",
                     slippage_bps=500,
                 ),
                 units_consumed=200_000,

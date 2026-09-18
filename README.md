@@ -5,9 +5,10 @@ buyer/automatic seller for multichain crypto tokens.
 
 Launch Guard can automatically select fresh, confirmed Solana `BUY NOW`/`BUY
 ZONE` candidates and optionally execute wallet-wide `TAKE PARTIAL`, `PROTECT
-PROFIT`, and `EXIT WARNING` rules. Version 0.20 records sanitized Jupiter error
-evidence, preserves any returned public transaction signature, and adds an
-explicit reconcile-pause-resume workflow for frozen sell batches. Adaptive
+PROFIT`, and `EXIT WARNING` rules. Version 0.20.1 preserves Jupiter's
+`lastValidBlockHeight` as the string required by the `/execute` schema. Version
+0.20 added sanitized Jupiter error evidence, public-signature preservation, and
+an explicit reconcile-pause-resume workflow for frozen sell batches. Adaptive
 wallet-exit chunks can halve an unsafe quote without weakening either guard,
 and confirmed progress persists across polling cycles and restarts. Every
 unattended order must pass a Jupiter price-impact cap, a separate slippage cap,
