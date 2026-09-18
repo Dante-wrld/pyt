@@ -257,6 +257,7 @@ class LaunchGuard:
                     settings.auto_sell_max_price_impact_pct
                 ),
                 max_slippage_bps=settings.auto_sell_max_slippage_bps,
+                floor_percentages=settings.auto_trade_floor_percentages,
             )
         if settings.auto_buy_enabled and settings.auto_buy_live:
             assert settings.solana_wallet_address is not None
@@ -271,6 +272,7 @@ class LaunchGuard:
                     settings.auto_buy_max_price_impact_pct
                 ),
                 max_slippage_bps=settings.auto_buy_max_slippage_bps,
+                floor_percentages=settings.auto_trade_floor_percentages,
             )
         for state in store.load_portfolio_states():
             self.portfolio_advisor.restore_state(
@@ -1892,6 +1894,7 @@ async def preflight_auto_sell(
         signer=signer,
         max_price_impact_pct=settings.auto_sell_max_price_impact_pct,
         max_slippage_bps=settings.auto_sell_max_slippage_bps,
+        floor_percentages=settings.auto_trade_floor_percentages,
     )
     receipt = await seller.preflight(intent, rpc)
     prepared = receipt.prepared
@@ -1907,9 +1910,11 @@ async def preflight_auto_sell(
         "expected_output_usdc": prepared.expected_output_raw / 1_000_000,
         "minimum_output_usdc": prepared.minimum_output_raw / 1_000_000,
         "price_impact_pct": prepared.price_impact_pct,
+        "quoted_price_impact_pct": prepared.quoted_price_impact_pct,
         "router": prepared.router,
         "mode": prepared.mode,
         "slippage_bps": prepared.slippage_bps,
+        "quoted_slippage_bps": prepared.quoted_slippage_bps,
         "fee_bps": prepared.fee_bps,
         "simulation_units_consumed": receipt.units_consumed,
         "simulation_log_count": receipt.log_count,
@@ -1967,6 +1972,7 @@ async def preflight_owned_auto_sell(
         signer=signer,
         max_price_impact_pct=settings.auto_sell_max_price_impact_pct,
         max_slippage_bps=settings.auto_sell_max_slippage_bps,
+        floor_percentages=settings.auto_trade_floor_percentages,
     )
     receipt = await seller.preflight(intent, rpc)
     prepared = receipt.prepared
@@ -1983,9 +1989,11 @@ async def preflight_owned_auto_sell(
         "expected_output_usdc": prepared.expected_output_raw / 1_000_000,
         "minimum_output_usdc": prepared.minimum_output_raw / 1_000_000,
         "price_impact_pct": prepared.price_impact_pct,
+        "quoted_price_impact_pct": prepared.quoted_price_impact_pct,
         "router": prepared.router,
         "mode": prepared.mode,
         "slippage_bps": prepared.slippage_bps,
+        "quoted_slippage_bps": prepared.quoted_slippage_bps,
         "fee_bps": prepared.fee_bps,
         "simulation_units_consumed": receipt.units_consumed,
         "simulation_log_count": receipt.log_count,
@@ -2027,6 +2035,7 @@ async def preflight_auto_buy(
         signer=signer,
         max_price_impact_pct=settings.auto_buy_max_price_impact_pct,
         max_slippage_bps=settings.auto_buy_max_slippage_bps,
+        floor_percentages=settings.auto_trade_floor_percentages,
     )
     intent = BuyIntent(
         mint=mint,
@@ -2054,9 +2063,11 @@ async def preflight_auto_buy(
             prepared.minimum_output_raw / (10**decimals)
         ),
         "price_impact_pct": prepared.price_impact_pct,
+        "quoted_price_impact_pct": prepared.quoted_price_impact_pct,
         "router": prepared.router,
         "mode": prepared.mode,
         "slippage_bps": prepared.slippage_bps,
+        "quoted_slippage_bps": prepared.quoted_slippage_bps,
         "fee_bps": prepared.fee_bps,
         "simulation_units_consumed": receipt.units_consumed,
         "simulation_log_count": receipt.log_count,

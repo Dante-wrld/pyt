@@ -172,6 +172,7 @@ class Settings:
     portfolio_snapshot_path: str = "launch_guard_portfolio.json"
     portfolio_poll_seconds: float = 15.0
     portfolio_min_value_usd: float = 0.01
+    auto_trade_floor_percentages: bool = False
     auto_sell_enabled: bool = False
     auto_sell_live: bool = False
     auto_sell_principal_multiple: float = 2.0
@@ -350,6 +351,9 @@ class Settings:
             portfolio_poll_seconds=_float("PORTFOLIO_POLL_SECONDS", 15.0),
             portfolio_min_value_usd=_float(
                 "PORTFOLIO_MIN_VALUE_USD", 0.01
+            ),
+            auto_trade_floor_percentages=_bool(
+                "AUTO_TRADE_FLOOR_PERCENTAGES", False
             ),
             auto_sell_enabled=_bool("AUTO_SELL_ENABLED", False),
             auto_sell_live=_bool("AUTO_SELL_LIVE", False),

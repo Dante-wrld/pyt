@@ -55,6 +55,8 @@ class PreparedSell:
     mode: str | None = None
     slippage_bps: int | None = None
     fee_bps: int | None = None
+    quoted_price_impact_pct: float | None = None
+    quoted_slippage_bps: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,6 +98,8 @@ class PreparedBuy:
     mode: str | None = None
     slippage_bps: int | None = None
     fee_bps: int | None = None
+    quoted_price_impact_pct: float | None = None
+    quoted_slippage_bps: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -357,6 +361,20 @@ def _effective_slippage_bps(
     return max(reported, threshold)
 
 
+def _evaluated_price_impact_pct(value: float, floor_percentages: bool) -> float:
+    if not math.isfinite(value):
+        raise ValueError("Jupiter returned a non-finite price impact")
+    if not floor_percentages:
+        return value
+    return math.copysign(float(math.floor(abs(value))), value)
+
+
+def _evaluated_slippage_bps(value: int, floor_percentages: bool) -> int:
+    if not floor_percentages:
+        return value
+    return value // 100 * 100
+
+
 class KeyringSolanaSigner:
     def __init__(self, *, expected_public_key: str) -> None:
         try:
@@ -521,12 +539,14 @@ class SolanaAutoSeller:
         signer: TransactionSigner,
         max_price_impact_pct: float = 5.0,
         max_slippage_bps: int = 500,
+        floor_percentages: bool = False,
         max_principal_quote_attempts: int = 3,
     ) -> None:
         self.client = client
         self.signer = signer
         self.max_price_impact_pct = max_price_impact_pct
         self.max_slippage_bps = max_slippage_bps
+        self.floor_percentages = floor_percentages
         self.max_principal_quote_attempts = max_principal_quote_attempts
 
     async def prepare(
@@ -582,14 +602,21 @@ class SolanaAutoSeller:
             price_impact = float(order.get("priceImpactPct") or 0) * 100
         else:
             price_impact = float(raw_price_impact)
+        quoted_price_impact = price_impact
+        price_impact = _evaluated_price_impact_pct(
+            quoted_price_impact, self.floor_percentages
+        )
         if abs(price_impact) > self.max_price_impact_pct:
             raise ValueError(
                 f"Jupiter price impact {price_impact:.2f}% exceeds the "
                 f"{self.max_price_impact_pct:.2f}% limit"
             )
         expected_output = int(order.get("outAmount") or 0)
-        slippage_bps = _effective_slippage_bps(
+        quoted_slippage_bps = _effective_slippage_bps(
             order, expected_output, minimum_output
+        )
+        slippage_bps = _evaluated_slippage_bps(
+            quoted_slippage_bps, self.floor_percentages
         )
         if slippage_bps > self.max_slippage_bps:
             raise ValueError(
@@ -622,6 +649,8 @@ class SolanaAutoSeller:
                 if order.get("feeBps") is not None
                 else None
             ),
+            quoted_price_impact_pct=quoted_price_impact,
+            quoted_slippage_bps=quoted_slippage_bps,
         )
 
     async def execute(self, prepared: PreparedSell) -> SellReceipt:
@@ -691,11 +720,13 @@ class SolanaAutoBuyer:
         signer: TransactionSigner,
         max_price_impact_pct: float = 5.0,
         max_slippage_bps: int = 500,
+        floor_percentages: bool = False,
     ) -> None:
         self.client = client
         self.signer = signer
         self.max_price_impact_pct = max_price_impact_pct
         self.max_slippage_bps = max_slippage_bps
+        self.floor_percentages = floor_percentages
 
     async def prepare(
         self,
@@ -722,13 +753,20 @@ class SolanaAutoBuyer:
             price_impact = float(order.get("priceImpactPct") or 0) * 100
         else:
             price_impact = float(raw_price_impact)
+        quoted_price_impact = price_impact
+        price_impact = _evaluated_price_impact_pct(
+            quoted_price_impact, self.floor_percentages
+        )
         if abs(price_impact) > self.max_price_impact_pct:
             raise ValueError(
                 f"Jupiter price impact {price_impact:.2f}% exceeds the "
                 f"{self.max_price_impact_pct:.2f}% limit"
             )
-        slippage_bps = _effective_slippage_bps(
+        quoted_slippage_bps = _effective_slippage_bps(
             order, expected_output, minimum_output
+        )
+        slippage_bps = _evaluated_slippage_bps(
+            quoted_slippage_bps, self.floor_percentages
         )
         if slippage_bps > self.max_slippage_bps:
             raise ValueError(
@@ -761,6 +799,8 @@ class SolanaAutoBuyer:
                 if order.get("feeBps") is not None
                 else None
             ),
+            quoted_price_impact_pct=quoted_price_impact,
+            quoted_slippage_bps=quoted_slippage_bps,
         )
 
     async def execute(self, prepared: PreparedBuy) -> BuyReceipt:
