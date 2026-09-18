@@ -104,6 +104,11 @@ class Settings:
     reentry_momentum_pct: float = 3.0
     reentry_buy_sell_ratio: float = 1.4
     max_reentries: int = 2
+    recommendation_limit: int = 10
+    recommendation_pool_size: int = 30
+    recommendation_poll_seconds: float = 15.0
+    recommendation_ttl_seconds: float = 1800.0
+    color_output: bool = True
 
     @classmethod
     def from_env(cls, dotenv_path: str = ".env") -> "Settings":
@@ -166,6 +171,15 @@ class Settings:
             reentry_momentum_pct=_float("REENTRY_MOMENTUM_PCT", 3.0),
             reentry_buy_sell_ratio=_float("REENTRY_BUY_SELL_RATIO", 1.4),
             max_reentries=_int("MAX_REENTRIES", 2),
+            recommendation_limit=_int("RECOMMENDATION_LIMIT", 10),
+            recommendation_pool_size=_int("RECOMMENDATION_POOL_SIZE", 30),
+            recommendation_poll_seconds=_float(
+                "RECOMMENDATION_POLL_SECONDS", 15.0
+            ),
+            recommendation_ttl_seconds=_float(
+                "RECOMMENDATION_TTL_SECONDS", 1800.0
+            ),
+            color_output=_bool("COLOR_OUTPUT", True),
         )
         settings.validate()
         return settings
@@ -213,6 +227,18 @@ class Settings:
             raise ValueError("buy/sell ratio settings must be positive")
         if self.max_pending_candidates < 1:
             raise ValueError("MAX_PENDING_CANDIDATES must be at least one")
+        if not 1 <= self.recommendation_limit <= 10:
+            raise ValueError("RECOMMENDATION_LIMIT must be 1 through 10")
+        if self.recommendation_pool_size < self.recommendation_limit:
+            raise ValueError(
+                "RECOMMENDATION_POOL_SIZE cannot be below RECOMMENDATION_LIMIT"
+            )
+        if self.recommendation_poll_seconds < 5:
+            raise ValueError("RECOMMENDATION_POLL_SECONDS must be at least 5")
+        if self.recommendation_ttl_seconds < self.recommendation_poll_seconds:
+            raise ValueError(
+                "RECOMMENDATION_TTL_SECONDS must be at least the poll interval"
+            )
         for wallet in self.watched_wallets:
             if not 32 <= len(wallet) <= 44:
                 raise ValueError(f"WATCHED_WALLETS contains an invalid address: {wallet}")
