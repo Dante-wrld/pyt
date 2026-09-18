@@ -456,6 +456,31 @@ class SQLiteStore:
                 PRIMARY KEY (chain, token_address)
             );
 
+            CREATE TABLE IF NOT EXISTS auto_sell_policies (
+                chain TEXT NOT NULL,
+                token_address TEXT NOT NULL,
+                armed INTEGER NOT NULL DEFAULT 0,
+                stage INTEGER NOT NULL DEFAULT 0,
+                last_signature TEXT,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (chain, token_address)
+            );
+
+            CREATE TABLE IF NOT EXISTS auto_sell_executions (
+                event_key TEXT PRIMARY KEY,
+                chain TEXT NOT NULL,
+                token_address TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                stage INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                requested_raw INTEGER NOT NULL,
+                expected_output_raw INTEGER,
+                signature TEXT,
+                error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
             INSERT OR IGNORE INTO owned_holdings(
                 chain, token_address, symbol, quantity, entry_price,
                 price_currency, cost_amount, updated_at
@@ -730,6 +755,143 @@ class SQLiteStore:
             "FROM portfolio_states"
         ).fetchall()
         return [dict(row) for row in rows]
+
+    def arm_auto_sell(self, token_address: str, *, chain: str = "solana") -> None:
+        holding = self.connection.execute(
+            "SELECT entry_price, price_currency, cost_amount "
+            "FROM owned_holdings WHERE chain = ? AND token_address = ?",
+            (chain, token_address),
+        ).fetchone()
+        if holding is None:
+            raise ValueError("import the holding and USD cost basis before arming")
+        if (
+            holding["price_currency"] != "USD"
+            or holding["entry_price"] is None
+            or float(holding["entry_price"]) <= 0
+            or holding["cost_amount"] is None
+            or float(holding["cost_amount"]) <= 0
+        ):
+            raise ValueError("auto-sell requires a positive USD cost basis")
+        self.connection.execute(
+            """
+            INSERT INTO auto_sell_policies(
+                chain, token_address, armed, stage, updated_at
+            ) VALUES (?, ?, 1, 0, ?)
+            ON CONFLICT(chain, token_address) DO UPDATE SET
+                armed = 1,
+                updated_at = excluded.updated_at
+            """,
+            (chain, token_address, utc_now()),
+        )
+        self.connection.commit()
+
+    def disarm_auto_sell(
+        self, token_address: str, *, chain: str = "solana"
+    ) -> None:
+        self.connection.execute(
+            "UPDATE auto_sell_policies SET armed = 0, updated_at = ? "
+            "WHERE chain = ? AND token_address = ?",
+            (utc_now(), chain, token_address),
+        )
+        self.connection.commit()
+
+    def load_auto_sell_policy(
+        self, token_address: str, *, chain: str = "solana"
+    ) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            "SELECT * FROM auto_sell_policies "
+            "WHERE chain = ? AND token_address = ?",
+            (chain, token_address),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def auto_sell_status(self) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            """
+            SELECT p.chain, p.token_address, h.symbol, p.armed, p.stage,
+                   p.last_signature, p.updated_at
+            FROM auto_sell_policies p
+            LEFT JOIN owned_holdings h
+              ON h.chain = p.chain AND h.token_address = p.token_address
+            ORDER BY p.chain, h.symbol, p.token_address
+            """
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def begin_auto_sell_execution(
+        self,
+        *,
+        event_key: str,
+        chain: str,
+        token_address: str,
+        symbol: str,
+        stage: int,
+        requested_raw: int,
+        expected_output_raw: int,
+    ) -> bool:
+        now = utc_now()
+        cursor = self.connection.execute(
+            """
+            INSERT OR IGNORE INTO auto_sell_executions(
+                event_key, chain, token_address, symbol, stage, status,
+                requested_raw, expected_output_raw, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, 'PENDING', ?, ?, ?, ?)
+            """,
+            (
+                event_key,
+                chain,
+                token_address,
+                symbol,
+                stage,
+                requested_raw,
+                expected_output_raw,
+                now,
+                now,
+            ),
+        )
+        self.connection.commit()
+        return cursor.rowcount == 1
+
+    def complete_auto_sell_execution(
+        self, *, event_key: str, signature: str, next_stage: int
+    ) -> None:
+        row = self.connection.execute(
+            "SELECT chain, token_address, stage FROM auto_sell_executions "
+            "WHERE event_key = ? AND status = 'PENDING'",
+            (event_key,),
+        ).fetchone()
+        if row is None:
+            raise ValueError("auto-sell execution is not pending")
+        now = utc_now()
+        with self.connection:
+            self.connection.execute(
+                "UPDATE auto_sell_executions SET status = 'CONFIRMED', "
+                "signature = ?, updated_at = ? WHERE event_key = ?",
+                (signature, now, event_key),
+            )
+            self.connection.execute(
+                """
+                UPDATE auto_sell_policies
+                SET stage = ?, last_signature = ?, updated_at = ?
+                WHERE chain = ? AND token_address = ? AND stage = ?
+                """,
+                (
+                    next_stage,
+                    signature,
+                    now,
+                    row["chain"],
+                    row["token_address"],
+                    row["stage"],
+                ),
+            )
+
+    def freeze_auto_sell_execution(self, *, event_key: str, error: str) -> None:
+        self.connection.execute(
+            "UPDATE auto_sell_executions SET status = 'REVIEW', error = ?, "
+            "updated_at = ? WHERE event_key = ? AND status = 'PENDING'",
+            (error[:500], utc_now(), event_key),
+        )
+        self.connection.commit()
 
     def save_wallet_trade(
         self,

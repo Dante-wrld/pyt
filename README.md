@@ -1,13 +1,12 @@
 # Launch Guard
 
-A safety-first Python monitor and paper trader for Solana launches and
-multichain crypto tokens.
+A safety-first Python monitor, paper trader, and opt-in Solana profit-ladder
+seller for multichain crypto tokens.
 
-Version 0.13 **never signs or submits transactions**. It can monitor Pump.fun
-new-token events, public Solana and EVM wallet activity, HyperCore holdings and
-fills, and token profiles on Ethereum, Base, BNB Smart Chain, BOB, Monad,
-Robinhood Chain, and HyperEVM. It applies configurable gates, ranks intelligence-qualified paper
-candidates, opens simulated Solana positions, and records activity in SQLite.
+Version 0.14 keeps every buy and recommendation feature in paper mode. It adds
+an explicitly enabled, per-token-armed seller for eligible SPL tokens held by
+the configured Solana wallet. Live sells are signed locally and routed directly
+on-chain through Jupiter; Launch Guard does not log in to or automate Fomo.
 
 ## What it does
 
@@ -35,15 +34,20 @@ candidates, opens simulated Solana positions, and records activity in SQLite.
   `EXIT WARNING`, or `UNPRICED` guidance.
 - Sends optional state-change-deduplicated, high-priority Pushover alerts for
   confirmed entries and configured profit-protection/exit states.
+- Can dry-run or execute a two-stage, per-token-armed Solana profit ladder:
+  recover the original USD principal at 2x, then sell half the remainder at 3x.
 - Simulates take-profit and stop-loss exits using subsequent trade events.
-- Persists launches, decisions, positions, and fills in `launch_guard.db`.
+- Persists launches, decisions, positions, fills, and sell execution state in
+  `launch_guard.db`.
 - Reconnects after WebSocket failures.
-- Keeps live execution deliberately absent from this version.
+- Never automatically buys, sells SOL/stablecoins, or lets advisory
+  `TAKE PARTIAL`, `PROTECT PROFIT`, or `EXIT WARNING` states place orders.
 
 ## Requirements
 
 - Python 3.11 or newer
 - A PumpPortal API key if their current access policy requires one
+- A Jupiter API key and operating-system keychain only when live selling is used
 
 PumpPortal's current documentation describes `subscribeNewToken` as the new-token stream and `subscribeTokenTrade` as the per-token trade stream. The endpoint and key are configuration values so they can be changed without editing the code.
 
@@ -103,7 +107,7 @@ pytest
 | `DATABASE_PATH` | `launch_guard.db` | SQLite path |
 | `SOLANA_RPC_HTTP_URL` | public mainnet RPC | Transaction lookup endpoint |
 | `SOLANA_RPC_WS_URL` | public mainnet WebSocket | Wallet log subscription endpoint |
-| `SOLANA_WALLET_ADDRESS` | empty | Public Solana address used for read-only current-balance discovery |
+| `SOLANA_WALLET_ADDRESS` | empty | Public Solana address used for balance discovery and live-signer verification |
 | `WATCHED_WALLETS` | empty | Comma-separated public wallets |
 | `PRICE_POLL_SECONDS` | `5` | Seconds between paper-position price checks |
 | `COPY_MIN_LIQUIDITY_USD` | `10000` | Minimum liquidity for a copied paper entry |
@@ -135,9 +139,16 @@ pytest
 | `PUSHOVER_HIGH_PRIORITY_DECISIONS` | `BUY NOW,BUY ZONE,TAKE PARTIAL,PROTECT PROFIT,EXIT WARNING` | States sent with Pushover priority 1 |
 | `PUSHOVER_PORTFOLIO_COOLDOWN_SECONDS` | `300` | Minimum delay between holding alerts for one token |
 | `COLOR_OUTPUT` | `true` | Use gold ANSI terminal output when supported |
-| `PORTFOLIO_POLL_SECONDS` | `15` | Seconds between read-only holdings checks (minimum 10) |
+| `PORTFOLIO_POLL_SECONDS` | `15` | Seconds between holdings checks (minimum 10) |
 | `PORTFOLIO_MIN_VALUE_USD` | `0.01` | Hide priced wallet dust below this estimated USD value |
 | `PORTFOLIO_SNAPSHOT_PATH` | `launch_guard_portfolio.json` | Local snapshot used by the holdings window |
+| `AUTO_SELL_ENABLED` | `false` | Evaluate armed 2x/3x ladder events; stays dry-run unless live mode is also enabled |
+| `AUTO_SELL_LIVE` | `false` | Permit locally signed Jupiter sell submission for armed tokens |
+| `AUTO_SELL_PRINCIPAL_MULTIPLE` | `2.0` | Entry-price multiple that triggers principal recovery |
+| `AUTO_SELL_HALF_PROFIT_MULTIPLE` | `3.0` | Entry-price multiple that triggers the second stage |
+| `AUTO_SELL_SECOND_STAGE_FRACTION` | `0.5` | Fraction of the remaining token balance sold at the second stage |
+| `AUTO_SELL_MAX_PRICE_IMPACT_PCT` | `5.0` | Reject a Jupiter order above this reported price impact |
+| `JUPITER_API_KEY` | empty | Private Jupiter API key required for live order and execution requests |
 | `ROBINHOOD_TOKEN_ADDRESSES` | empty | Comma-separated Robinhood Chain `0x` contracts to monitor in addition to discovery |
 | `ETHEREUM_TOKEN_ADDRESSES`, `BASE_TOKEN_ADDRESSES`, `BNB_TOKEN_ADDRESSES`, `BOB_TOKEN_ADDRESSES`, `MONAD_TOKEN_ADDRESSES`, `HYPEREVM_TOKEN_ADDRESSES` | empty | Exact contracts to monitor per chain |
 | `MULTICHAIN_POLL_SECONDS` | `15` | Seconds between multichain discovery passes (minimum 15) |
@@ -146,7 +157,9 @@ pytest
 | `EVM_WALLET_POLL_SECONDS` | `10` | Seconds between public-wallet checks |
 | `*_RPC_URL` | varies | Read-only JSON-RPC endpoint for each EVM network |
 
-The defaults are engineering examples, **not financial recommendations**. They should be evaluated in paper mode over a meaningful sample before any live-execution module is considered.
+The defaults are engineering examples, **not financial recommendations**.
+Keep automated selling in dry-run while validating cost bases, quotes, and
+trigger behavior.
 
 ## Price model
 
@@ -168,17 +181,30 @@ Pump.fun events may represent token amounts in different unit scales. Because bo
 - Public Solana RPC is suitable for paper testing but not guaranteed low-latency production copying.
 - DEX Screener may not index a brand-new pair immediately, so some price marks or copy entries can be delayed or skipped.
 - Paper fills ignore latency, slippage, price impact, priority fees, platform fees, failed transactions, and MEV.
+- Live quotes and transactions can fail, expire, be front-run, or produce a
+  different result than a DEX Screener mark. A fast pump and reversal can occur
+  between polling intervals.
+- An exported Solana private key has authority over the entire wallet even
+  though Launch Guard's execution policy only sells individually armed tokens.
+  A compromised computer, keychain, dependency, or transaction provider can
+  put every asset in that wallet at risk.
+- The process can act only while the computer is awake, online, and running.
 - New tokens can lose essentially all value.
 
-## Next release gate
+## Live sell guardrails
 
-Live execution should be added only after:
-
-1. Paper results are reviewed from the SQLite database.
-2. On-chain authority and holder-concentration enrichment is implemented.
-3. Slippage, fee, stale-price, cooldown, daily-loss, and kill-switch limits are tested.
-4. A dedicated low-balance wallet is used.
-5. A manual arming step is required at every startup.
+- Live execution is off by default and requires both enable flags, a Jupiter
+  API key, a matching keychain signer, a positive imported USD cost basis, and
+  a separate arm action for each token mint.
+- Stage 1 will not submit unless Jupiter's minimum quoted USDC output covers
+  the original principal after quote slippage and fees.
+- The seller rejects excessive reported price impact, records an idempotent
+  claim before submission, and advances a stage only after Jupiter reports a
+  confirmed success with a transaction signature.
+- Any uncertain or failed execution is frozen for human review with no
+  automatic retry, avoiding a duplicate sell when the first result is unknown.
+- Native SOL, wrapped SOL, USDC, and USDT are excluded. Keep enough SOL in the
+  wallet to pay network and priority fees.
 
 Official references:
 
@@ -192,6 +218,8 @@ Official references:
 - [Hyperliquid HyperEVM](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/hyperevm)
 - [Hyperliquid Info endpoint](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint)
 - [Pushover Message API](https://pushover.net/api)
+- [Jupiter Swap order and execute API](https://developers.jup.ag/docs/swap/order-and-execute)
+- [Fomo Terms of Service](https://fomo.family/terms)
 
 
 ## Intelligent launch filter
@@ -254,7 +282,7 @@ duplicate symbols are reduced to the highest-ranked entry. It also shows the
 number of candidates still waiting for evaluation. The window closes its live
 display when the main scanner process stops.
 
-### Separate read-only holdings window
+### Separate holdings window
 
 Put only your public Solana address in `.env`:
 
@@ -276,9 +304,10 @@ launch-guard --mode all --recommendations-window --portfolio-window
 ```
 
 The holdings board reads current SPL Token and Token-2022 balances using
-Solana JSON-RPC and obtains market data from DEX Screener. It never asks for a
-seed phrase, private key, exchange login, or transaction approval. Signals are
-advisory and do not place or record a real sale.
+Solana JSON-RPC and obtains market data from DEX Screener. It is read-only by
+default. When the live seller is explicitly configured, only the two armed
+profit-ladder events described below can submit a real USDC sale. Ordinary
+holdings-board signals remain advisory.
 
 Market-risk exits can be evaluated without a cost basis. Profit/loss,
 `TAKE PARTIAL`, and cost-based stop guidance require a known entry price. For
@@ -294,6 +323,102 @@ launch-guard \
 
 The import is a local cost-basis record; it does not connect to Fomo or move
 tokens. Wallet tokens that were not imported remain visible with `P/L=n/a`.
+
+### Automated sells for the current Fomo Solana wallet
+
+This mode gives the local signer full authority for the Solana wallet whose
+public address is in `SOLANA_WALLET_ADDRESS`. Launch Guard narrows its own trade
+policy to individually imported and armed SPL-token mints, but private-key
+authority cannot be technically restricted to those tokens. SOL, wrapped SOL,
+USDC, and USDT are never ladder-sale inputs.
+
+The default ladder for every armed mint is:
+
+1. At 2x the imported entry price, sell enough tokens for Jupiter's minimum
+   quoted output to recover the original USD cost in USDC. For example, a $100
+   cost basis requires a minimum quoted output of at least 100 USDC; the token
+   amount may be slightly more than half because of fees and slippage.
+2. After stage 1 confirms, at 3x the imported entry price, sell 50% of the
+   then-current remaining token balance to USDC. The Jupiter minimum output
+   must also preserve at least the 3x entry-price valuation for that amount.
+3. Leave the final remainder in the wallet. There is no third automatic sale.
+
+If the balance or quote cannot recover the full principal, reported price
+impact exceeds the configured cap, or Jupiter cannot build a transaction, no
+sale is submitted. A token that jumps directly beyond 3x still completes the
+principal-recovery stage first, then becomes eligible for stage 2 on a later
+poll.
+
+Set up one guarded token at a time:
+
+1. Create a Jupiter API key in the [Jupiter developer portal](https://developers.jup.ag/portal).
+2. Add the public Fomo Solana wallet address and dry-run settings to `.env`:
+
+   ```dotenv
+   SOLANA_WALLET_ADDRESS=YOUR_PUBLIC_SOLANA_ADDRESS
+   AUTO_SELL_ENABLED=true
+   AUTO_SELL_LIVE=false
+   JUPITER_API_KEY=YOUR_JUPITER_API_KEY
+   ```
+
+3. Export the wallet's Solana private key in Fomo on your own device, then put
+   it directly into the hidden local prompt. Never paste it into chat, `.env`,
+   logs, screenshots, or GitHub:
+
+   ```bash
+   launch-guard --store-fomo-solana-key
+   launch-guard --verify-auto-sell-signer
+   ```
+
+   The key is stored in the operating-system keychain only after its public key
+   matches `SOLANA_WALLET_ADDRESS`.
+
+4. Import the quantity currently held and the USD cost allocated to that
+   remaining quantity, then arm its exact mint:
+
+   ```bash
+   launch-guard \
+     --import-fomo-mint TOKEN_MINT \
+     --import-symbol SYMBOL \
+     --import-token-amount CURRENT_QUANTITY \
+     --import-cost-usd ORIGINAL_USD_COST
+
+   launch-guard --arm-auto-sell-mint TOKEN_MINT
+   launch-guard --auto-sell-status
+   ```
+
+   Repeat the import and arm commands for each eligible current holding. This
+   deliberate per-token step prevents an unknown airdrop or spam token from
+   becoming executable merely because it appears in the wallet. If you trade
+   the token manually before an automated stage, update the imported quantity
+   and remaining cost basis so its entry price is still accurate.
+
+5. Run dry-run mode and check that the board says `AUTO-SELL DRY RUN`:
+
+   ```bash
+   launch-guard --mode portfolio --portfolio-window
+   ```
+
+6. After reviewing the imported cost bases and dry-run behavior, stop the
+   process, change `AUTO_SELL_LIVE=true`, and restart. On macOS, this keeps the
+   machine from idle-sleeping while the bot is running:
+
+   ```bash
+   caffeinate -i launch-guard --mode portfolio --portfolio-window
+   ```
+
+The Mac must remain awake and online. For an immediate per-token kill switch,
+run `launch-guard --disarm-auto-sell-mint TOKEN_MINT` in another Terminal; the
+running monitor reloads the armed policy on each poll. To stop all execution,
+press Control-C. Changing `AUTO_SELL_LIVE=false` takes effect after the process
+is restarted.
+
+Current [Fomo Terms](https://fomo.family/terms) prohibit automated scripts or
+bots from executing trades or controlling activity on Fomo's services. Launch
+Guard therefore does not automate the Fomo app, call a Fomo trading endpoint,
+or reuse a Fomo login session. It signs direct on-chain Jupiter transactions
+from the same self-custodied Solana wallet. You remain responsible for deciding
+whether that setup is appropriate for your account and jurisdiction.
 
 ### Entry-price and pullback decisions
 
@@ -338,8 +463,9 @@ reward-to-risk multiple. These levels are a consistency framework rather than
 a forecast; Launch Guard does not place the stop or target on any exchange.
 
 These states are deterministic heuristics based on incomplete market data—not
-predictions or instructions to trade. Launch Guard still never requests a
-wallet key, Fomo login, Robinhood credentials, or permission to place orders.
+predictions or instructions to trade. They never trigger an order. The optional
+profit-ladder seller uses its own exact 2x/3x policy and never requests a Fomo
+login or Robinhood credentials.
 
 ### Optional phone alerts with Pushover
 
@@ -497,12 +623,14 @@ launch-guard \
   --import-cost-usd 25
 ```
 
-Then monitor it in launch mode without opening a new database:
+Then monitor it with the holdings board:
 
 ```bash
-launch-guard --mode launches
+launch-guard --mode portfolio --portfolio-window
 ```
 
-Importing creates a paper representation only. It does not connect to Fomo,
-submit an order, or move the real holding. Never put a Fomo password, session
-cookie, recovery phrase, or private key in this project.
+Importing writes a local cost-basis record only. It does not connect to Fomo,
+submit an order, arm the mint, or move the real holding. Never put a Fomo
+password, session cookie, recovery phrase, or private key in the project,
+`.env`, logs, or GitHub. The optional signing key belongs only in the hidden
+keychain prompt described above.
