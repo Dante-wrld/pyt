@@ -72,6 +72,13 @@ def _addresses(name: str) -> tuple[str, ...]:
     return tuple(unique.values())
 
 
+def _csv_upper(name: str, default: str = "") -> tuple[str, ...]:
+    raw = os.getenv(name, default)
+    return tuple(
+        dict.fromkeys(item.strip().upper() for item in raw.split(",") if item.strip())
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class Settings:
     ws_url: str
@@ -125,6 +132,18 @@ class Settings:
     buy_now_min_ratio: float = 1.2
     avoid_entry_momentum_pct: float = -8.0
     avoid_entry_sell_pressure_ratio: float = 2.0
+    pushover_enabled: bool = False
+    pushover_app_token: str | None = None
+    pushover_user_key: str | None = None
+    pushover_device: str | None = None
+    pushover_alert_decisions: tuple[str, ...] = (
+        "BUY NOW",
+        "BUY ZONE",
+        "WAIT FOR PULLBACK",
+        "AVOID",
+    )
+    pushover_min_score: int = 60
+    pushover_cooldown_seconds: float = 300.0
     color_output: bool = True
     recommendation_snapshot_path: str = "launch_guard_recommendations.json"
     ethereum_token_addresses: tuple[str, ...] = ()
@@ -225,6 +244,18 @@ class Settings:
             ),
             avoid_entry_sell_pressure_ratio=_float(
                 "AVOID_ENTRY_SELL_PRESSURE_RATIO", 2.0
+            ),
+            pushover_enabled=_bool("PUSHOVER_ENABLED", False),
+            pushover_app_token=os.getenv("PUSHOVER_APP_TOKEN") or None,
+            pushover_user_key=os.getenv("PUSHOVER_USER_KEY") or None,
+            pushover_device=os.getenv("PUSHOVER_DEVICE") or None,
+            pushover_alert_decisions=_csv_upper(
+                "PUSHOVER_ALERT_DECISIONS",
+                "BUY NOW,BUY ZONE,WAIT FOR PULLBACK,AVOID",
+            ),
+            pushover_min_score=_int("PUSHOVER_MIN_SCORE", 60),
+            pushover_cooldown_seconds=_float(
+                "PUSHOVER_COOLDOWN_SECONDS", 300.0
             ),
             color_output=_bool("COLOR_OUTPUT", True),
             recommendation_snapshot_path=os.getenv(
@@ -343,6 +374,41 @@ class Settings:
             raise ValueError(
                 "AVOID_ENTRY_SELL_PRESSURE_RATIO must be positive"
             )
+        allowed_alerts = {
+            "BUY NOW",
+            "BUY ZONE",
+            "WAIT FOR PULLBACK",
+            "WATCH",
+            "AVOID",
+        }
+        invalid_alerts = set(self.pushover_alert_decisions) - allowed_alerts
+        if invalid_alerts:
+            raise ValueError(
+                "PUSHOVER_ALERT_DECISIONS contains unknown states: "
+                + ", ".join(sorted(invalid_alerts))
+            )
+        if not 0 <= self.pushover_min_score <= 100:
+            raise ValueError("PUSHOVER_MIN_SCORE must be 0 through 100")
+        if self.pushover_cooldown_seconds < 15:
+            raise ValueError("PUSHOVER_COOLDOWN_SECONDS must be at least 15")
+        if self.pushover_enabled:
+            credential_pattern = r"[A-Za-z0-9]{30}"
+            if not self.pushover_app_token or re.fullmatch(
+                credential_pattern, self.pushover_app_token
+            ) is None:
+                raise ValueError(
+                    "PUSHOVER_APP_TOKEN must be a 30-character application token"
+                )
+            if not self.pushover_user_key or re.fullmatch(
+                credential_pattern, self.pushover_user_key
+            ) is None:
+                raise ValueError(
+                    "PUSHOVER_USER_KEY must be a 30-character user key"
+                )
+            if self.pushover_device and re.fullmatch(
+                r"[A-Za-z0-9_-]{1,25}", self.pushover_device
+            ) is None:
+                raise ValueError("PUSHOVER_DEVICE contains invalid characters")
         if self.robinhood_poll_seconds < 15:
             raise ValueError("ROBINHOOD_POLL_SECONDS must be at least 15")
         if self.multichain_poll_seconds < 15:

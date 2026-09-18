@@ -28,6 +28,7 @@ from .multichain import (
     HyperCoreState,
     HyperCoreWatcher,
 )
+from .notifications import DecisionNotifier, PushoverClient
 from .recommendations import (
     RecommendationBook,
     build_snapshot,
@@ -93,6 +94,21 @@ class LaunchGuard:
             ),
             min_liquidity_usd=settings.intelligence_min_liquidity_usd,
         )
+        self.notifier: DecisionNotifier | None = None
+        if settings.pushover_enabled:
+            if not settings.pushover_app_token or not settings.pushover_user_key:
+                raise ValueError("Pushover is enabled but credentials are missing")
+            self.notifier = DecisionNotifier(
+                client=PushoverClient(
+                    app_token=settings.pushover_app_token,
+                    user_key=settings.pushover_user_key,
+                    device=settings.pushover_device,
+                ),
+                store=store,
+                decisions=settings.pushover_alert_decisions,
+                min_score=settings.pushover_min_score,
+                cooldown_seconds=settings.pushover_cooldown_seconds,
+            )
         self.strategy = AdaptiveStrategy(
             trailing_activation_pct=settings.trailing_activation_pct,
             trailing_stop_pct=settings.trailing_stop_pct,
@@ -611,6 +627,29 @@ class LaunchGuard:
                     use_color = self.settings.color_output and sys.stderr.isatty()
                     LOGGER.info("\n%s", format_recommendations(ranked, color=use_color))
 
+            if self.notifier is not None:
+                notification_candidates = list(
+                    self.recommendations.candidates.values()
+                )
+                for candidate in notification_candidates:
+                    try:
+                        sent = await self.notifier.maybe_send(candidate)
+                    except ConnectionError as exc:
+                        LOGGER.warning(
+                            "Phone notification unavailable for %s (%s)",
+                            candidate.symbol,
+                            exc,
+                        )
+                        continue
+                    if sent:
+                        LOGGER.info(
+                            "PHONE ALERT %s chain=%s decision=%s score=%d",
+                            candidate.symbol,
+                            candidate.chain,
+                            candidate.decision,
+                            candidate.signal_score,
+                        )
+
             alerts = self.recommendations.pop_buy_zone_alerts()
             for candidate in alerts:
                 price_prefix = "$" if candidate.price_currency == "USD" else ""
@@ -995,6 +1034,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="print the paper-portfolio summary and exit",
     )
     parser.add_argument(
+        "--test-notification",
+        action="store_true",
+        help="send one Pushover test notification and exit",
+    )
+    parser.add_argument(
         "--trader-info",
         metavar="WALLET",
         help="show stored activity for a watched public wallet and exit",
@@ -1143,6 +1187,14 @@ def main() -> None:
                     store.multichain_wallet_info(args.wallet_info), indent=2
                 )
             )
+        elif args.test_notification:
+            if guard.notifier is None:
+                raise ValueError(
+                    "Pushover is disabled; set PUSHOVER_ENABLED=true and "
+                    "add your app token and user key"
+                )
+            asyncio.run(guard.notifier.send_test())
+            LOGGER.info("Pushover test notification sent")
         elif args.summary:
             print(json.dumps(store.summary(), indent=2))
         elif args.demo:

@@ -420,6 +420,19 @@ class SQLiteStore:
                 source TEXT NOT NULL,
                 UNIQUE(chain, wallet, event_id, token_address, direction)
             );
+
+            CREATE TABLE IF NOT EXISTS notification_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                sent_at REAL NOT NULL,
+                provider TEXT NOT NULL,
+                candidate_key TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                decision TEXT NOT NULL,
+                request_id TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_notification_candidate
+            ON notification_events(provider, candidate_key, id DESC);
             """
         )
         self.connection.commit()
@@ -721,6 +734,50 @@ class SQLiteStore:
             "chains": [dict(row) for row in rows],
             "recent": [dict(row) for row in recent],
         }
+
+    def last_notification(
+        self, provider: str, candidate_key: str
+    ) -> tuple[str, float] | None:
+        row = self.connection.execute(
+            """
+            SELECT decision, sent_at
+            FROM notification_events
+            WHERE provider = ? AND candidate_key = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (provider, candidate_key),
+        ).fetchone()
+        if row is None:
+            return None
+        return str(row["decision"]), float(row["sent_at"])
+
+    def save_notification(
+        self,
+        *,
+        provider: str,
+        candidate_key: str,
+        symbol: str,
+        decision: str,
+        sent_at: float,
+        request_id: str | None,
+    ) -> None:
+        self.connection.execute(
+            """
+            INSERT INTO notification_events(
+                sent_at, provider, candidate_key, symbol, decision, request_id
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                sent_at,
+                provider,
+                candidate_key,
+                symbol,
+                decision,
+                request_id,
+            ),
+        )
+        self.connection.commit()
 
     def summary(self) -> dict[str, float | int]:
         row = self.connection.execute(
