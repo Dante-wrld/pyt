@@ -1,22 +1,29 @@
 # Launch Guard
 
 A safety-first Python monitor and paper trader for Solana launches and
-Robinhood Chain crypto tokens.
+multichain crypto tokens.
 
 Version 0.7 **never signs or submits transactions**. It can monitor Pump.fun
-new-token events, a public Solana trader wallet, and Robinhood Chain token
-profiles; apply configurable gates; rank intelligence-qualified paper
-candidates; open simulated Solana positions; and record decisions and P&L in
-SQLite.
+new-token events, public Solana and EVM wallet activity, HyperCore holdings and
+fills, and token profiles on Ethereum, Base, BOB, Monad, Robinhood Chain, and
+HyperEVM. It applies configurable gates, ranks intelligence-qualified paper
+candidates, opens simulated Solana positions, and records activity in SQLite.
 
 ## What it does
 
-- Receives real-time new-token events from PumpPortal.\n- Watches public trader wallets through Solana RPC without requiring wallet credentials.\n- Records wallet buys/sells and can paper-copy qualifying buys.
+- Receives real-time new-token events from PumpPortal.
+- Watches public trader wallets through Solana RPC without requiring wallet credentials.
+- Records wallet buys/sells and can paper-copy qualifying buys.
 - Rejects launches that lack enough pricing data or violate configured limits.
-- Scores observed launches with separate safety and momentum components.\n- Uses a CORE tier for stronger setups and a $5 MOONSHOT tier for higher-risk setups.\n- Limits position size, concurrent positions, and total exposure.
+- Scores observed launches with separate safety and momentum components.
+- Uses a CORE tier for stronger setups and a $5 MOONSHOT tier for higher-risk setups.
+- Limits position size, concurrent positions, and total exposure.
 - Prints a gold top-10 paper watchlist and continuously re-ranks it using bounded live price momentum.
-- Discovers Robinhood Chain crypto-token profiles, filters official Robinhood
-  Stock Token contracts, and prints the exact `0x` contract plus a Fomo link.
+- Discovers crypto-token profiles across six EVM networks and prints the chain,
+  USD price, exact `0x` contract, and DEX Screener market link.
+- Filters official and recognizable wrapped stock tokens from recommendations.
+- Watches ERC-20 transfers for one shared public EVM address and separately
+  reads HyperCore spot balances, perpetual positions, and fills.
 - Simulates take-profit and stop-loss exits using subsequent trade events.
 - Persists launches, decisions, positions, and fills in `launch_guard.db`.
 - Reconnects after WebSocket failures.
@@ -95,7 +102,12 @@ pytest
 | `RECOMMENDATION_TTL_SECONDS` | `1800` | Seconds before a candidate ages out of the watchlist |
 | `COLOR_OUTPUT` | `true` | Use gold ANSI terminal output when supported |
 | `ROBINHOOD_TOKEN_ADDRESSES` | empty | Comma-separated Robinhood Chain `0x` contracts to monitor in addition to discovery |
-| `ROBINHOOD_POLL_SECONDS` | `15` | Seconds between Robinhood Chain discovery passes (minimum 15) |
+| `ETHEREUM_TOKEN_ADDRESSES`, `BASE_TOKEN_ADDRESSES`, `BOB_TOKEN_ADDRESSES`, `MONAD_TOKEN_ADDRESSES`, `HYPEREVM_TOKEN_ADDRESSES` | empty | Exact contracts to monitor per chain |
+| `MULTICHAIN_POLL_SECONDS` | `15` | Seconds between multichain discovery passes (minimum 15) |
+| `EVM_WALLET_ADDRESS` | empty | Shared public `0x` address monitored across configured EVM RPCs |
+| `HYPERLIQUID_ADDRESS` | `EVM_WALLET_ADDRESS` | Public address used for HyperCore balances and fills |
+| `EVM_WALLET_POLL_SECONDS` | `10` | Seconds between public-wallet checks |
+| `*_RPC_URL` | varies | Read-only JSON-RPC endpoint for each EVM network |
 
 The defaults are engineering examples, **not financial recommendations**. They should be evaluated in paper mode over a meaningful sample before any live-execution module is considered.
 
@@ -115,7 +127,9 @@ Pump.fun events may represent token amounts in different unit scales. Because bo
 
 - A passing result means only that the launch passed the configured event-level checks. It does **not** prove the token is safe.
 - This release does not claim to verify mint authority, freeze authority, holder concentration, bundled supply, social authenticity, or liquidity lock status. Those require additional on-chain or indexed data.
-- WebSocket feeds can be delayed, incomplete, changed, rate-limited, or unavailable. Public Solana RPC is suitable for paper testing but not guaranteed low-latency production copying.\n- DEX Screener may not index a brand-new pair immediately, so some price marks or copy entries can be delayed or skipped.
+- WebSocket feeds can be delayed, incomplete, changed, rate-limited, or unavailable.
+- Public Solana RPC is suitable for paper testing but not guaranteed low-latency production copying.
+- DEX Screener may not index a brand-new pair immediately, so some price marks or copy entries can be delayed or skipped.
 - Paper fills ignore latency, slippage, price impact, priority fees, platform fees, failed transactions, and MEV.
 - New tokens can lose essentially all value.
 
@@ -136,6 +150,9 @@ Official references:
 - [Robinhood Chain connection details](https://docs.robinhood.com/chain/connecting/)
 - [Robinhood Chain Stock Token registry](https://api.robinhood.com/rhj/assets)
 - [DEX Screener API reference](https://docs.dexscreener.com/api/reference)
+- [Monad network information](https://docs.monad.xyz/developer-essentials/network-information)
+- [Hyperliquid HyperEVM](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/hyperevm)
+- [Hyperliquid Info endpoint](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint)
 
 
 ## Intelligent launch filter
@@ -198,7 +215,7 @@ duplicate symbols are reduced to the highest-ranked entry. It also shows the
 number of candidates still waiting for evaluation. The window closes its live
 display when the main scanner process stops.
 
-### Fomo Robinhood Chain recommendations
+### Fomo multichain recommendations and wallet monitoring
 
 Run the Robinhood Chain scanner with the separate recommendation window:
 
@@ -206,32 +223,66 @@ Run the Robinhood Chain scanner with the separate recommendation window:
 launch-guard --mode robinhood --recommendations-window
 ```
 
-Run Solana launches, Solana wallet copy monitoring, and Robinhood Chain
-discovery together:
+Run Solana launches, Solana wallet copy monitoring, all six EVM discovery
+feeds, EVM wallet activity, and HyperCore monitoring together:
 
 ```bash
 launch-guard --mode all --recommendations-window
 ```
 
-The scanner reads DEX Screener's latest and recently updated Robinhood Chain
-token profiles, then scores each token's most liquid Robinhood Chain pair. A
-qualifying row is labeled `chain=RH`, uses a USD price, shows the exact EVM
-contract, and includes a Fomo URL. Add specific contracts to `.env` when you
-want them monitored even if they are not present in the current profile feed:
+Use multichain mode without the Solana launch feed:
 
-```dotenv
-ROBINHOOD_TOKEN_ADDRESSES=0xContractOne,0xContractTwo
+```bash
+launch-guard --mode multichain --recommendations-window
 ```
 
+The scanner reads DEX Screener's latest and recently updated token profiles for
+Ethereum, Base, BOB, Monad, Robinhood Chain, and HyperEVM. It then scores each
+token's most liquid pair on that same chain. A qualifying row uses a USD price,
+shows the exact EVM contract, and includes a DEX Screener market URL. Add exact
+contracts to `.env` when you want them monitored even if they are not present
+in the current profile feed:
+
+```dotenv
+BASE_TOKEN_ADDRESSES=0xContractOne,0xContractTwo
+MONAD_TOKEN_ADDRESSES=0xContractThree
+```
+
+To monitor the same Fomo public address on every configured EVM network and on
+HyperCore:
+
+```dotenv
+EVM_WALLET_ADDRESS=0xYourPublicAddress
+HYPERLIQUID_ADDRESS=0xYourPublicAddress
+```
+
+ERC-20 `Transfer` logs prove that tokens moved into or out of the address, but
+they do not by themselves prove that the movement was a buy or sell. Launch
+Guard therefore prints EVM activity as `IN` or `OUT`. HyperCore fills come from
+the exchange's public info API and are printed as `BUY` or `SELL`.
+
+Ethereum, Base, BOB, and Monad RPC values are left blank in `.env.example`.
+Add read-only provider endpoints that you trust before their wallet watchers
+will start. Robinhood Chain and HyperEVM use the public endpoints documented by
+those networks.
+
 Official Robinhood Stock Token contracts are removed using Robinhood's live
-asset registry. This matters because Stock Tokens are jurisdiction-restricted
-securities and are not the memecoin/crypto-token feed this mode is designed
-for.
+asset registry. Launch Guard also conservatively excludes matching direct and
+wrapped stock symbols, such as `NVDA` and `wNVDAx`, on the other discovery
+feeds. Tokenized securities are not the memecoin/crypto-token feed this mode is
+designed for. Symbol filtering is a safeguard, not an exhaustive legal
+classification system.
 
 DEX Screener discovery does not prove that Fomo currently exposes or permits a
-trade for every contract. Open the printed Fomo link and verify the chain,
-contract, quote, slippage, and fees before taking any manual action. The bot
-does not log in to Fomo and does not buy anything.
+trade for every contract. Verify the chain, contract, quote, slippage, and fees
+inside Fomo before taking any manual action. The bot does not log in to Fomo
+and does not buy anything.
+
+Review stored EVM and HyperCore activity with:
+
+```bash
+launch-guard --wallet-info 0xYourPublicAddress
+```
 
 
 ## Adaptive exits and re-entry
