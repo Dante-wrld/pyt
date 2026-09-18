@@ -1,3 +1,3 @@
 """Launch Guard: multi-chain token monitoring and paper recommendations."""
 
-__version__ = "0.7.0"
+__version__ = "0.8.0"
