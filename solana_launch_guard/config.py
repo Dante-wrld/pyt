@@ -119,6 +119,12 @@ class Settings:
     recommendation_pool_size: int = 30
     recommendation_poll_seconds: float = 15.0
     recommendation_ttl_seconds: float = 1800.0
+    pullback_trigger_pct: float = 8.0
+    pullback_zone_min_pct: float = 4.0
+    pullback_zone_max_pct: float = 6.0
+    buy_now_min_ratio: float = 1.2
+    avoid_entry_momentum_pct: float = -8.0
+    avoid_entry_sell_pressure_ratio: float = 2.0
     color_output: bool = True
     recommendation_snapshot_path: str = "launch_guard_recommendations.json"
     ethereum_token_addresses: tuple[str, ...] = ()
@@ -209,6 +215,16 @@ class Settings:
             ),
             recommendation_ttl_seconds=_float(
                 "RECOMMENDATION_TTL_SECONDS", 1800.0
+            ),
+            pullback_trigger_pct=_float("PULLBACK_TRIGGER_PCT", 8.0),
+            pullback_zone_min_pct=_float("PULLBACK_ZONE_MIN_PCT", 4.0),
+            pullback_zone_max_pct=_float("PULLBACK_ZONE_MAX_PCT", 6.0),
+            buy_now_min_ratio=_float("BUY_NOW_MIN_RATIO", 1.2),
+            avoid_entry_momentum_pct=float(
+                os.getenv("AVOID_ENTRY_MOMENTUM_PCT", "-8")
+            ),
+            avoid_entry_sell_pressure_ratio=_float(
+                "AVOID_ENTRY_SELL_PRESSURE_RATIO", 2.0
             ),
             color_output=_bool("COLOR_OUTPUT", True),
             recommendation_snapshot_path=os.getenv(
@@ -310,6 +326,22 @@ class Settings:
         if self.recommendation_ttl_seconds < self.recommendation_poll_seconds:
             raise ValueError(
                 "RECOMMENDATION_TTL_SECONDS must be at least the poll interval"
+            )
+        if not 0 < self.pullback_zone_min_pct < 100:
+            raise ValueError("PULLBACK_ZONE_MIN_PCT must be between 0 and 100")
+        if not self.pullback_zone_min_pct < self.pullback_zone_max_pct < 100:
+            raise ValueError(
+                "PULLBACK_ZONE_MAX_PCT must exceed the minimum and be below 100"
+            )
+        if self.pullback_trigger_pct <= 0:
+            raise ValueError("PULLBACK_TRIGGER_PCT must be positive")
+        if self.buy_now_min_ratio <= 0:
+            raise ValueError("BUY_NOW_MIN_RATIO must be positive")
+        if self.avoid_entry_momentum_pct >= 0:
+            raise ValueError("AVOID_ENTRY_MOMENTUM_PCT must be negative")
+        if self.avoid_entry_sell_pressure_ratio <= 0:
+            raise ValueError(
+                "AVOID_ENTRY_SELL_PRESSURE_RATIO must be positive"
             )
         if self.robinhood_poll_seconds < 15:
             raise ValueError("ROBINHOOD_POLL_SECONDS must be at least 15")
