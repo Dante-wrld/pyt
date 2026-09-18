@@ -5,6 +5,7 @@ import asyncio
 import json
 import logging
 import ssl
+import sys
 from collections.abc import Mapping
 from typing import Any
 
@@ -15,6 +16,7 @@ from .config import Settings
 from .core import Launch, PaperBroker, RiskEngine, SQLiteStore
 from .intelligence import CoinIntelligence
 from .market import DexScreenerOracle, MarketQuote
+from .recommendations import RecommendationBook, format_recommendations
 from .strategy import AdaptiveStrategy
 from .wallet import SolanaRpc, WalletTrade, WalletWatcher
 
@@ -41,6 +43,10 @@ class LaunchGuard:
             ),
         )
         self.candidate_tasks: set[asyncio.Task[Any]] = set()
+        self.recommendations = RecommendationBook(
+            pool_size=settings.recommendation_pool_size,
+            ttl_seconds=settings.recommendation_ttl_seconds,
+        )
         self.strategy = AdaptiveStrategy(
             trailing_activation_pct=settings.trailing_activation_pct,
             trailing_stop_pct=settings.trailing_stop_pct,
@@ -62,7 +68,7 @@ class LaunchGuard:
             return
 
         self.store.save_event("CREATE", payload, launch.mint)
-        decision = self.risk.evaluate(launch, self.broker)
+        decision = self.risk.evaluate_candidate(launch)
         self.store.save_decision(launch, decision)
 
         if not decision.accepted:
@@ -116,8 +122,10 @@ class LaunchGuard:
             reasons=result.reasons,
         )
         LOGGER.info(
-            "INTELLIGENCE %-10s tier=%s total=%d safety=%d momentum=%d %s",
+            "INTELLIGENCE %-10s mint=%s tier=%s total=%d safety=%d "
+            "momentum=%d %s",
             symbol,
+            launch.mint,
             result.tier,
             result.total_score,
             result.safety_score,
@@ -127,11 +135,15 @@ class LaunchGuard:
         if not result.accepted or quote is None:
             return
 
+        self.recommendations.add(quote, result)
+
         sol_usd = await self.oracle.sol_usd_price()
         if sol_usd is None:
             LOGGER.info(
-                "INTELLIGENCE REJECT %s reason=SOL/USD price unavailable",
+                "INTELLIGENCE REJECT %s mint=%s "
+                "reason=SOL/USD price unavailable",
                 symbol,
+                launch.mint,
             )
             return
 
@@ -153,8 +165,9 @@ class LaunchGuard:
 
         if rejection:
             LOGGER.info(
-                "INTELLIGENCE REJECT %s tier=%s reason=%s",
+                "INTELLIGENCE REJECT %s mint=%s tier=%s reason=%s",
                 symbol,
+                launch.mint,
                 result.tier,
                 rejection,
             )
@@ -190,9 +203,10 @@ class LaunchGuard:
         )
         self.strategy.register_open(position, quote, result.tier)
         LOGGER.info(
-            "INTELLIGENT PAPER BUY %-10s tier=%s score=%d size=$%.2f "
-            "cost=%.6f SOL entry=%.12g TP=+%.0f%% SL=-%.0f%%",
+            "INTELLIGENT PAPER BUY %-10s mint=%s tier=%s score=%d "
+            "size=$%.2f cost=%.6f SOL entry=%.12g TP=+%.0f%% SL=-%.0f%%",
             position.symbol,
+            position.mint,
             result.tier,
             result.total_score,
             size_usd,
@@ -279,8 +293,10 @@ class LaunchGuard:
         position = self.broker.open(launch, reason=f"COPY:{trade.wallet}")
         self.strategy.register_open(position, quote, "COPY")
         LOGGER.info(
-            "COPY PAPER BUY %-10s %.6f SOL at %.12g SOL/token leader=%s",
+            "COPY PAPER BUY %-10s mint=%s %.6f SOL at %.12g "
+            "SOL/token leader=%s",
             position.symbol,
+            position.mint,
             position.cost_sol,
             position.entry_price_sol,
             trade.wallet,
@@ -371,17 +387,19 @@ class LaunchGuard:
                 if updated is None:
                     continue
                 LOGGER.info(
-                    "MARK %-10s price=%.12g pnl=%+.2f%% status=%s",
+                    "MARK %-10s mint=%s price=%.12g pnl=%+.2f%% status=%s",
                     updated.symbol,
+                    updated.mint,
                     quote.price_sol,
                     pnl_pct,
                     updated.status,
                 )
                 if updated.status == "CLOSED":
                     LOGGER.info(
-                        "ADAPTIVE PAPER SELL %-10s reason=%s "
+                        "ADAPTIVE PAPER SELL %-10s mint=%s reason=%s "
                         "pnl=%+.6f SOL (%+.2f%%)",
                         updated.symbol,
+                        updated.mint,
                         updated.exit_reason,
                         updated.pnl_sol or 0,
                         updated.pnl_pct or 0,
@@ -449,8 +467,9 @@ class LaunchGuard:
                 position, quote, state.tier, is_reentry=True
             )
             LOGGER.info(
-                "ADAPTIVE REENTRY %-10s cost=%.6f SOL reason=%s",
+                "ADAPTIVE REENTRY %-10s mint=%s cost=%.6f SOL reason=%s",
                 position.symbol,
+                position.mint,
                 position.cost_sol,
                 decision.reason,
             )
@@ -500,14 +519,48 @@ class LaunchGuard:
         )
         self.strategy.register_open(position, quote, "IMPORTED")
         LOGGER.info(
-            "IMPORTED FOMO POSITION %-10s tokens=%.8g cost=$%.2f "
-            "entry=$%.12g current=$%.12g",
+            "IMPORTED FOMO POSITION %-10s mint=%s tokens=%.8g "
+            "cost=$%.2f entry=$%.12g current=$%.12g",
             symbol,
+            mint,
             token_amount,
             cost_usd,
             entry_price_usd,
             quote.price_sol * sol_usd,
         )
+
+    async def run_recommendation_monitor(self) -> None:
+        LOGGER.info(
+            "Recommendation monitor active (top %d, refresh %.0fs)",
+            self.settings.recommendation_limit,
+            self.settings.recommendation_poll_seconds,
+        )
+        while True:
+            self.recommendations.expire()
+            candidates = list(self.recommendations.candidates.values())
+
+            semaphore = asyncio.Semaphore(5)
+
+            async def refresh(
+                mint: str, limiter: asyncio.Semaphore = semaphore
+            ) -> None:
+                async with limiter:
+                    quote = await self.oracle.quote(mint)
+                if quote is not None:
+                    self.recommendations.update(quote)
+
+            if candidates:
+                await asyncio.gather(
+                    *(refresh(candidate.mint) for candidate in candidates)
+                )
+                ranked = self.recommendations.ranked(
+                    self.settings.recommendation_limit
+                )
+                if ranked:
+                    use_color = self.settings.color_output and sys.stderr.isatty()
+                    LOGGER.info("\n%s", format_recommendations(ranked, color=use_color))
+
+            await asyncio.sleep(self.settings.recommendation_poll_seconds)
 
     async def run(self, mode: str) -> None:
         tasks: list[asyncio.Task[Any]] = [
@@ -515,6 +568,7 @@ class LaunchGuard:
         ]
         if mode in {"launches", "both"}:
             tasks.append(asyncio.create_task(self.run_launch_feed()))
+            tasks.append(asyncio.create_task(self.run_recommendation_monitor()))
 
         if mode in {"copy", "both"}:
             if not self.settings.watched_wallets:
