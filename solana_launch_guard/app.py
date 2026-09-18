@@ -83,6 +83,15 @@ class LaunchGuard:
         self.recommendations = RecommendationBook(
             pool_size=settings.recommendation_pool_size,
             ttl_seconds=settings.recommendation_ttl_seconds,
+            pullback_trigger_pct=settings.pullback_trigger_pct,
+            pullback_zone_min_pct=settings.pullback_zone_min_pct,
+            pullback_zone_max_pct=settings.pullback_zone_max_pct,
+            buy_now_min_ratio=settings.buy_now_min_ratio,
+            avoid_momentum_pct=settings.avoid_entry_momentum_pct,
+            avoid_sell_pressure_ratio=(
+                settings.avoid_entry_sell_pressure_ratio
+            ),
+            min_liquidity_usd=settings.intelligence_min_liquidity_usd,
         )
         self.strategy = AdaptiveStrategy(
             trailing_activation_pct=settings.trailing_activation_pct,
@@ -602,6 +611,21 @@ class LaunchGuard:
                     use_color = self.settings.color_output and sys.stderr.isatty()
                     LOGGER.info("\n%s", format_recommendations(ranked, color=use_color))
 
+            alerts = self.recommendations.pop_buy_zone_alerts()
+            for candidate in alerts:
+                price_prefix = "$" if candidate.price_currency == "USD" else ""
+                LOGGER.info(
+                    "BUY ZONE ALERT %s chain=%s current=%s%.12g "
+                    "entry=%s%.12g-%s%.12g",
+                    candidate.symbol,
+                    candidate.chain,
+                    price_prefix,
+                    candidate.current_price,
+                    price_prefix,
+                    candidate.entry_zone_low or 0,
+                    price_prefix,
+                    candidate.entry_zone_high or 0,
+                )
             ranked = self.recommendations.ranked(
                 self.settings.recommendation_limit
             )
@@ -611,6 +635,7 @@ class LaunchGuard:
                     len(self.candidate_tasks) + self.multichain_pending_count
                 ),
                 poll_seconds=self.settings.recommendation_poll_seconds,
+                alerts=alerts,
             )
             try:
                 write_snapshot(

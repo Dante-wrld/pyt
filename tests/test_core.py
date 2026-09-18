@@ -389,10 +389,96 @@ def test_snapshot_round_trip_and_colored_dashboard(tmp_path: Path) -> None:
     assert restored["pending_count"] == 4
     assert len(restored["candidates"]) == 1
     output = format_dashboard(restored, color=True)
-    assert "LAUNCH GUARD — PAPER BUY WATCHLIST" in output
+    assert "LAUNCH GUARD — READ-ONLY DECISION SUPPORT" in output
+    assert "decision=WAIT FOR PULLBACK" in output
+    assert "preferred entry=" in output
     assert "Pending scans: 4" in output
     assert "mint=MintScore111" in output
     assert "\033[38;5;45m" in output
+
+
+def test_pullback_zone_is_anchored_and_alerts_once() -> None:
+    initial = market_quote(
+        liquidity=50_000,
+        market_cap=100_000,
+        buys=60,
+        sells=20,
+        volume=15_000,
+        change=15,
+    )
+    book = RecommendationBook(pool_size=10, ttl_seconds=60)
+    candidate = book.add(initial, CoinIntelligence().score(initial), now=0)
+
+    assert candidate is not None
+    assert candidate.decision == "WAIT FOR PULLBACK"
+    assert candidate.entry_zone_low == pytest.approx(initial.price_sol * 0.94)
+    assert candidate.entry_zone_high == pytest.approx(initial.price_sol * 0.96)
+
+    pullback = MarketQuote(
+        mint=initial.mint,
+        symbol=initial.symbol,
+        price_sol=initial.price_sol * 0.95,
+        liquidity_usd=initial.liquidity_usd,
+        market_cap_usd=initial.market_cap_usd,
+        pair_address=initial.pair_address,
+        pair_created_at_ms=initial.pair_created_at_ms,
+        buys_m5=40,
+        sells_m5=20,
+        volume_m5_usd=18_000,
+        price_change_m5_pct=2,
+    )
+    book.update(pullback, now=5)
+
+    assert candidate.decision == "BUY ZONE"
+    assert candidate.volume_label == "RISING"
+    alerts = book.pop_buy_zone_alerts()
+    assert alerts == [candidate]
+    assert book.pop_buy_zone_alerts() == []
+
+    output = format_dashboard(
+        build_snapshot(
+            book.ranked(),
+            pending_count=0,
+            poll_seconds=15,
+            alerts=alerts,
+        ),
+        color=False,
+    )
+    assert "BUY ZONE ALERT" in output
+    assert "decision=BUY ZONE" in output
+
+
+def test_entry_decision_avoids_heavy_selloff() -> None:
+    initial = market_quote(
+        liquidity=50_000,
+        market_cap=100_000,
+        buys=60,
+        sells=20,
+        volume=15_000,
+        change=5,
+    )
+    book = RecommendationBook(pool_size=10, ttl_seconds=60)
+    candidate = book.add(initial, CoinIntelligence().score(initial), now=0)
+    assert candidate is not None
+    assert candidate.decision == "BUY NOW"
+
+    selloff = MarketQuote(
+        mint=initial.mint,
+        symbol=initial.symbol,
+        price_sol=initial.price_sol * 0.9,
+        liquidity_usd=initial.liquidity_usd,
+        market_cap_usd=initial.market_cap_usd,
+        pair_address=initial.pair_address,
+        pair_created_at_ms=initial.pair_created_at_ms,
+        buys_m5=10,
+        sells_m5=30,
+        volume_m5_usd=20_000,
+        price_change_m5_pct=-10,
+    )
+    book.update(selloff, now=5)
+
+    assert candidate.decision == "AVOID"
+    assert candidate.decision_reason == "falling price with heavy selling"
 
 
 def test_robinhood_quote_uses_usd_and_exact_contract(

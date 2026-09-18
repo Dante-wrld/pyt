@@ -3,7 +3,7 @@
 A safety-first Python monitor and paper trader for Solana launches and
 multichain crypto tokens.
 
-Version 0.7 **never signs or submits transactions**. It can monitor Pump.fun
+Version 0.8 **never signs or submits transactions**. It can monitor Pump.fun
 new-token events, public Solana and EVM wallet activity, HyperCore holdings and
 fills, and token profiles on Ethereum, Base, BNB Smart Chain, BOB, Monad,
 Robinhood Chain, and HyperEVM. It applies configurable gates, ranks intelligence-qualified paper
@@ -19,6 +19,8 @@ candidates, opens simulated Solana positions, and records activity in SQLite.
 - Uses a CORE tier for stronger setups and a $5 MOONSHOT tier for higher-risk setups.
 - Limits position size, concurrent positions, and total exposure.
 - Prints a gold top-10 paper watchlist and continuously re-ranks it using bounded live price momentum.
+- Classifies qualified tokens as `BUY NOW`, `WAIT FOR PULLBACK`, `BUY ZONE`,
+  `WATCH`, or `AVOID` and alerts when an anchored entry zone is reached.
 - Discovers crypto-token profiles across seven EVM networks and prints the chain,
   USD price, exact `0x` contract, and DEX Screener market link.
 - Filters official and recognizable wrapped stock tokens from recommendations.
@@ -100,6 +102,12 @@ pytest
 | `RECOMMENDATION_POOL_SIZE` | `30` | Qualified candidates retained for live ranking |
 | `RECOMMENDATION_POLL_SECONDS` | `15` | Seconds between quote refreshes and ranking updates |
 | `RECOMMENDATION_TTL_SECONDS` | `1800` | Seconds before a candidate ages out of the watchlist |
+| `PULLBACK_TRIGGER_PCT` | `8` | Rise or five-minute move that anchors a pullback zone |
+| `PULLBACK_ZONE_MIN_PCT` | `4` | Shallow edge of the preferred pullback range |
+| `PULLBACK_ZONE_MAX_PCT` | `6` | Deep edge of the preferred pullback range |
+| `BUY_NOW_MIN_RATIO` | `1.2` | Minimum five-minute buyer/seller ratio for `BUY NOW` |
+| `AVOID_ENTRY_MOMENTUM_PCT` | `-8` | Falling five-minute move used by the adverse-entry gate |
+| `AVOID_ENTRY_SELL_PRESSURE_RATIO` | `2` | Seller/buyer pressure required with falling momentum for `AVOID` |
 | `COLOR_OUTPUT` | `true` | Use gold ANSI terminal output when supported |
 | `ROBINHOOD_TOKEN_ADDRESSES` | empty | Comma-separated Robinhood Chain `0x` contracts to monitor in addition to discovery |
 | `ETHEREUM_TOKEN_ADDRESSES`, `BASE_TOKEN_ADDRESSES`, `BNB_TOKEN_ADDRESSES`, `BOB_TOKEN_ADDRESSES`, `MONAD_TOKEN_ADDRESSES`, `HYPEREVM_TOKEN_ADDRESSES` | empty | Exact contracts to monitor per chain |
@@ -215,6 +223,37 @@ visible coin uses a different color, and duplicate mints or case-insensitive
 duplicate symbols are reduced to the highest-ranked entry. It also shows the
 number of candidates still waiting for evaluation. The window closes its live
 display when the main scanner process stops.
+
+### Entry-price and pullback decisions
+
+The board is a read-only decision-support system:
+
+```text
+DISCOVER → SCORE → WAIT / BUY ZONE → ALERT → YOU BUY MANUALLY
+```
+
+Each qualified token receives one of five states:
+
+- `BUY NOW`: the setup passed the intelligence gates, recent price change is
+  non-negative, buyer flow is sufficient, and the move is not extended;
+- `WAIT FOR PULLBACK`: price or five-minute momentum crossed the configured
+  extension threshold, so Launch Guard anchors a preferred entry zone 4–6%
+  below that price;
+- `BUY ZONE`: price entered the anchored zone with non-negative five-minute
+  movement and buyers at least matching sellers;
+- `WATCH`: confirmation is incomplete or price fell through the entry zone;
+- `AVOID`: liquidity fell below the safety floor, liquidity collapsed by more
+  than 35%, or falling momentum coincides with heavy sell pressure.
+
+The pullback zone remains fixed after it is created. It does not recalculate
+from every lower quote. The separate Terminal displays current price, preferred
+entry range, remaining pullback, momentum, liquidity, volume direction, risk,
+and the reason for the current state. A transition into `BUY ZONE` produces a
+one-time alert for that transition.
+
+These states are deterministic heuristics based on incomplete market data—not
+predictions or instructions to trade. Launch Guard still never requests a
+wallet key, Fomo login, Robinhood credentials, or permission to place orders.
 
 ### Fomo multichain recommendations and wallet monitoring
 
