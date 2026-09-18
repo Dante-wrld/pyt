@@ -404,6 +404,22 @@ class SQLiteStore:
                 observed_price_sol REAL,
                 UNIQUE(wallet, signature, mint)
             );
+
+            CREATE TABLE IF NOT EXISTS wallet_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                seen_at TEXT NOT NULL,
+                chain TEXT NOT NULL,
+                wallet TEXT NOT NULL,
+                event_id TEXT NOT NULL,
+                block_number INTEGER,
+                token_address TEXT NOT NULL,
+                symbol TEXT,
+                direction TEXT NOT NULL,
+                token_amount REAL NOT NULL,
+                price_usd REAL,
+                source TEXT NOT NULL,
+                UNIQUE(chain, wallet, event_id, token_address, direction)
+            );
             """
         )
         self.connection.commit()
@@ -635,6 +651,75 @@ class SQLiteStore:
             "first_seen": totals["first_seen"],
             "last_seen": totals["last_seen"],
             "recent": [dict(row) for row in recent_rows],
+        }
+
+    def save_wallet_event(
+        self,
+        *,
+        chain: str,
+        wallet: str,
+        event_id: str,
+        block_number: int | None,
+        token_address: str,
+        symbol: str | None,
+        direction: str,
+        token_amount: float,
+        price_usd: float | None,
+        source: str,
+    ) -> bool:
+        cursor = self.connection.execute(
+            """
+            INSERT OR IGNORE INTO wallet_events(
+                seen_at, chain, wallet, event_id, block_number,
+                token_address, symbol, direction, token_amount, price_usd,
+                source
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                utc_now(),
+                chain,
+                wallet,
+                event_id,
+                block_number,
+                token_address,
+                symbol,
+                direction,
+                token_amount,
+                price_usd,
+                source,
+            ),
+        )
+        self.connection.commit()
+        return cursor.rowcount > 0
+
+    def multichain_wallet_info(self, wallet: str) -> dict[str, Any]:
+        rows = self.connection.execute(
+            """
+            SELECT chain, COUNT(*) AS events,
+                   COUNT(DISTINCT token_address) AS unique_tokens,
+                   MIN(seen_at) AS first_seen, MAX(seen_at) AS last_seen
+            FROM wallet_events
+            WHERE lower(wallet) = lower(?)
+            GROUP BY chain
+            ORDER BY chain
+            """,
+            (wallet,),
+        ).fetchall()
+        recent = self.connection.execute(
+            """
+            SELECT seen_at, chain, event_id, token_address, symbol,
+                   direction, token_amount, price_usd, source
+            FROM wallet_events
+            WHERE lower(wallet) = lower(?)
+            ORDER BY id DESC
+            LIMIT 25
+            """,
+            (wallet,),
+        ).fetchall()
+        return {
+            "wallet": wallet,
+            "chains": [dict(row) for row in rows],
+            "recent": [dict(row) for row in recent],
         }
 
     def summary(self) -> dict[str, float | int]:
