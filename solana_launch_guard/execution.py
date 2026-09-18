@@ -9,7 +9,7 @@ import ssl
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Protocol
 
 import certifi
@@ -51,6 +51,10 @@ class PreparedSell:
     minimum_output_raw: int
     price_impact_pct: float
     last_valid_block_height: int | None
+    router: str | None = None
+    mode: str | None = None
+    slippage_bps: int | None = None
+    fee_bps: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,9 +65,22 @@ class SellReceipt:
     output_amount_raw: int
 
 
+@dataclass(frozen=True, slots=True)
+class PreflightReceipt:
+    prepared: PreparedSell
+    units_consumed: int | None
+    log_count: int
+    broadcast: bool = False
+
+
 class OrderClient(Protocol):
     async def order(
-        self, *, input_mint: str, amount_raw: int, taker: str
+        self,
+        *,
+        input_mint: str,
+        amount_raw: int,
+        taker: str,
+        exclude_routers: tuple[str, ...] = (),
     ) -> dict[str, Any]: ...
 
     async def execute(
@@ -80,6 +97,12 @@ class TransactionSigner(Protocol):
     def public_key(self) -> str: ...
 
     def sign(self, transaction_b64: str) -> str: ...
+
+
+class TransactionSimulator(Protocol):
+    async def simulate_transaction(
+        self, signed_transaction_b64: str
+    ) -> dict[str, Any]: ...
 
 
 class ProfitLadder:
@@ -173,6 +196,54 @@ class ProfitLadder:
             reason=reason,
         )
 
+    def preflight_plan(
+        self,
+        *,
+        mint: str,
+        symbol: str,
+        stage: int,
+        balance_raw: int,
+        decimals: int,
+        entry_price_usd: float | None,
+        original_cost_usd: float | None,
+    ) -> SellIntent:
+        """Build the representative next-stage amount without a price trigger.
+
+        Preflight uses the same amount that the next ladder stage would request
+        at its configured trigger. It deliberately removes the minimum-USDC
+        target because the token may not have reached that trigger yet.
+        """
+        if entry_price_usd is None or entry_price_usd <= 0:
+            raise ValueError("preflight requires a positive USD entry price")
+        trigger = (
+            self.principal_trigger_multiple
+            if stage == 0
+            else self.half_profit_trigger_multiple
+        )
+        intent = self.plan(
+            mint=mint,
+            symbol=symbol,
+            stage=stage,
+            balance_raw=balance_raw,
+            decimals=decimals,
+            current_price_usd=entry_price_usd * trigger,
+            entry_price_usd=entry_price_usd,
+            original_cost_usd=original_cost_usd,
+        )
+        if intent is None:
+            if stage not in {0, 1}:
+                raise ValueError("profit ladder is already complete")
+            raise ValueError("could not build a representative preflight amount")
+        return replace(
+            intent,
+            event_key=f"solana:{mint}:preflight:{stage}",
+            target_output_raw=None,
+            reason=(
+                f"preflight stage {stage + 1} transaction; simulation only, "
+                "never broadcast"
+            ),
+        )
+
 
 class KeyringSolanaSigner:
     def __init__(self, *, expected_public_key: str) -> None:
@@ -257,16 +328,22 @@ class JupiterSwapClient:
         self._ssl = ssl.create_default_context(cafile=certifi.where())
 
     async def order(
-        self, *, input_mint: str, amount_raw: int, taker: str
+        self,
+        *,
+        input_mint: str,
+        amount_raw: int,
+        taker: str,
+        exclude_routers: tuple[str, ...] = (),
     ) -> dict[str, Any]:
-        query = urllib.parse.urlencode(
-            {
-                "inputMint": input_mint,
-                "outputMint": USDC_MINT,
-                "amount": str(amount_raw),
-                "taker": taker,
-            }
-        )
+        parameters = {
+            "inputMint": input_mint,
+            "outputMint": USDC_MINT,
+            "amount": str(amount_raw),
+            "taker": taker,
+        }
+        if exclude_routers:
+            parameters["excludeRouters"] = ",".join(exclude_routers)
+        query = urllib.parse.urlencode(parameters)
         return await asyncio.to_thread(
             self._request_json,
             f"{JUPITER_SWAP_BASE_URL}/order?{query}",
@@ -296,7 +373,7 @@ class JupiterSwapClient:
         data = json.dumps(payload).encode() if payload is not None else None
         headers = {
             "Accept": "application/json",
-            "User-Agent": "solana-launch-guard/0.14",
+            "User-Agent": "solana-launch-guard/0.15",
             "x-api-key": self.api_key,
         }
         if data is not None:
@@ -337,7 +414,12 @@ class SolanaAutoSeller:
         self.max_price_impact_pct = max_price_impact_pct
         self.max_principal_quote_attempts = max_principal_quote_attempts
 
-    async def prepare(self, intent: SellIntent) -> PreparedSell:
+    async def prepare(
+        self,
+        intent: SellIntent,
+        *,
+        exclude_routers: tuple[str, ...] = (),
+    ) -> PreparedSell:
         amount_raw = intent.amount_raw
         order: dict[str, Any] | None = None
         for _ in range(self.max_principal_quote_attempts):
@@ -345,6 +427,7 @@ class SolanaAutoSeller:
                 input_mint=intent.mint,
                 amount_raw=amount_raw,
                 taker=self.signer.public_key,
+                exclude_routers=exclude_routers,
             )
             self._validate_order(order, intent.mint, amount_raw)
             minimum_output = int(
@@ -370,6 +453,8 @@ class SolanaAutoSeller:
         minimum_output = int(
             order.get("otherAmountThreshold") or order.get("outAmount") or 0
         )
+        if minimum_output <= 0:
+            raise ValueError("Jupiter returned no usable USDC output")
         if (
             intent.target_output_raw is not None
             and minimum_output < intent.target_output_raw
@@ -377,10 +462,12 @@ class SolanaAutoSeller:
             raise ValueError(
                 "current balance cannot recover principal after fees/slippage"
             )
-        price_impact = float(
-            order.get("priceImpact") or order.get("priceImpactPct") or 0
-        )
-        if price_impact > self.max_price_impact_pct:
+        raw_price_impact = order.get("priceImpact")
+        if raw_price_impact is None:
+            price_impact = float(order.get("priceImpactPct") or 0) * 100
+        else:
+            price_impact = float(raw_price_impact)
+        if abs(price_impact) > self.max_price_impact_pct:
             raise ValueError(
                 f"Jupiter price impact {price_impact:.2f}% exceeds the "
                 f"{self.max_price_impact_pct:.2f}% limit"
@@ -402,6 +489,18 @@ class SolanaAutoSeller:
             price_impact_pct=price_impact,
             last_valid_block_height=(
                 int(last_valid) if last_valid is not None else None
+            ),
+            router=str(order.get("router")) if order.get("router") else None,
+            mode=str(order.get("mode")) if order.get("mode") else None,
+            slippage_bps=(
+                int(order["slippageBps"])
+                if order.get("slippageBps") is not None
+                else None
+            ),
+            fee_bps=(
+                int(order["feeBps"])
+                if order.get("feeBps") is not None
+                else None
             ),
         )
 
@@ -427,6 +526,28 @@ class SolanaAutoSeller:
             output_amount_raw=int(
                 result.get("totalOutputAmount") or result.get("outputAmountResult") or 0
             ),
+        )
+
+    async def preflight(
+        self,
+        intent: SellIntent,
+        simulator: TransactionSimulator,
+    ) -> PreflightReceipt:
+        """Prepare, sign, and simulate a sell without submitting it."""
+        # JupiterZ RFQ transactions require a market-maker signature that is
+        # added only by /execute. Excluding that router keeps preflight fully
+        # simulatable without ever calling the execution endpoint.
+        prepared = await self.prepare(
+            intent, exclude_routers=("jupiterz",)
+        )
+        signed = self.signer.sign(prepared.transaction)
+        simulation = await simulator.simulate_transaction(signed)
+        logs = simulation.get("logs")
+        units = simulation.get("unitsConsumed")
+        return PreflightReceipt(
+            prepared=prepared,
+            units_consumed=int(units) if units is not None else None,
+            log_count=len(logs) if isinstance(logs, list) else 0,
         )
 
     def _validate_order(

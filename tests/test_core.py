@@ -6,7 +6,10 @@ from pathlib import Path
 import pytest
 from solders.keypair import Keypair
 
-from solana_launch_guard.app import _is_stock_token_symbol
+from solana_launch_guard.app import (
+    _is_stock_token_symbol,
+    preflight_auto_sell,
+)
 from solana_launch_guard.config import Settings
 from solana_launch_guard.core import (
     Launch,
@@ -16,6 +19,7 @@ from solana_launch_guard.core import (
     indicative_price,
 )
 from solana_launch_guard.execution import (
+    JupiterSwapClient,
     PreparedSell,
     ProfitLadder,
     SellIntent,
@@ -46,7 +50,11 @@ from solana_launch_guard.recommendations import (
     write_snapshot,
 )
 from solana_launch_guard.strategy import AdaptiveStrategy
-from solana_launch_guard.wallet import SolanaRpc, parse_wallet_trades
+from solana_launch_guard.wallet import (
+    SolanaRpc,
+    SolanaTokenHolding,
+    parse_wallet_trades,
+)
 
 
 def test_profit_ladder_recovers_principal_then_sells_half() -> None:
@@ -111,6 +119,36 @@ def test_profit_ladder_requires_trigger_and_cost_basis() -> None:
     assert ladder.plan(**values) is None
 
 
+def test_profit_ladder_preflight_uses_next_stage_amount_without_target() -> None:
+    intent = ProfitLadder().preflight_plan(
+        mint="MintProfit111",
+        symbol="WIN",
+        stage=0,
+        balance_raw=100_000_000,
+        decimals=6,
+        entry_price_usd=1.0,
+        original_cost_usd=100.0,
+    )
+
+    assert intent.amount_raw == 50_000_000
+    assert intent.target_output_raw is None
+    assert intent.event_key == "solana:MintProfit111:preflight:0"
+    assert "never broadcast" in intent.reason
+
+
+def test_profit_ladder_preflight_refuses_completed_ladder() -> None:
+    with pytest.raises(ValueError, match="already complete"):
+        ProfitLadder().preflight_plan(
+            mint="MintProfit111",
+            symbol="WIN",
+            stage=2,
+            balance_raw=100_000_000,
+            decimals=6,
+            entry_price_usd=1.0,
+            original_cost_usd=100.0,
+        )
+
+
 def test_auto_seller_prepares_and_executes_confirmed_order() -> None:
     class FakeSigner:
         public_key = "Wallet111"
@@ -167,6 +205,132 @@ def test_auto_seller_prepares_and_executes_confirmed_order() -> None:
     assert prepared.minimum_output_raw == 100_000_000
     assert receipt.signature == "signature-1"
     assert receipt.output_amount_raw == 100_000_000
+
+
+def test_auto_seller_preflight_signs_and_simulates_without_execution() -> None:
+    executed = False
+
+    class FakeSigner:
+        public_key = "Wallet111"
+
+        def sign(self, transaction_b64: str) -> str:
+            assert transaction_b64 == "unsigned"
+            return "signed"
+
+    class FakeClient:
+        async def order(self, **values: object) -> dict[str, object]:
+            assert values["exclude_routers"] == ("jupiterz",)
+            amount = int(values["amount_raw"])
+            return {
+                "inputMint": values["input_mint"],
+                "outputMint": (
+                    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+                ),
+                "inAmount": str(amount),
+                "outAmount": "10000000",
+                "otherAmountThreshold": "9500000",
+                "priceImpact": 0.2,
+                "transaction": "unsigned",
+                "requestId": "request-preflight",
+            }
+
+        async def execute(self, **_values: object) -> dict[str, object]:
+            nonlocal executed
+            executed = True
+            raise AssertionError("preflight must never execute")
+
+    class FakeSimulator:
+        async def simulate_transaction(
+            self, signed_transaction_b64: str
+        ) -> dict[str, object]:
+            assert signed_transaction_b64 == "signed"
+            return {"err": None, "logs": ["one", "two"], "unitsConsumed": 42}
+
+    intent = ProfitLadder().preflight_plan(
+        mint="MintProfit111",
+        symbol="WIN",
+        stage=0,
+        balance_raw=100_000_000,
+        decimals=6,
+        entry_price_usd=1,
+        original_cost_usd=100,
+    )
+    seller = SolanaAutoSeller(client=FakeClient(), signer=FakeSigner())
+
+    receipt = asyncio.run(seller.preflight(intent, FakeSimulator()))
+
+    assert receipt.broadcast is False
+    assert receipt.units_consumed == 42
+    assert receipt.log_count == 2
+    assert executed is False
+
+
+def test_auto_seller_rejects_adverse_negative_price_impact() -> None:
+    class FakeSigner:
+        public_key = "Wallet111"
+
+        def sign(self, transaction_b64: str) -> str:
+            return transaction_b64
+
+    class FakeClient:
+        async def order(self, **values: object) -> dict[str, object]:
+            return {
+                "inputMint": values["input_mint"],
+                "outputMint": (
+                    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+                ),
+                "inAmount": str(values["amount_raw"]),
+                "outAmount": "10000000",
+                "otherAmountThreshold": "9500000",
+                "priceImpact": -5.1,
+                "transaction": "unsigned",
+                "requestId": "request-impact",
+            }
+
+        async def execute(self, **_values: object) -> dict[str, object]:
+            raise AssertionError("unsafe price impact must never execute")
+
+    intent = ProfitLadder().preflight_plan(
+        mint="MintProfit111",
+        symbol="WIN",
+        stage=0,
+        balance_raw=100_000_000,
+        decimals=6,
+        entry_price_usd=1,
+        original_cost_usd=100,
+    )
+    seller = SolanaAutoSeller(
+        client=FakeClient(), signer=FakeSigner(), max_price_impact_pct=5
+    )
+
+    with pytest.raises(ValueError, match="price impact"):
+        asyncio.run(seller.prepare(intent))
+
+
+def test_jupiter_preflight_order_excludes_rfq_router(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = JupiterSwapClient(api_key="key")
+    requested_url = ""
+
+    def fake_request(url: str, payload: object) -> dict[str, object]:
+        nonlocal requested_url
+        requested_url = url
+        assert payload is None
+        return {}
+
+    monkeypatch.setattr(client, "_request_json", fake_request)
+
+    asyncio.run(
+        client.order(
+            input_mint="MintProfit111",
+            amount_raw=10,
+            taker="Wallet111",
+            exclude_routers=("jupiterz",),
+        )
+    )
+
+    assert "excludeRouters=jupiterz" in requested_url
 
 
 def test_auto_seller_rejects_second_stage_quote_below_trigger() -> None:
@@ -272,6 +436,119 @@ def test_key_store_refuses_mismatched_wallet_before_write(
         store_fomo_solana_key(expected_public_key=str(Keypair().pubkey()))
 
     assert wrote_secret is False
+
+
+def test_preflight_command_uses_armed_balance_and_preserves_stage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wallet = str(Keypair().pubkey())
+    store = SQLiteStore(str(tmp_path / "preflight.db"))
+    store.save_owned_holding(
+        OwnedHolding(
+            chain="solana",
+            token_address="MintProfit111",
+            symbol="WIN",
+            quantity=100,
+            entry_price=1,
+            price_currency="USD",
+            cost_amount=100,
+        )
+    )
+    store.arm_auto_sell("MintProfit111")
+
+    class FakeRpc:
+        def __init__(self, _url: str) -> None:
+            pass
+
+        async def token_holdings(
+            self, owner: str
+        ) -> tuple[SolanaTokenHolding, ...]:
+            assert owner == wallet
+            return (
+                SolanaTokenHolding(
+                    mint="MintProfit111",
+                    amount=100,
+                    raw_amount=100_000_000,
+                    decimals=6,
+                ),
+            )
+
+        async def simulate_transaction(
+            self, signed_transaction_b64: str
+        ) -> dict[str, object]:
+            assert signed_transaction_b64 == "signed"
+            return {"err": None, "logs": [], "unitsConsumed": 123}
+
+    class FakeSigner:
+        def __init__(self, *, expected_public_key: str) -> None:
+            assert expected_public_key == wallet
+            self.public_key = wallet
+
+        def sign(self, transaction_b64: str) -> str:
+            assert transaction_b64 == "unsigned"
+            return "signed"
+
+    class FakeClient:
+        def __init__(self, *, api_key: str) -> None:
+            assert api_key == "jupiter-key"
+
+        async def order(self, **values: object) -> dict[str, object]:
+            assert values["exclude_routers"] == ("jupiterz",)
+            return {
+                "inputMint": values["input_mint"],
+                "outputMint": (
+                    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+                ),
+                "inAmount": str(values["amount_raw"]),
+                "outAmount": "10000000",
+                "otherAmountThreshold": "9500000",
+                "priceImpact": 0.1,
+                "transaction": "unsigned",
+                "requestId": "request-preflight",
+            }
+
+        async def execute(self, **_values: object) -> dict[str, object]:
+            raise AssertionError("preflight must never execute")
+
+    monkeypatch.setattr("solana_launch_guard.app.SolanaRpc", FakeRpc)
+    monkeypatch.setattr("solana_launch_guard.app.KeyringSolanaSigner", FakeSigner)
+    monkeypatch.setattr("solana_launch_guard.app.JupiterSwapClient", FakeClient)
+    config = settings(
+        tmp_path / "preflight.db",
+        solana_wallet_address=wallet,
+        jupiter_api_key="jupiter-key",
+        auto_sell_enabled=True,
+        auto_sell_live=False,
+    )
+
+    result = asyncio.run(
+        preflight_auto_sell(config, store, "MintProfit111")
+    )
+
+    assert result["result"] == "PASSED"
+    assert result["broadcast"] is False
+    assert result["input_tokens"] == pytest.approx(50)
+    assert result["simulation_units_consumed"] == 123
+    policy = store.load_auto_sell_policy("MintProfit111")
+    assert policy is not None
+    assert policy["stage"] == 0
+    store.close()
+
+
+def test_solana_rpc_simulation_rejects_runtime_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rpc = SolanaRpc("https://example.invalid")
+    monkeypatch.setattr(
+        rpc,
+        "_request",
+        lambda method, params: {
+            "value": {"err": {"InstructionError": [2, "Custom"]}}
+        },
+    )
+
+    with pytest.raises(RuntimeError, match="simulation failed"):
+        asyncio.run(rpc.simulate_transaction("signed"))
 
 
 def settings(database_path: Path, **overrides: object) -> Settings:

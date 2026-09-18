@@ -3,10 +3,12 @@
 A safety-first Python monitor, paper trader, and opt-in Solana profit-ladder
 seller for multichain crypto tokens.
 
-Version 0.14 keeps every buy and recommendation feature in paper mode. It adds
-an explicitly enabled, per-token-armed seller for eligible SPL tokens held by
-the configured Solana wallet. Live sells are signed locally and routed directly
-on-chain through Jupiter; Launch Guard does not log in to or automate Fomo.
+Version 0.15 keeps every buy and recommendation feature in paper mode. Its
+explicitly enabled, per-token-armed seller for eligible SPL tokens now includes
+a non-broadcasting preflight that builds, locally signs, and RPC-simulates the
+next ladder transaction before live mode is enabled. Live sells are routed
+directly on-chain through Jupiter; Launch Guard does not log in to or automate
+Fomo.
 
 ## What it does
 
@@ -36,6 +38,8 @@ on-chain through Jupiter; Launch Guard does not log in to or automate Fomo.
   confirmed entries and configured profit-protection/exit states.
 - Can dry-run or execute a two-stage, per-token-armed Solana profit ladder:
   recover the original USD principal at 2x, then sell half the remainder at 3x.
+- Can preflight the next sale for one armed mint by building and locally
+  signing the real Jupiter transaction, then simulating it without broadcasting.
 - Simulates take-profit and stop-loss exits using subsequent trade events.
 - Persists launches, decisions, positions, fills, and sell execution state in
   `launch_guard.db`.
@@ -399,7 +403,23 @@ Set up one guarded token at a time:
    launch-guard --mode portfolio --portfolio-window
    ```
 
-6. After reviewing the imported cost bases and dry-run behavior, stop the
+6. In another Terminal, preflight the armed mint. This requests a real Jupiter
+   order, signs it locally, and sends it only to Solana's `simulateTransaction`
+   RPC method. The preflight excludes JupiterZ because its RFQ transaction
+   requires an additional market-maker signature supplied only during
+   execution. It never calls Jupiter's execution endpoint, never broadcasts,
+   and never advances the saved ladder stage:
+
+   ```bash
+   launch-guard --preflight-auto-sell-mint TOKEN_MINT
+   ```
+
+   Require `"result": "PASSED"` and `"broadcast": false` before considering
+   live mode. Review the displayed input amount, expected/minimum USDC output,
+   price impact, and simulation units.
+
+7. After reviewing the imported cost bases, dry-run behavior, and passing
+   preflight, stop the
    process, change `AUTO_SELL_LIVE=true`, and restart. On macOS, this keeps the
    machine from idle-sleeping while the bot is running:
 

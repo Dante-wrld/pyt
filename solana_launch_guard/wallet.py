@@ -116,6 +116,34 @@ class SolanaRpc:
             for mint, amount in sorted(totals.items())
         )
 
+    async def simulate_transaction(
+        self, signed_transaction_b64: str
+    ) -> dict[str, Any]:
+        """Simulate a signed transaction through RPC without broadcasting it."""
+        result = await asyncio.to_thread(
+            self._request,
+            "simulateTransaction",
+            [
+                signed_transaction_b64,
+                {
+                    "encoding": "base64",
+                    "sigVerify": True,
+                    "replaceRecentBlockhash": False,
+                    "commitment": "confirmed",
+                },
+            ],
+        )
+        if not isinstance(result, dict):
+            raise ConnectionError("Solana transaction simulation is unavailable")
+        value = result.get("value")
+        if not isinstance(value, dict):
+            raise ConnectionError("Solana returned an invalid simulation response")
+        error = value.get("err")
+        if error is not None:
+            detail = json.dumps(error, sort_keys=True, separators=(",", ":"))
+            raise RuntimeError(f"Solana transaction simulation failed: {detail}")
+        return value
+
     def _get_transaction_sync(self, signature: str) -> dict[str, Any] | None:
         result = self._request(
             "getTransaction",
