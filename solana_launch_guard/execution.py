@@ -224,6 +224,7 @@ class ProfitLadder:
         current_price_usd: float,
         entry_price_usd: float | None,
         original_cost_usd: float | None,
+        cycle: int = 0,
     ) -> SellIntent | None:
         if (
             stage not in {0, 1}
@@ -271,11 +272,12 @@ class ProfitLadder:
             )
             trigger = self.half_profit_trigger_multiple
 
+        cycle_key = f":cycle:{cycle}" if cycle > 0 else ""
         return SellIntent(
             mint=mint,
             symbol=symbol,
             stage=stage,
-            event_key=f"solana:{mint}:profit-ladder:{stage}",
+            event_key=f"solana:{mint}:profit-ladder:{stage}{cycle_key}",
             amount_raw=amount_raw,
             balance_raw=balance_raw,
             decimals=decimals,
@@ -365,6 +367,7 @@ class PortfolioSignalExitPlanner:
         reason: str,
         balance_raw: int,
         decimals: int,
+        cycle: int = 0,
     ) -> SellIntent | None:
         fraction = self.fractions.get(decision)
         if fraction is None or balance_raw <= 0 or decimals < 0:
@@ -377,11 +380,14 @@ class PortfolioSignalExitPlanner:
         if amount_raw <= 0:
             return None
         decision_key = decision.casefold().replace(" ", "-")
+        cycle_key = f":cycle:{cycle}" if cycle > 0 else ""
         return SellIntent(
             mint=mint,
             symbol=symbol,
             stage=self._STAGES[decision],
-            event_key=f"solana:{mint}:portfolio-signal:{decision_key}",
+            event_key=(
+                f"solana:{mint}:portfolio-signal:{decision_key}{cycle_key}"
+            ),
             amount_raw=amount_raw,
             balance_raw=balance_raw,
             decimals=decimals,
@@ -625,7 +631,7 @@ class JupiterSwapClient:
         data = json.dumps(payload).encode() if payload is not None else None
         headers = {
             "Accept": "application/json",
-            "User-Agent": "solana-launch-guard/0.20.1",
+            "User-Agent": "solana-launch-guard/0.21.0",
             "x-api-key": self.api_key,
         }
         if data is not None:

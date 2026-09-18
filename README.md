@@ -5,15 +5,16 @@ buyer/automatic seller for multichain crypto tokens.
 
 Launch Guard can automatically select fresh, confirmed Solana `BUY NOW`/`BUY
 ZONE` candidates and optionally execute wallet-wide `TAKE PARTIAL`, `PROTECT
-PROFIT`, and `EXIT WARNING` rules. Version 0.20.1 preserves Jupiter's
-`lastValidBlockHeight` as the string required by the `/execute` schema. Version
-0.20 added sanitized Jupiter error evidence, public-signature preservation, and
-an explicit reconcile-pause-resume workflow for frozen sell batches. Adaptive
-wallet-exit chunks can halve an unsafe quote without weakening either guard,
-and confirmed progress persists across polling cycles and restarts. Every
-unattended order must pass a Jupiter price-impact cap, a separate slippage cap,
-local signing, and Solana RPC simulation before broadcast. Principal remains
-limited to two $5 USDC seed purchases and two active bot-managed positions.
+PROFIT`, and `EXIT WARNING` rules. Version 0.21.0 requires persistent
+wallet-wide sell signals and adds an opt-in, post-sale recovery re-buy watch.
+The watch does not try to predict a bottom: it requires a measured drop,
+rebound, positive momentum, buyer pressure, retained liquidity, and repeated
+confirmation. Version 0.20.1 preserves Jupiter's `lastValidBlockHeight` as the
+string required by the `/execute` schema, while v0.20 added sanitized error
+evidence and an explicit reconcile-pause-resume workflow. Every unattended
+order must pass a Jupiter price-impact cap, a separate slippage cap, local
+signing, and Solana RPC simulation before broadcast. Principal remains limited
+to two $5 USDC seed purchases and two active bot-managed positions.
 Direct on-chain swaps use Jupiter; Launch Guard does not log in to or control
 Fomo's app or website.
 
@@ -46,13 +47,17 @@ Fomo's app or website.
 - Can dry-run or execute a two-stage, per-token-armed Solana profit ladder:
   recover the original USD principal at 2x, then sell half the remainder at 3x.
 - Can apply deterministic wallet-wide sell rules: sell 50% on `TAKE PARTIAL`
-  and 100% on `PROTECT PROFIT` or `EXIT WARNING`, with configurable fractions.
+  and 100% on `PROTECT PROFIT` or `EXIT WARNING`, with configurable fractions
+  and three fresh confirming polls by default.
 - Can preflight the next sale for one armed mint by building and locally
   signing the real Jupiter transaction, then simulating it without broadcasting.
 - Can either allow-list one Solana mint or automatically select fresh,
   sufficiently liquid, confirmed `BUY NOW`/`BUY ZONE` candidates.
 - Separates two $5 seed buys from a reinvestment pool containing only 50% of
   positive realized profit from bot-managed positions.
+- Can watch a confirmed full risk exit for one tightly limited recovery re-buy;
+  it shares the existing buy live switch, exclusions, position limit, seed
+  counter, profit pool, quote guards, signer, and simulation requirement.
 - Simulates take-profit and stop-loss exits using subsequent trade events.
 - Persists launches, decisions, positions, fills, and sell execution state in
   `launch_guard.db`.
@@ -176,6 +181,8 @@ pytest
 | `AUTO_SELL_PROTECT_PROFIT_FRACTION` | `1.0` | Fraction sold once for `PROTECT PROFIT` |
 | `AUTO_SELL_EXIT_WARNING_FRACTION` | `1.0` | Fraction sold once for `EXIT WARNING` |
 | `AUTO_SELL_MIN_VALUE_USD` | `1.0` | Minimum priced wallet holding eligible for portfolio-signal execution |
+| `AUTO_SELL_SIGNAL_CONFIRMATION_POLLS` | `3` | Consecutive fresh polls required before any wallet-wide signal sell |
+| `AUTO_SELL_SIGNAL_MAX_GAP_SECONDS` | `180` | Maximum interval between confirming sell polls; a longer gap restarts confirmation |
 | `AUTO_SELL_EXCLUDED_MINTS` | USDC mint | Exact Solana mints never sold by wallet-wide rules |
 | `AUTO_BUY_ENABLED` | `false` | Evaluate guarded Solana candidates; remains dry-run unless live mode is also enabled |
 | `AUTO_BUY_LIVE` | `false` | Permit locally signed Jupiter USDC purchases; requires live auto-selling |
@@ -190,6 +197,20 @@ pytest
 | `AUTO_BUY_REINVEST_PROFIT_PCT` | `50.0` | Positive realized-profit share credited to the reinvestment pool |
 | `AUTO_BUY_MAX_PRICE_IMPACT_PCT` | `5.0` | Reject a Jupiter buy order above this reported price impact |
 | `AUTO_BUY_MAX_SLIPPAGE_BPS` | `500` | Reject buy quotes whose reported or output-threshold slippage exceeds 5% |
+| `AUTO_REBUY_ENABLED` | `false` | Watch confirmed full risk exits for one guarded recovery buy; uses `AUTO_BUY_LIVE` for broadcast permission |
+| `AUTO_REBUY_COOLDOWN_SECONDS` | `600` | Minimum wait after a confirmed sale before recovery can qualify |
+| `AUTO_REBUY_MAX_WATCH_SECONDS` | `86400` | Expire an unrecovered watch after this many seconds |
+| `AUTO_REBUY_MIN_DROP_PCT` | `10.0` | Minimum observed drop below the confirmed average exit price |
+| `AUTO_REBUY_MIN_REBOUND_PCT` | `5.0` | Minimum recovery from the post-sale observed low |
+| `AUTO_REBUY_MIN_ENTRY_DISCOUNT_PCT` | `5.0` | Require the recovery entry to remain below the prior exit price |
+| `AUTO_REBUY_MIN_MOMENTUM_PCT` | `3.0` | Minimum positive five-minute price change during recovery |
+| `AUTO_REBUY_MIN_BUY_SELL_RATIO` | `1.4` | Minimum five-minute buyer/seller count ratio |
+| `AUTO_REBUY_MIN_BUYS_M5` | `8` | Minimum five-minute buy count |
+| `AUTO_REBUY_MIN_LIQUIDITY_USD` | `20000` | Absolute liquidity floor for a recovery buy |
+| `AUTO_REBUY_MIN_LIQUIDITY_RETENTION_PCT` | `80.0` | Minimum liquidity retained relative to the exit observation |
+| `AUTO_REBUY_CONFIRMATION_POLLS` | `3` | Consecutive qualifying recovery polls required |
+| `AUTO_REBUY_MAX_PER_TOKEN` | `1` | Lifetime recovery re-buys allowed per token in the current database |
+| `AUTO_REBUY_MAX_SIZE_USDC` | `5.0` | Additional cap on the existing seed/profit-funded buy budget |
 | `JUPITER_API_KEY` | empty | Private Jupiter API key required for live order and execution requests |
 | `ROBINHOOD_TOKEN_ADDRESSES` | empty | Comma-separated Robinhood Chain `0x` contracts to monitor in addition to discovery |
 | `ETHEREUM_TOKEN_ADDRESSES`, `BASE_TOKEN_ADDRESSES`, `BNB_TOKEN_ADDRESSES`, `BOB_TOKEN_ADDRESSES`, `MONAD_TOKEN_ADDRESSES`, `HYPEREVM_TOKEN_ADDRESSES` | empty | Exact contracts to monitor per chain |
@@ -226,6 +247,9 @@ Pump.fun events may represent token amounts in different unit scales. Because bo
 - Live quotes and transactions can fail, expire, be front-run, or produce a
   different result than a DEX Screener mark. A fast pump and reversal can occur
   between polling intervals.
+- Recovery re-buy conditions are retrospective safeguards, not a prediction
+  that a token will continue rising. A token can satisfy every guard and still
+  reverse immediately or lose all liquidity.
 - An exported Solana private key has authority over the entire wallet even
   though Launch Guard limits its own policy to armed ladder mints and eligible
   wallet-wide signals. A compromised computer, keychain, dependency, or
@@ -244,6 +268,9 @@ Pump.fun events may represent token amounts in different unit scales. Because bo
 - The seller rejects excessive reported price impact, records an idempotent
   claim before submission, and advances a stage only after Jupiter reports a
   confirmed success with a transaction signature.
+- Wallet-wide signal sells require the same actionable decision for three
+  consecutive fresh polls by default. A `HOLD`, `UNPRICED`, changed decision,
+  or stale interval resets confirmation; profit-ladder triggers are unaffected.
 - Any uncertain or failed execution is frozen for human review with no
   automatic retry, avoiding a duplicate sell when the first result is unknown.
 - Jupiter HTTP failures retain only allow-listed, length-limited error fields,
@@ -497,8 +524,13 @@ wallet is evaluated on each portfolio poll:
 - `PROTECT PROFIT` sells 100% once;
 - `EXIT WARNING` sells 100% once.
 
-The fractions are configurable. Each mint/decision pair has a unique stored
-execution key, so a persistent state cannot submit the same rule repeatedly.
+The fractions are configurable. A rule must remain unchanged for three fresh
+polls by default before it becomes executable; one transient WET-style selloff
+therefore does not trigger an order. Confirmation is stored across short
+restarts, expires after the configured maximum gap, and resets on a non-sell
+state. Each mint/decision/cycle has a unique stored execution key, so a
+persistent state cannot submit the same rule repeatedly, while a confirmed
+re-buy starts a fresh sell cycle.
 Every live attempt is signed locally and RPC-simulated immediately before the
 Jupiter execution call. USDC is excluded by default. Add stablecoins,
 long-term holdings, or unwanted tokens to `AUTO_SELL_EXCLUDED_MINTS` before
@@ -520,6 +552,8 @@ AUTO_SELL_TAKE_PARTIAL_FRACTION=0.5
 AUTO_SELL_PROTECT_PROFIT_FRACTION=1.0
 AUTO_SELL_EXIT_WARNING_FRACTION=1.0
 AUTO_SELL_MIN_VALUE_USD=1.0
+AUTO_SELL_SIGNAL_CONFIRMATION_POLLS=3
+AUTO_SELL_SIGNAL_MAX_GAP_SECONDS=180
 AUTO_SELL_MAX_PRICE_IMPACT_PCT=5.0
 AUTO_SELL_MAX_SLIPPAGE_BPS=500
 AUTO_SELL_ADAPTIVE_CHUNKS=false
@@ -677,6 +711,66 @@ automatically disarmed afterward. A previously disarmed policy is not
 automatically rearmed. Use `--disarm-auto-buy-mint TOKEN_MINT` as the per-mint
 kill switch and set `AUTO_BUY_LIVE=false` before restarting to disable all
 purchases.
+
+#### Guarded post-sale recovery re-buy
+
+`AUTO_REBUY_ENABLED` is a separate opt-in policy. A watch is created only after
+Launch Guard confirms a complete `EXIT WARNING` sale. Partial-profit sales,
+profit-ladder sales, dry-run alerts, rejected requests, and uncertain
+executions do not create a watch.
+
+The stored average USDC exit price and exit-time liquidity anchor the recovery.
+With the defaults, the token must first trade at least 10% below the exit, then
+rebound at least 5% from its observed low while remaining at least 5% below the
+exit. Five-minute momentum must be at least +3%, buyer/seller count at least
+1.4x with eight buys, liquidity at least $20,000 and 80% of exit liquidity, and
+the price must be above the preceding poll. All conditions must hold for three
+consecutive polls after a ten-minute cooldown. The watch expires after 24 hours.
+
+This is confirmation of a measured recovery, not bottom detection or a promise
+of further gains. The default permits only one completed recovery re-buy per
+token. It refuses to mix cost bases if the wallet already holds the mint. A
+confirmed re-buy imports its exact execution cost, resets the token's sell
+ladder and peak/liquidity baseline, and uses a new persisted sell cycle.
+
+Recovery buys cannot bypass buying limits. They use at most 5 USDC, count
+against the same two lifetime seed buys and two open positions, and use only
+the profit pool after both seed buys are spent. `AUTO_BUY_LIVE=false` keeps
+qualified recovery buys in dry-run even if selling is live.
+
+Configure and inspect it in dry-run first:
+
+```dotenv
+AUTO_SELL_ENABLED=true
+AUTO_BUY_ENABLED=true
+AUTO_BUY_LIVE=false
+AUTO_REBUY_ENABLED=true
+AUTO_REBUY_COOLDOWN_SECONDS=600
+AUTO_REBUY_MAX_WATCH_SECONDS=86400
+AUTO_REBUY_MIN_DROP_PCT=10.0
+AUTO_REBUY_MIN_REBOUND_PCT=5.0
+AUTO_REBUY_MIN_ENTRY_DISCOUNT_PCT=5.0
+AUTO_REBUY_MIN_MOMENTUM_PCT=3.0
+AUTO_REBUY_MIN_BUY_SELL_RATIO=1.4
+AUTO_REBUY_MIN_BUYS_M5=8
+AUTO_REBUY_MIN_LIQUIDITY_USD=20000
+AUTO_REBUY_MIN_LIQUIDITY_RETENTION_PCT=80.0
+AUTO_REBUY_CONFIRMATION_POLLS=3
+AUTO_REBUY_MAX_PER_TOKEN=1
+AUTO_REBUY_MAX_SIZE_USDC=5.0
+```
+
+Use these non-broadcasting controls:
+
+```bash
+launch-guard --auto-rebuy-status
+launch-guard --preflight-auto-rebuy-mint TOKEN_MINT
+launch-guard --cancel-auto-rebuy-mint TOKEN_MINT
+```
+
+Preflight verifies the current route, signer, wallet balances, quote guards,
+and RPC simulation for an active watch; it does not itself declare that the
+recovery signal is ready. Require `"broadcast": false`.
 
 The current [Fomo Terms](https://fomo.family/terms) prohibit automated scripts
 or bots from executing trades or controlling account activity on Fomo's
