@@ -38,7 +38,8 @@ class CanaryPolicy:
 
 def select_live_candidate(snapshot: dict[str, Any], policy: CanaryPolicy) -> dict[str, Any]:
     generated_at = float(snapshot.get("generated_at") or 0)
-    age = time.time() - generated_at
+    now = time.time()
+    age = now - generated_at
     if generated_at <= 0 or age < 0 or age > policy.maximum_signal_age_seconds:
         raise ValueError("recommendation snapshot is missing or stale")
     candidates = snapshot.get("candidates")
@@ -50,6 +51,12 @@ def select_live_candidate(snapshot: dict[str, Any], policy: CanaryPolicy) -> dic
         if raw.get("chain") not in {None, "solana"}:
             continue
         if raw.get("decision") not in {"BUY NOW", "BUY ZONE"}:
+            continue
+        try:
+            quoted_at = float(raw.get("quoted_at") or 0)
+        except (TypeError, ValueError):
+            continue
+        if quoted_at <= 0 or quoted_at > now or now - quoted_at > policy.maximum_signal_age_seconds:
             continue
         if float(raw.get("liquidity_usd") or 0) < policy.minimum_liquidity_usd:
             continue
