@@ -24,6 +24,7 @@ SENSITIVE_FRAGMENTS = (
 
 class ProposalAction(str, Enum):
     BUY = "BUY"
+    REBUY = "REBUY"
     HOLD = "HOLD"
     TAKE_PARTIAL = "TAKE_PARTIAL"
     SELL = "SELL"
@@ -71,6 +72,9 @@ ROLE_BOUNDARIES: dict[AgentRole, str] = {
     ),
     AgentRole.PORTFOLIO_MANAGER: (
         "You may return HOLD, TAKE_PARTIAL, or SELL for an owned position. "
+        "You may recommend REBUY with requested_usd=0 only for a verified "
+        "net-loss sale marked REBUY REVIEW in loss_sale_reviews. This is "
+        "advisory only, never an order. Otherwise use WATCH or HOLD. "
         "You may not originate a BUY."
     ),
     AgentRole.COPY_TRADER: (
