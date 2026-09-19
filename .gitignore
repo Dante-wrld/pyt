@@ -13,3 +13,5 @@ dist/
 build/
 *.egg-info/
 upload/
+launch_guard_agents*.jsonl
+launch_guard_agent_reports/
