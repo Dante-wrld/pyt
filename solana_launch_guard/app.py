@@ -118,6 +118,9 @@ def _is_stock_token_symbol(
 
 class LaunchGuard:
     def __init__(self, settings: Settings, store: SQLiteStore) -> None:
+        if os.getenv("AGENT_LIVE_CANARY_ONLY", "false").strip().lower() in {"true", "1", "yes", "on"}:
+            if settings.auto_buy_live or settings.auto_rebuy_enabled:
+                raise ValueError("canary-only mode requires AUTO_BUY_LIVE=false and AUTO_REBUY_ENABLED=false")
         self.settings = settings
         self.store = store
         self.broker = PaperBroker(settings, store)
@@ -1262,6 +1265,10 @@ class LaunchGuard:
     ) -> None:
         if not self.settings.auto_sell_enabled:
             return
+        if os.getenv("AGENT_LIVE_CANARY_ONLY", "false").strip().lower() in {"true", "1", "yes", "on"}:
+            from .agent_live_test import canary_exit_allowed
+            if not canary_exit_allowed(signal.token_address):
+                return
         if signal.token_address in self.settings.auto_sell_excluded_mints:
             self.store.clear_auto_sell_signal_confirmation(
                 signal.token_address
