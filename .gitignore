@@ -18,3 +18,5 @@ launch_guard_agent_reports/
 launch_guard_agent_capital.json
 launch_guard_agent_decisions.jsonl
 launch_guard_copy_signals.json
+
+launch_guard_live_canary.json

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
 import time
@@ -81,6 +82,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--shadow-once",
         action="store_true",
         help="make one decision per agent from current read-only snapshots",
+    )
+    group.add_argument(
+        "--live-test-preflight",
+        action="store_true",
+        help="simulate the one-time $1 mainnet canary; never broadcast",
+    )
+    group.add_argument(
+        "--live-test-execute",
+        action="store_true",
+        help="rerun simulation and broadcast the one-time $1 mainnet canary",
+    )
+    parser.add_argument(
+        "--confirm",
+        help="required literal confirmation for --live-test-execute",
     )
     return parser
 
@@ -294,6 +309,15 @@ def main() -> None:
         elif args.shadow_once:
             model = OpenAIProposalModel()
             result = shadow_once(model, book)
+        elif args.live_test_preflight or args.live_test_execute:
+            from .agent_live_test import run_live_canary
+
+            result = asyncio.run(
+                run_live_canary(
+                    execute=args.live_test_execute,
+                    confirmation=args.confirm,
+                )
+            )
         else:
             model = OpenAIProposalModel()
             result = connection_test(model) if args.test_api else paper_demo(model)

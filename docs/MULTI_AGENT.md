@@ -83,3 +83,9 @@ After the regular Launch Guard monitor has written fresh recommendation and port
 The Opportunity Hunter reads the highest-ranked recommendation, the Portfolio Manager reads the highest-priority owned-position signal, and the Copy Trader reads `AGENT_COPY_SIGNAL_PATH` when a leader-data adapter supplies it. Missing or stale inputs fail closed through the arbiter. Approved BUY proposals create virtual positions only. Decisions are appended locally to `AGENT_DECISION_LOG_PATH`.
 
 This release does not connect agent approval to Jupiter, a signer, or live execution. The capital file explicitly records `live_execution: false`.
+
+## One-time supervised live canary
+
+Version 0.26 adds a one-attempt, $1 USDC mainnet canary. It is disabled by default and does not make continuous agent execution live. Before any broadcast it requires a fresh BUY NOW/BUY ZONE recommendation, at least $50,000 liquidity, complete entry confirmations, a matching Keychain signer, sufficient USDC, no existing holding in the mint, live exit protection, price impact at or below 3%, slippage at or below 300 bps, and a successful RPC simulation.
+
+Keep `AGENT_LIVE_KILL_SWITCH=true` except during the supervised test. First run `launch-guard-agents --live-test-preflight`. Only after reviewing that output, run `launch-guard-agents --live-test-execute --confirm SPEND_1_USDC_ON_MAINNET`. A local journal makes the canary one-attempt-only and blocks blind retry after an uncertain outcome.
