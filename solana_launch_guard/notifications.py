@@ -223,6 +223,7 @@ class PortfolioNotifier:
         high_priority_decisions: tuple[str, ...],
         cooldown_seconds: float,
         clock: Callable[[], float] = time.time,
+        min_sell_value_usd: float = 2.0,
     ) -> None:
         self.client = client
         self.store = store
@@ -230,10 +231,15 @@ class PortfolioNotifier:
         self.high_priority_decisions = frozenset(high_priority_decisions)
         self.cooldown_seconds = cooldown_seconds
         self.clock = clock
+        self.min_sell_value_usd = min_sell_value_usd
         self._retry_after: dict[str, float] = {}
 
     async def maybe_send(self, signal: PortfolioSignal) -> bool:
         key = f"{signal.chain}:{signal.token_address.casefold()}"
+        if (signal.current_value_usd is None
+                or signal.current_value_usd < self.min_sell_value_usd):
+            self._save_state(signal, key, self.clock())
+            return False
         previous_state = self.store.last_notification(
             "portfolio_signal", key
         )
