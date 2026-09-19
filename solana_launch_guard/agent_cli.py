@@ -288,7 +288,6 @@ def shadow_once(model: OpenAIProposalModel | None, book: CapitalBook, *, portfol
     copy_data = _read_json(
         os.getenv("AGENT_COPY_SIGNAL_PATH", "launch_guard_copy_signals.json")
     )
-    accounts = {row.agent_id: row for row in book.accounts()}
     candidate = _solana_opportunity(recommendations.get("candidates")) if core_only and _snapshot_is_fresh(recommendations) else ({} if core_only else _first_dict(recommendations.get("candidates")))
     holding = _priced_sell_signal(portfolio.get("signals")) if (portfolio_sell_only or core_only) and _snapshot_is_fresh(portfolio) else ({} if portfolio_sell_only or core_only else _first_dict(portfolio.get("signals")))
     leader = _first_dict(copy_data.get("signals"))
@@ -321,7 +320,7 @@ def shadow_once(model: OpenAIProposalModel | None, book: CapitalBook, *, portfol
     )
     results: list[dict[str, object]] = []
     for agent_id, role, context in inputs:
-        account = accounts[agent_id]
+        account = {row.agent_id: row for row in book.accounts()}[agent_id]
         source = next(iter(context.values()))
         liquidity = float(source.get("liquidity_usd") or 0) if source else 0
         generated = {
@@ -351,6 +350,7 @@ def shadow_once(model: OpenAIProposalModel | None, book: CapitalBook, *, portfol
             ),
         )
         shadow_position = None
+        shadow_fill = None
         if arbitration.approved and proposal.action is TradeAction.BUY:
             price = float(source.get("price") or source.get("current_price") or 0)
             shadow_position = book.reserve_shadow_buy(
@@ -361,6 +361,8 @@ def shadow_once(model: OpenAIProposalModel | None, book: CapitalBook, *, portfol
                 entry_price=price,
                 price_currency=str(source.get("price_currency") or "UNKNOWN"),
             )
+            shadow_fill = {"action": "BUY", "mint": proposal.mint, "amount_usd": arbitration.approved_usd}
+        updated_account = {row.agent_id: row for row in book.accounts()}[agent_id]
         results.append(
             {
                 "agent_id": agent_id,
@@ -381,6 +383,13 @@ def shadow_once(model: OpenAIProposalModel | None, book: CapitalBook, *, portfol
                     "reasons": list(arbitration.reasons),
                 },
                 "shadow_position": shadow_position,
+                "shadow_fill": shadow_fill,
+                "shadow_balance": {
+                    "cash_usd": updated_account.cash_usd,
+                    "reserved_usd": updated_account.reserved_usd,
+                    "equity_usd": updated_account.equity_usd,
+                    "open_positions": updated_account.open_positions,
+                },
             }
         )
     output = {
