@@ -4,6 +4,9 @@ from solana_launch_guard.portfolio import (
     format_portfolio_dashboard,
 )
 from solana_launch_guard.notifications import format_portfolio_notification
+from solana_launch_guard.notifications import PortfolioNotifier
+from dataclasses import replace
+import asyncio
 
 
 def _quote(**changes):
@@ -44,3 +47,57 @@ def test_buy_more_and_hold_render_with_advisory_alerts():
     assert "BUY MORE" in dashboard and "HOLD" in dashboard
     assert "Advisory only" in format_portfolio_notification(buy)[1]
     assert "HOLD POSITION" in format_portfolio_notification(hold)[0]
+
+
+def test_sub_two_dollar_holding_never_suggests_a_sell():
+    advisor = PortfolioAdvisor()
+    tiny = OwnedHolding("solana", "Mint111", "TEST", 1, 3, "USD")
+    signal = advisor.evaluate(tiny, _quote(price_usd=1.90, price_change_m5_pct=-12,
+                                           buys_m5=2, sells_m5=9))
+    assert signal.decision == "HOLD"
+    assert "sell minimum" in signal.reason
+    assert advisor.below_sell_minimum_for("solana", "Mint111")
+
+
+def test_recovery_across_sell_floor_requires_two_bearish_signals():
+    advisor = PortfolioAdvisor()
+    holding = OwnedHolding("solana", "Mint111", "TEST", 1, 3, "USD")
+    advisor.evaluate(holding, _quote(price_usd=1.90))
+    # A stop-loss alone cannot predict that another rise is unlikely.
+    rebound = advisor.evaluate(holding, _quote(price_usd=2.20, buys_m5=20,
+                                               sells_m5=1, price_change_m5_pct=2))
+    assert rebound.decision == "HOLD"
+    # Momentum reversal together with a large drawdown provides observable evidence.
+    advisor.restore_state(chain="solana", token_address="Mint111", peak_price=3.0,
+                          baseline_liquidity_usd=60_000, below_sell_minimum=True)
+    bearish = advisor.evaluate(holding, _quote(price_usd=2.20, buys_m5=2,
+                                               sells_m5=9, price_change_m5_pct=-10))
+    assert bearish.decision == "EXIT WARNING"
+
+
+def test_partial_sell_below_two_dollars_is_not_recommended():
+    holding = OwnedHolding("solana", "Mint111", "TEST", 1, 2, "USD")
+    signal = PortfolioAdvisor().evaluate(holding, _quote(price_usd=3.0))
+    assert signal.decision == "HOLD"
+    assert "partial sell" in signal.reason
+
+
+def test_phone_alert_suppressed_below_floor_even_for_exit_warning():
+    class Store:
+        def last_notification(self, *args):
+            return None
+        def save_notification(self, **kwargs):
+            pass
+    class Client:
+        def __init__(self):
+            self.calls = 0
+        async def send(self, **kwargs):
+            self.calls += 1
+    client = Client()
+    notifier = PortfolioNotifier(client=client, store=Store(),
+                                 decisions=("EXIT WARNING",),
+                                 high_priority_decisions=("EXIT WARNING",),
+                                 cooldown_seconds=300)
+    signal = PortfolioAdvisor().evaluate(_holding(), _quote(price_usd=7))
+    assert asyncio.run(notifier.maybe_send(replace(signal, current_value_usd=1.99))) is False
+    assert client.calls == 0
