@@ -40,6 +40,7 @@ class PortfolioSignal:
     liquidity_usd: float | None
     entry_price: float | None
     peak_price: float | None
+    exit_research: dict[str, Any] | None = None
 
 
 @dataclass(slots=True)

@@ -1103,6 +1103,12 @@ class LaunchGuard:
                     for holding, quote in results
                 ]
                 # Add candle evidence only to an existing advisory rebound watch.
+                # Exit research is visible to agents but does not replace executable guidance.
+                for index, (holding, quote) in enumerate(results):
+                    if holding.chain == "solana" and quote is not None:
+                        signals[index].exit_research = self.structure_scanner.exit_research(
+                            pool=quote.pair_address, mint=holding.token_address,
+                        )
                 # Sell and profit-protection decisions retain their precedence.
                 for index, (holding, quote) in enumerate(results):
                     if (
