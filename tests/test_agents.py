@@ -72,6 +72,14 @@ def test_copy_buy_requires_leader_attribution():
         proposal(role=AgentRole.COPY_TRADER).validate()
 
 
+def test_entry_only_limits_do_not_trap_risk_reducing_sell():
+    result = RiskArbiter().evaluate(
+        proposal(action=TradeAction.SELL, requested_usd=5),
+        risk(liquidity_usd=100, open_positions=2, daily_realized_pnl_usd=-16),
+    )
+    assert result.approved
+
+
 def test_daily_report_keeps_agent_attribution_and_net_fees():
     when = datetime(2026, 9, 19, tzinfo=UTC)
     rows = [
