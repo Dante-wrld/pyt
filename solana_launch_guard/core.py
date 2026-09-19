@@ -453,6 +453,7 @@ class SQLiteStore:
                 token_address TEXT NOT NULL,
                 peak_price REAL NOT NULL,
                 baseline_liquidity_usd REAL NOT NULL,
+                below_sell_minimum INTEGER NOT NULL DEFAULT 0,
                 updated_at TEXT NOT NULL,
                 PRIMARY KEY (chain, token_address)
             );
@@ -654,6 +655,15 @@ class SQLiteStore:
             self.connection.execute(
                 "ALTER TABLE auto_sell_batches "
                 "ADD COLUMN proceeds_usdc_raw INTEGER NOT NULL DEFAULT 0"
+            )
+        portfolio_columns = {
+            str(row["name"])
+            for row in self.connection.execute("PRAGMA table_info(portfolio_states)")
+        }
+        if "below_sell_minimum" not in portfolio_columns:
+            self.connection.execute(
+                "ALTER TABLE portfolio_states "
+                "ADD COLUMN below_sell_minimum INTEGER NOT NULL DEFAULT 0"
             )
         self.connection.commit()
 
@@ -887,16 +897,18 @@ class SQLiteStore:
         token_address: str,
         peak_price: float,
         baseline_liquidity_usd: float,
+        below_sell_minimum: bool = False,
     ) -> None:
         self.connection.execute(
             """
             INSERT INTO portfolio_states(
                 chain, token_address, peak_price,
-                baseline_liquidity_usd, updated_at
-            ) VALUES (?, ?, ?, ?, ?)
+                baseline_liquidity_usd, below_sell_minimum, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(chain, token_address) DO UPDATE SET
                 peak_price = excluded.peak_price,
                 baseline_liquidity_usd = excluded.baseline_liquidity_usd,
+                below_sell_minimum = excluded.below_sell_minimum,
                 updated_at = excluded.updated_at
             """,
             (
@@ -904,6 +916,7 @@ class SQLiteStore:
                 token_address,
                 peak_price,
                 baseline_liquidity_usd,
+                int(below_sell_minimum),
                 utc_now(),
             ),
         )
@@ -911,7 +924,8 @@ class SQLiteStore:
 
     def load_portfolio_states(self) -> list[dict[str, Any]]:
         rows = self.connection.execute(
-            "SELECT chain, token_address, peak_price, baseline_liquidity_usd "
+            "SELECT chain, token_address, peak_price, baseline_liquidity_usd, "
+            "below_sell_minimum "
             "FROM portfolio_states"
         ).fetchall()
         return [dict(row) for row in rows]

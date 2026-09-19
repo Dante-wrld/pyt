@@ -312,6 +312,7 @@ class LaunchGuard:
                 cooldown_seconds=(
                     settings.pushover_portfolio_cooldown_seconds
                 ),
+                min_sell_value_usd=settings.portfolio_min_sell_value_usd,
             )
         self.strategy = AdaptiveStrategy(
             trailing_activation_pct=settings.trailing_activation_pct,
@@ -333,6 +334,8 @@ class LaunchGuard:
             momentum_exit_pct=settings.momentum_exit_pct,
             sell_pressure_ratio=settings.sell_pressure_ratio,
             liquidity_drop_pct=settings.liquidity_drop_pct,
+            min_sell_value_usd=settings.portfolio_min_sell_value_usd,
+            partial_sell_fraction=settings.auto_sell_take_partial_fraction,
         )
         self.profit_ladder = ProfitLadder(
             principal_trigger_multiple=(
@@ -396,6 +399,7 @@ class LaunchGuard:
                 baseline_liquidity_usd=float(
                     state["baseline_liquidity_usd"]
                 ),
+                below_sell_minimum=bool(state["below_sell_minimum"]),
             )
         self._restore_auto_buy_discovery_candidates()
 
@@ -1233,6 +1237,9 @@ class LaunchGuard:
                             token_address=signal.token_address,
                             peak_price=peak_price,
                             baseline_liquidity_usd=baseline_liquidity,
+                            below_sell_minimum=self.portfolio_advisor.below_sell_minimum_for(
+                                signal.chain, signal.token_address
+                            ),
                         )
                 signals = [
                     signal
@@ -1361,7 +1368,7 @@ class LaunchGuard:
             and self.settings.auto_sell_portfolio_signals
             and signal.current_value_usd is not None
             and signal.current_value_usd
-            >= self.settings.auto_sell_min_value_usd
+            >= max(self.settings.auto_sell_min_value_usd, self.settings.portfolio_min_sell_value_usd)
             and signal.decision
             in {"TAKE PARTIAL", "PROTECT PROFIT", "EXIT WARNING"}
         )
@@ -1400,6 +1407,17 @@ class LaunchGuard:
                 signal.token_address
             )
         if intent is None:
+            return
+        minimum_sell_value = max(
+            self.settings.auto_sell_min_value_usd,
+            self.settings.portfolio_min_sell_value_usd,
+        )
+        if (signal.current_value_usd is None or balance.raw_amount <= 0
+                or signal.current_value_usd * intent.amount_raw / balance.raw_amount
+                < minimum_sell_value):
+            self.store.clear_auto_sell_signal_confirmation(signal.token_address)
+            LOGGER.info("AUTO-SELL SKIPPED %s: estimated sell amount below $%.2f",
+                        signal.symbol, minimum_sell_value)
             return
         if self.auto_seller is None:
             if intent.event_key not in self.auto_sell_dry_run_seen:
@@ -1465,6 +1483,10 @@ class LaunchGuard:
             else:
                 simulation = await self.auto_seller.preflight(intent, rpc)
             prepared = simulation.prepared
+            if prepared.minimum_output_raw < math.ceil(minimum_sell_value * 1_000_000):
+                LOGGER.info("AUTO-SELL SKIPPED %s: minimum quoted output below $%.2f",
+                            intent.symbol, minimum_sell_value)
+                return
         except (ConnectionError, RuntimeError, ValueError) as exc:
             LOGGER.warning(
                 "AUTO-SELL NOT SUBMITTED %s source=%s (%s)",

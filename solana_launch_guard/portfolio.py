@@ -46,6 +46,7 @@ class PortfolioSignal:
 class _HoldingState:
     peak_price: float
     baseline_liquidity_usd: float
+    below_sell_minimum: bool = False
 
 
 class PortfolioAdvisor:
@@ -61,6 +62,8 @@ class PortfolioAdvisor:
         momentum_exit_pct: float = -8,
         sell_pressure_ratio: float = 1.5,
         liquidity_drop_pct: float = 30,
+        min_sell_value_usd: float = 2.0,
+        partial_sell_fraction: float = 0.5,
     ) -> None:
         self.take_partial_pct = take_partial_pct
         self.stop_loss_pct = stop_loss_pct
@@ -69,6 +72,10 @@ class PortfolioAdvisor:
         self.momentum_exit_pct = momentum_exit_pct
         self.sell_pressure_ratio = sell_pressure_ratio
         self.liquidity_drop_pct = liquidity_drop_pct
+        if min_sell_value_usd <= 0:
+            raise ValueError("minimum sell value must be positive")
+        self.min_sell_value_usd = min_sell_value_usd
+        self.partial_sell_fraction = partial_sell_fraction
         self.states: dict[str, _HoldingState] = {}
 
     def restore_state(
@@ -78,6 +85,7 @@ class PortfolioAdvisor:
         token_address: str,
         peak_price: float,
         baseline_liquidity_usd: float,
+        below_sell_minimum: bool = False,
     ) -> None:
         if peak_price <= 0:
             return
@@ -85,6 +93,7 @@ class PortfolioAdvisor:
         self.states[key] = _HoldingState(
             peak_price=peak_price,
             baseline_liquidity_usd=max(0, baseline_liquidity_usd),
+            below_sell_minimum=below_sell_minimum,
         )
 
     def state_for(
@@ -94,6 +103,10 @@ class PortfolioAdvisor:
         if state is None:
             return None
         return state.peak_price, state.baseline_liquidity_usd
+
+    def below_sell_minimum_for(self, chain: str, token_address: str) -> bool:
+        state = self.states.get(f"{chain}:{token_address.casefold()}")
+        return state.below_sell_minimum if state is not None else False
 
     def evaluate(
         self,
@@ -257,6 +270,38 @@ class PortfolioAdvisor:
                 reason = "market structure is inside limits; cost basis unknown"
             else:
                 reason = f"open P/L {pnl_pct:+.1f}%; risk triggers not reached"
+
+        # A holding below the app's sellable amount cannot act on exit advice.
+        # A recovery across the floor still needs independent bearish evidence;
+        # a model cannot establish that another rise is impossible.
+        if current_value_usd is None or current_value_usd < self.min_sell_value_usd:
+            if current_value_usd is not None:
+                state.below_sell_minimum = True
+            decision = "HOLD"
+            reason = (
+                f"position below ${self.min_sell_value_usd:.2f} sell minimum; "
+                "wait for a sellable value and confirmed exit conditions"
+                if current_value_usd is not None else
+                "position value unavailable; cannot check the sell minimum"
+            )
+        elif decision == "TAKE PARTIAL" and current_value_usd * self.partial_sell_fraction < self.min_sell_value_usd:
+            decision = "HOLD"
+            reason = (
+                f"partial sell would be below ${self.min_sell_value_usd:.2f}; "
+                "wait for a sellable amount"
+            )
+        elif state.below_sell_minimum:
+            if decision in {"EXIT WARNING", "PROTECT PROFIT", "TAKE PARTIAL"}:
+                bearish = (
+                    momentum_reversal
+                    and (liquidity_break or drawdown_from_peak <= -self.trailing_stop_pct)
+                )
+                if not bearish:
+                    decision = "HOLD"
+                    reason = (
+                        f"position recovered above ${self.min_sell_value_usd:.2f}; "
+                        "waiting for both seller pressure and liquidity/peak deterioration"
+                    )
 
         return PortfolioSignal(
             chain=holding.chain,

@@ -219,7 +219,7 @@ def _priced_sell_signal(value: object) -> dict[str, object]:
             liquidity = float(item.get("liquidity_usd") or 0)
         except (TypeError, ValueError):
             continue
-        if all(map(math.isfinite, (price, amount, liquidity))) and min(price, amount, liquidity) > 0:
+        if all(map(math.isfinite, (price, amount, liquidity))) and price > 0 and amount >= 2 and liquidity > 0:
             eligible.append(item)
     return max(eligible, key=lambda x: (priorities[x["decision"]], float(x["current_value_usd"])), default={})
 
