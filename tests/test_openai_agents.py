@@ -66,6 +66,10 @@ def test_agent_cli_requires_one_safe_command():
     assert build_parser().parse_args(["--test-api"]).test_api is True
     with pytest.raises(SystemExit):
         build_parser().parse_args([])
+    assert build_parser().parse_args(
+        ["--initialize-capital", "30"]
+    ).initialize_capital == 30
+    assert build_parser().parse_args(["--shadow-once"]).shadow_once is True
 
 
 def test_credit_error_is_explained_without_a_traceback_message():
