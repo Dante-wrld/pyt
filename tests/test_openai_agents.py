@@ -102,6 +102,35 @@ def test_core_cycle_reviews_sell_before_hunter(tmp_path, monkeypatch):
     assert [item["agent_id"] for item in result["agents"]] == ["portfolio-v1", "hunter-v1"]
 
 
+def test_shadow_buy_updates_reported_cash_and_sell_approval_does_not(tmp_path, monkeypatch):
+    recommendations = tmp_path / "recommendations.json"
+    portfolio = tmp_path / "portfolio.json"
+    recommendations.write_text(json.dumps({"generated_at": time.time(), "candidates": [{"chain": "solana", "mint": "A" * 32, "symbol": "A", "decision": "BUY ZONE", "price": 1, "liquidity_usd": 20000}]}))
+    portfolio.write_text(json.dumps({"generated_at": time.time(), "signals": [{"chain": "solana", "token_address": "B" * 32, "decision": "EXIT WARNING", "current_price": 1, "current_value_usd": 2, "liquidity_usd": 20000}]}))
+    monkeypatch.setenv("RECOMMENDATION_SNAPSHOT_PATH", str(recommendations))
+    monkeypatch.setenv("PORTFOLIO_SNAPSHOT_PATH", str(portfolio))
+    monkeypatch.setenv("AGENT_DECISION_LOG_PATH", str(tmp_path / "decisions.jsonl"))
+    book = CapitalBook(tmp_path / "capital.json")
+    book.initialize(30)
+
+    class Model:
+        def propose(self, *, role, context):
+            if role is AgentRole.OPPORTUNITY_HUNTER:
+                return {"action": "BUY", "mint": "A" * 32, "requested_usd": 5, "confidence": 0.9, "thesis": "test"}
+            return {"action": "SELL", "mint": "B" * 32, "requested_usd": 2, "confidence": 0.9, "thesis": "test"}
+
+    result = shadow_once(Model(), book, core_only=True)
+    sell, buy = result["agents"]
+    assert sell["arbitration"]["approved"] is True
+    assert sell["shadow_fill"] is None
+    assert sell["shadow_balance"]["cash_usd"] == 30
+    assert buy["shadow_fill"]["amount_usd"] == 5
+    assert buy["shadow_balance"]["cash_usd"] == 25
+    assert buy["shadow_balance"]["reserved_usd"] == 5
+    assert result["capital"]["agents"][0]["cash_usd"] == 25
+    assert book.public_status()["agents"][0]["cash_usd"] == 25
+
+
 def test_solana_opportunity_skips_other_chains_and_avoid():
     ethereum = {"chain": "ethereum", "decision": "BUY NOW", "mint": "0x" + "a" * 40}
     avoid = {"chain": "solana", "decision": "AVOID", "mint": "B" * 32}
