@@ -1309,8 +1309,12 @@ class LaunchGuard:
                 original_cost_usd=holding.cost_amount,
                 cycle=cycle,
             )
-            if intent is not None:
+            if intent is not None and signal.decision in {
+                "TAKE PARTIAL", "PROTECT PROFIT", "EXIT WARNING"
+            }:
                 source = "profit ladder"
+            else:
+                intent = None
 
         portfolio_signal_eligible = (
             intent is None
@@ -1436,6 +1440,21 @@ class LaunchGuard:
                 LOGGER.info("AUTO-SELL SKIPPED %s: minimum quoted output below $%.2f",
                             intent.symbol, minimum_sell_value)
                 return
+            if signal.decision in {"TAKE PARTIAL", "PROTECT PROFIT"}:
+                if (holding is None or holding.cost_amount is None or
+                    holding.price_currency != "USD" or holding.quantity <= 0 or
+                    abs(holding.quantity - balance.amount) / balance.amount >= 0.01):
+                    LOGGER.info("AUTO-SELL SKIPPED %s: verified USD cost basis unavailable",
+                                intent.symbol)
+                    return
+                allocated_raw = math.ceil(
+                    holding.cost_amount * prepared.input_amount_raw
+                    / balance.raw_amount * 1_000_000
+                )
+                if prepared.minimum_output_raw <= allocated_raw:
+                    LOGGER.info("AUTO-SELL SKIPPED %s: minimum quoted proceeds do not cover allocated cost",
+                                intent.symbol)
+                    return
         except (ConnectionError, RuntimeError, ValueError) as exc:
             LOGGER.warning(
                 "AUTO-SELL NOT SUBMITTED %s source=%s (%s)",
@@ -2753,6 +2772,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="one-time guarded live full exit of a named owned Solana mint",
     )
     parser.add_argument(
+        "--verify-owned-sell-mint",
+        metavar="MINT",
+        help="read the one-time sell receipt, confirmed on-chain transaction, and current wallet balances",
+    )
+    parser.add_argument(
         "--confirm-owned-sell-mint",
         metavar="MINT",
         help="repeat the exact mint to authorize its one-time live sale",
@@ -3179,6 +3203,81 @@ async def execute_owned_sell_once(
               "signature": sale.signature, "input_amount_raw": sale.input_amount_raw,
               "output_usdc": sale.output_amount_raw / 1_000_000}
     journal.record(result)
+    return result
+
+
+async def verify_owned_sell(
+    settings: Settings, store: SQLiteStore, mint: str
+) -> dict[str, Any]:
+    """Compare the local sale receipt with confirmed chain data and wallet balances."""
+    from .agent_live_test import CanaryJournal
+
+    if not settings.solana_wallet_address:
+        raise ValueError("SOLANA_WALLET_ADDRESS is required")
+    journal = CanaryJournal(f"launch_guard_live_sell_{mint}.json")
+    rows = journal.load()["attempts"]
+    sale = next((row for row in reversed(rows)
+                 if row.get("mint") == mint and row.get("status") == "CONFIRMED"
+                 and row.get("signature")), None)
+    if sale is None:
+        raise ValueError("no confirmed local one-time sell receipt for this mint")
+    rpc = SolanaRpc(settings.solana_rpc_http_url)
+    transaction = await rpc.get_transaction(str(sale["signature"]))
+    if not isinstance(transaction, dict) or not isinstance(transaction.get("meta"), dict):
+        raise ValueError("confirmed transaction is not available from RPC yet")
+    if transaction["meta"].get("err") is not None:
+        raise ValueError("the on-chain transaction reports a failure")
+    wallet = settings.solana_wallet_address
+    if next((row.get("wallet") for row in rows if row.get("status") == "PENDING"), wallet) != wallet:
+        raise ValueError("sale journal wallet does not match configured wallet")
+    def raw_delta(token_mint: str) -> int:
+        def amounts(key: str) -> dict[int, int]:
+            return {
+                int(row["accountIndex"]): int(row["uiTokenAmount"]["amount"])
+                for row in transaction["meta"].get(key, [])
+                if row.get("mint") == token_mint and row.get("owner") == wallet
+            }
+        before, after = amounts("preTokenBalances"), amounts("postTokenBalances")
+        return sum(after.values()) - sum(before.values())
+
+    sold_delta = raw_delta(mint)
+    usdc_delta = raw_delta(USDC_MINT)
+    if sold_delta >= 0 or -sold_delta != int(sale["input_amount_raw"]) or usdc_delta <= 0:
+        raise ValueError("transaction token balance changes do not match the sell receipt")
+    token = await rpc.token_balance(wallet, mint)
+    usdc = await rpc.token_balance(wallet, USDC_MINT)
+    result = {
+        "mint": mint, "signature": sale["signature"],
+        "transaction_confirmed": True,
+        "wallet": wallet, "remaining_token_raw": token.raw_amount,
+        "current_usdc_raw": usdc.raw_amount,
+        "sold_raw_reported": sale["input_amount_raw"],
+        "on_chain_token_delta_raw": sold_delta,
+        "on_chain_usdc_delta_raw": usdc_delta,
+        "proceeds_usdc_reported": sale["output_usdc"],
+        "full_exit_currently_visible": token.raw_amount == 0,
+        "note": "current USDC balance alone cannot establish proceeds if other transactions occurred",
+    }
+    if token.raw_amount == 0:
+        holding = next((item for item in store.load_owned_holdings("solana")
+                        if item.token_address == mint), None)
+        pending = next((row for row in rows if row.get("status") == "PENDING"
+                        and row.get("mint") == mint), None)
+        decimals = await rpc.mint_decimals(mint) if holding is not None else 0
+        if (holding is not None and pending is not None
+            and holding.price_currency == "USD" and holding.cost_amount is not None
+            and holding.quantity > 0 and
+            abs(holding.quantity - int(sale["input_amount_raw"]) / 10**decimals)
+                / holding.quantity < 0.01):
+            if holding.cost_amount > float(sale["output_usdc"]):
+                store.record_loss_sale(
+                    sale_id=str(sale["signature"]), token_address=mint,
+                    symbol=holding.symbol, cost_usd=holding.cost_amount,
+                    proceeds_usd=float(sale["output_usdc"]),
+                    quantity=holding.quantity,
+                    sold_at_epoch=float(pending["at"]), source="verified_live_sell",
+                )
+                result["loss_sale_review_recorded"] = True
     return result
 
 
@@ -3633,6 +3732,11 @@ def main() -> None:
             result = asyncio.run(execute_owned_sell_once(
                 settings, store, args.execute_owned_sell_mint,
                 args.confirm_owned_sell_mint,
+            ))
+            print(json.dumps(result, indent=2))
+        elif args.verify_owned_sell_mint:
+            result = asyncio.run(verify_owned_sell(
+                settings, store, args.verify_owned_sell_mint,
             ))
             print(json.dumps(result, indent=2))
         elif args.arm_auto_buy_mint:
