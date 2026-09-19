@@ -97,3 +97,5 @@ To review an actionable priced Solana sell signal with just the Portfolio Manage
 Run `launch-guard-agents --shadow-core-once` to review only the Opportunity Hunter and Portfolio Manager. It skips Copy Trader, ignores non-Solana and AVOID candidates, and chooses a priced Solana sell recommendation if available. This is a one-shot shadow review; no sale or live trade is submitted.
 
 For continuous supervised shadow decisions, run the market/portfolio monitor in one Terminal and `launch-guard-agents --shadow-core-loop` in another. The loop wakes every 60 seconds, skips stale inputs, and can be stopped with Ctrl+C. Keep `AUTO_BUY_LIVE=false`, `AUTO_SELL_LIVE=false`, and `AGENT_LIVE_KILL_SWITCH=true`. The loop is shadow-only, charges OpenAI API usage when it invokes a model, and does not send wallet transactions.
+
+Core shadow cycles review priced sell signals before new opportunities so the sell snapshot is less likely to expire during the other agent's model request.
