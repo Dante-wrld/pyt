@@ -2748,6 +2748,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="simulate either the configured partial sale or the entire owned balance",
     )
     parser.add_argument(
+        "--execute-owned-sell-mint",
+        metavar="MINT",
+        help="one-time guarded live full exit of a named owned Solana mint",
+    )
+    parser.add_argument(
+        "--confirm-owned-sell-mint",
+        metavar="MINT",
+        help="repeat the exact mint to authorize its one-time live sale",
+    )
+    parser.add_argument(
         "--arm-auto-buy-mint",
         metavar="MINT",
         help="allow one Solana mint to receive one risk-gated automated buy",
@@ -3075,6 +3085,101 @@ async def preflight_owned_auto_sell(
         "simulation_units_consumed": receipt.units_consumed,
         "simulation_log_count": receipt.log_count,
     }
+
+
+async def execute_owned_sell_once(
+    settings: Settings, store: SQLiteStore, mint: str, confirmation: str | None
+) -> dict[str, Any]:
+    """Explicit single-mint exit; claim durably before any possible broadcast."""
+    from .agent_live_test import CanaryJournal
+
+    if confirmation != mint or not (32 <= len(mint) <= 44) or any(
+        char not in "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+        for char in mint
+    ):
+        raise ValueError("confirm the exact Solana mint with --confirm-owned-sell-mint")
+    if os.getenv("AGENT_LIVE_TEST_ENABLED", "false").lower() != "true":
+        raise ValueError("AGENT_LIVE_TEST_ENABLED must be true")
+    if os.getenv("AGENT_LIVE_KILL_SWITCH", "true").lower() != "false":
+        raise ValueError("AGENT_LIVE_KILL_SWITCH is active")
+    if not settings.solana_wallet_address or not settings.jupiter_api_key:
+        raise ValueError("configured wallet and Jupiter API key are required")
+    if mint in settings.auto_sell_excluded_mints:
+        raise ValueError("mint is excluded from selling")
+    journal = CanaryJournal(f"launch_guard_live_sell_{mint}.json")
+    journal.assert_unused()
+    rpc = SolanaRpc(settings.solana_rpc_http_url)
+    balance = next((item for item in await rpc.token_holdings(settings.solana_wallet_address)
+                    if item.mint == mint and item.raw_amount > 0), None)
+    if balance is None:
+        raise ValueError("configured wallet no longer holds this token")
+    signer = KeyringSolanaSigner(expected_public_key=settings.solana_wallet_address)
+    seller = SolanaAutoSeller(
+        client=JupiterSwapClient(api_key=settings.jupiter_api_key), signer=signer,
+        max_price_impact_pct=settings.auto_sell_max_price_impact_pct,
+        max_slippage_bps=settings.auto_sell_max_slippage_bps,
+        floor_percentages=False,
+    )
+    intent = PortfolioSignalExitPlanner(exit_warning_fraction=1.0).plan(
+        mint=mint, symbol=mint[:8], decision="EXIT WARNING",
+        reason="explicit one-time owned-token live sell", balance_raw=balance.raw_amount,
+        decimals=balance.decimals,
+    )
+    if intent is None:
+        raise ValueError("cannot construct full-balance sale")
+    intent = replace(intent, event_key=f"solana:{mint}:manual-live-sell-once")
+    receipt = await seller.preflight(intent, rpc)
+    prepared = receipt.prepared
+    floor_raw = math.ceil(max(settings.auto_sell_min_value_usd,
+                              settings.portfolio_min_sell_value_usd) * 1_000_000)
+    if prepared.minimum_output_raw < floor_raw:
+        raise ValueError("current minimum sell output is below the sell floor")
+    if prepared.expected_output_raw > 5_000_000:
+        raise ValueError("single live sell test exceeds its $5 output cap")
+    if (prepared.quoted_price_impact_pct is None or
+        abs(prepared.quoted_price_impact_pct) > settings.auto_sell_max_price_impact_pct or
+        prepared.quoted_slippage_bps is None or
+        prepared.quoted_slippage_bps > settings.auto_sell_max_slippage_bps):
+        raise ValueError("exact quoted impact or slippage exceeds live sell limits")
+    # A second balance check catches changes during the quote and simulation.
+    refreshed = next((item for item in await rpc.token_holdings(settings.solana_wallet_address)
+                      if item.mint == mint), None)
+    if refreshed is None or refreshed.raw_amount != balance.raw_amount:
+        raise ValueError("wallet balance changed during sell simulation")
+    attempt = {"mint": mint, "wallet": signer.public_key, "status": "PENDING",
+               "at": time.time(), "input_amount_raw": prepared.input_amount_raw,
+               "minimum_output_usdc": prepared.minimum_output_raw / 1_000_000}
+    journal.claim(attempt)
+    claimed = store.begin_auto_sell_execution(
+        event_key=intent.event_key, chain="solana", token_address=mint,
+        symbol=intent.symbol, stage=intent.stage,
+        requested_raw=prepared.input_amount_raw,
+        expected_output_raw=prepared.expected_output_raw,
+        balance_before_raw=balance.raw_amount,
+    )
+    if not claimed:
+        journal.record({"mint": mint, "status": "REVIEW_REQUIRED",
+                        "reason": "database execution claim rejected"})
+        raise ValueError("sale already claimed in database; inspect records before retry")
+    try:
+        sale = await seller.execute(prepared)
+        store.complete_auto_sell_execution(
+            event_key=intent.event_key, signature=sale.signature,
+            next_stage=intent.stage + 1,
+        )
+    except (ConnectionError, RuntimeError, ValueError) as exc:
+        store.freeze_auto_sell_execution(
+            event_key=intent.event_key, error=str(exc),
+            signature=getattr(exc, "signature", None),
+        )
+        journal.record({"mint": mint, "status": "REVIEW_REQUIRED",
+                        "signature": getattr(exc, "signature", None), "reason": str(exc)})
+        raise RuntimeError("sell outcome requires review; do not retry automatically") from exc
+    result = {"mint": mint, "status": "CONFIRMED", "broadcast": True,
+              "signature": sale.signature, "input_amount_raw": sale.input_amount_raw,
+              "output_usdc": sale.output_amount_raw / 1_000_000}
+    journal.record(result)
+    return result
 
 
 async def preflight_auto_buy(
@@ -3523,6 +3628,12 @@ def main() -> None:
                 "OWNED-TOKEN AUTO-SELL PREFLIGHT PASSED — "
                 "NO TRANSACTION BROADCAST"
             )
+            print(json.dumps(result, indent=2))
+        elif args.execute_owned_sell_mint:
+            result = asyncio.run(execute_owned_sell_once(
+                settings, store, args.execute_owned_sell_mint,
+                args.confirm_owned_sell_mint,
+            ))
             print(json.dumps(result, indent=2))
         elif args.arm_auto_buy_mint:
             store.arm_auto_buy(args.arm_auto_buy_mint, args.buy_symbol)
