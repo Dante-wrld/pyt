@@ -95,6 +95,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="review only Solana opportunities and priced sell guidance; skip copy trader",
     )
     group.add_argument(
+        "--shadow-core-loop",
+        action="store_true",
+        help="run Hunter and Portfolio Manager every 60 seconds until Ctrl+C",
+    )
+    group.add_argument(
         "--live-test-preflight",
         action="store_true",
         help="simulate the one-time $1 mainnet canary; never broadcast",
@@ -234,6 +239,45 @@ def _solana_opportunity(value: object) -> dict[str, object]:
     return {}
 
 
+def _snapshot_is_fresh(snapshot: dict[str, object], *, now: float | None = None) -> bool:
+    try:
+        age = (time.time() if now is None else now) - float(snapshot.get("generated_at") or 0)
+    except (TypeError, ValueError):
+        return False
+    return 0 <= age <= 15
+
+
+def shadow_core_loop(book: CapitalBook, *, interval_seconds: int = 60) -> None:
+    if interval_seconds < 60:
+        raise ValueError("shadow loop interval must be at least 60 seconds")
+    last_seen: tuple[object, object] | None = None
+    try:
+        while True:
+            try:
+                recommendations = _read_json(os.getenv("RECOMMENDATION_SNAPSHOT_PATH", "launch_guard_recommendations.json"))
+                portfolio = _read_json(os.getenv("PORTFOLIO_SNAPSHOT_PATH", "launch_guard_portfolio.json"))
+                fresh = (
+                    _snapshot_is_fresh(recommendations) and bool(_solana_opportunity(recommendations.get("candidates"))),
+                    _snapshot_is_fresh(portfolio) and bool(_priced_sell_signal(portfolio.get("signals"))),
+                )
+                signature = (
+                    recommendations.get("generated_at") if fresh[0] else None,
+                    portfolio.get("generated_at") if fresh[1] else None,
+                )
+                if any(fresh) and signature != last_seen:
+                    result = shadow_once(OpenAIProposalModel(), book, core_only=True)
+                    print(json.dumps(result, indent=2), flush=True)
+                    last_seen = signature
+                elif not any(fresh):
+                    print("No fresh eligible Hunter or Portfolio input; waiting.", flush=True)
+            except (OpenAIError, ValueError, RuntimeError, OSError) as exc:
+                message = friendly_api_error(exc) if isinstance(exc, OpenAIError) else str(exc)
+                print(f"Shadow cycle skipped: {message}", flush=True)
+            time.sleep(interval_seconds)
+    except KeyboardInterrupt:
+        print("Shadow agents stopped.", flush=True)
+
+
 def shadow_once(model: OpenAIProposalModel | None, book: CapitalBook, *, portfolio_sell_only: bool = False, core_only: bool = False) -> dict[str, object]:
     recommendations = _read_json(
         os.getenv("RECOMMENDATION_SNAPSHOT_PATH", "launch_guard_recommendations.json")
@@ -245,8 +289,8 @@ def shadow_once(model: OpenAIProposalModel | None, book: CapitalBook, *, portfol
         os.getenv("AGENT_COPY_SIGNAL_PATH", "launch_guard_copy_signals.json")
     )
     accounts = {row.agent_id: row for row in book.accounts()}
-    candidate = _solana_opportunity(recommendations.get("candidates")) if core_only else _first_dict(recommendations.get("candidates"))
-    holding = _priced_sell_signal(portfolio.get("signals")) if portfolio_sell_only or core_only else _first_dict(portfolio.get("signals"))
+    candidate = _solana_opportunity(recommendations.get("candidates")) if core_only and _snapshot_is_fresh(recommendations) else ({} if core_only else _first_dict(recommendations.get("candidates")))
+    holding = _priced_sell_signal(portfolio.get("signals")) if (portfolio_sell_only or core_only) and _snapshot_is_fresh(portfolio) else ({} if portfolio_sell_only or core_only else _first_dict(portfolio.get("signals")))
     leader = _first_dict(copy_data.get("signals"))
     inputs = (
         ("hunter-v1", AgentRole.OPPORTUNITY_HUNTER, {"candidate": candidate}),
@@ -372,6 +416,10 @@ def main() -> None:
         elif args.shadow_core_once:
             model = OpenAIProposalModel()
             result = shadow_once(model, book, core_only=True)
+        elif args.shadow_core_loop:
+            book.accounts()
+            shadow_core_loop(book)
+            return
         elif args.live_test_preflight or args.live_test_execute:
             from .agent_live_test import run_live_canary
 
