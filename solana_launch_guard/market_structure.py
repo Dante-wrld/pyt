@@ -168,7 +168,7 @@ class MarketStructureScanner:
             else:
                 now = time.monotonic()
                 self._request_times = [t for t in self._request_times if now - t < 60]
-                if len(self._request_times) >= 20:
+                if len(self._request_times) >= 8:
                     return None
                 self._request_times.append(now)
                 try:
