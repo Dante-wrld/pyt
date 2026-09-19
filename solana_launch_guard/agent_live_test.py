@@ -136,6 +136,8 @@ async def run_live_canary(
         SolanaAutoBuyer,
         USDC_MINT,
     )
+    from .core import SQLiteStore
+    from .portfolio import OwnedHolding
     from .wallet import SolanaRpc
 
     wallet = str(os.environ["SOLANA_WALLET_ADDRESS"])
@@ -148,6 +150,7 @@ async def run_live_canary(
     existing = await rpc.token_balance(wallet, mint)
     if existing.raw_amount > 0:
         raise ValueError("wallet already holds the candidate; cost-basis mixing blocked")
+    output_decimals = await rpc.mint_decimals(mint)
 
     buyer = SolanaAutoBuyer(
         client=JupiterSwapClient(api_key=str(os.environ["JUPITER_API_KEY"])),
@@ -180,9 +183,30 @@ async def run_live_canary(
 
     attempt = {**result, "attempted_at": time.time(), "status": "PENDING"}
     journal.record(attempt)
+    store = SQLiteStore(os.getenv("DATABASE_PATH", "launch_guard.db"))
+    event_key = intent.event_key
+    claimed = store.begin_auto_buy_execution(
+        event_key=event_key,
+        token_address=mint,
+        symbol=symbol,
+        funding_source=intent.funding_source,
+        input_usdc_raw=preflight.prepared.input_amount_raw,
+        expected_output_raw=preflight.prepared.expected_output_raw,
+    )
+    if not claimed:
+        store.close()
+        raise ValueError("the live canary execution was already claimed")
     try:
         receipt = await buyer.execute(preflight.prepared)
+        if receipt.output_amount_raw <= 0:
+            raise RuntimeError("confirmed canary reported no token output")
     except JupiterExecutionError as exc:
+        store.freeze_auto_buy_execution(
+            event_key=event_key,
+            error=str(exc),
+            signature=exc.signature,
+        )
+        store.close()
         journal.record(
             {
                 "attempted_at": time.time(),
@@ -196,6 +220,48 @@ async def run_live_canary(
             "live canary outcome is uncertain; do not retry until the journal and "
             "on-chain history are reconciled"
         ) from exc
+    except (ConnectionError, RuntimeError, ValueError) as exc:
+        store.freeze_auto_buy_execution(
+            event_key=event_key,
+            error=str(exc),
+            signature=getattr(exc, "signature", None),
+        )
+        store.close()
+        raise RuntimeError(
+            "live canary outcome requires review; do not retry until reconciled"
+        ) from exc
+    journal.record(
+        {
+            "attempted_at": time.time(),
+            "status": "CONFIRMED_CHAIN",
+            "mint": mint,
+            "signature": receipt.signature,
+            "input_usdc_raw": receipt.input_amount_raw,
+            "output_amount_raw": receipt.output_amount_raw,
+        }
+    )
+    store.complete_auto_buy_execution(
+        event_key=event_key,
+        signature=receipt.signature,
+        actual_output_raw=receipt.output_amount_raw,
+        output_decimals=output_decimals,
+    )
+    quantity = receipt.output_amount_raw / (10**output_decimals)
+    cost_usdc = receipt.input_amount_raw / (10**USDC_DECIMALS)
+    store.save_owned_holding(
+        OwnedHolding(
+            chain="solana",
+            token_address=mint,
+            symbol=symbol,
+            quantity=quantity,
+            entry_price=cost_usdc / quantity,
+            price_currency="USD",
+            cost_amount=cost_usdc,
+        )
+    )
+    store.arm_auto_sell(mint, reset_stage=True)
+    store.clear_auto_sell_signal_confirmation(mint)
+    store.close()
     journal.record(
         {
             "attempted_at": time.time(),
