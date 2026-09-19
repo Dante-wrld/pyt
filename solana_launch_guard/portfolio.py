@@ -216,12 +216,22 @@ class PortfolioAdvisor:
                 f"price is {abs(drawdown_from_peak):.1f}% below its monitored "
                 f"peak; open gain is {pnl_pct:.1f}%"
             )
-        elif pnl_pct is not None and pnl_pct >= self.take_partial_pct:
+        elif (
+            pnl_pct is not None and pnl_pct >= self.take_partial_pct
+            and (drawdown_from_peak <= -3 or
+                 (quote.price_change_m5_pct is not None
+                  and quote.price_change_m5_pct <= 0
+                  and quote.sells_m5 > quote.buys_m5))
+        ):
             decision = "TAKE PARTIAL"
             reason = (
-                f"open gain {pnl_pct:.1f}% reached the "
-                f"{self.take_partial_pct:.1f}% partial-profit level"
+                f"open gain {pnl_pct:.1f}% with "
+                f"{abs(drawdown_from_peak):.1f}% drawdown from peak or selling pressure"
             )
+        elif pnl_pct is not None and pnl_pct >= self.take_partial_pct:
+            decision = "HOLD"
+            reason = (f"open gain {pnl_pct:.1f}% above profit milestone; "
+                      "watch peak drawdown and seller pressure before taking profit")
         elif (
             pnl_pct is not None
             and 3 <= pnl_pct < self.trailing_activation_pct
