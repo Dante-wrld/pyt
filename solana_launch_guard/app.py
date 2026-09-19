@@ -1415,6 +1415,7 @@ class LaunchGuard:
         if (signal.current_value_usd is None or balance.raw_amount <= 0
                 or signal.current_value_usd * intent.amount_raw / balance.raw_amount
                 < minimum_sell_value):
+            self.store.clear_auto_sell_signal_confirmation(signal.token_address)
             LOGGER.info("AUTO-SELL SKIPPED %s: estimated sell amount below $%.2f",
                         signal.symbol, minimum_sell_value)
             return
