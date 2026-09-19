@@ -211,6 +211,29 @@ class PortfolioAdvisor:
             )
         elif (
             pnl_pct is not None
+            and 3 <= pnl_pct < self.trailing_activation_pct
+            and entry_price is not None
+            and state.peak_price >= 1.1 * entry_price
+            and -20 <= drawdown_from_peak <= -5
+            and quote.price_change_m5_pct is not None
+            and 1 <= quote.price_change_m5_pct <= 6
+            and quote.buys_m5 >= 10
+            and quote.buys_m5 >= 2 * quote.sells_m5
+            and (quote.volume_m5_usd or 0) >= 1_000
+            and (quote.liquidity_usd or 0) >= 50_000
+            and (state.baseline_liquidity_usd <= 0 or
+                 (quote.liquidity_usd or 0) >= 0.7 * state.baseline_liquidity_usd)
+        ):
+            decision = "REBOUND WATCH"
+            reason = (
+                f"open P/L {pnl_pct:+.1f}%; "
+                f"{abs(drawdown_from_peak):.1f}% below monitored peak; "
+                f"5m move {quote.price_change_m5_pct:+.1f}% with "
+                f"{quote.buys_m5} buys/{quote.sells_m5} sells; "
+                "recovery is unconfirmed beyond this window"
+            )
+        elif (
+            pnl_pct is not None
             and -10 <= pnl_pct <= -3
             and quote.price_change_m5_pct is not None
             and 1 <= quote.price_change_m5_pct <= 6
@@ -267,6 +290,7 @@ def build_portfolio_snapshot(
         "PROTECT PROFIT": 3,
         "TAKE PARTIAL": 2,
         "BUY MORE": 1,
+        "REBOUND WATCH": 1,
         "HOLD": 1,
         "UNPRICED": 0,
     }
@@ -313,6 +337,7 @@ def format_portfolio_dashboard(
         "PROTECT PROFIT": "\033[38;5;208m" if color else "",
         "TAKE PARTIAL": "\033[38;5;220m" if color else "",
         "BUY MORE": "\033[38;5;46m" if color else "",
+        "REBOUND WATCH": "\033[38;5;39m" if color else "",
         "HOLD": "\033[38;5;46m" if color else "",
         "UNPRICED": "\033[38;5;244m" if color else "",
     }

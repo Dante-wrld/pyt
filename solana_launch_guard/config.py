@@ -156,6 +156,7 @@ class Settings:
     pushover_cooldown_seconds: float = 300.0
     pushover_portfolio_alert_decisions: tuple[str, ...] = (
         "BUY MORE",
+        "REBOUND WATCH",
         "HOLD",
         "TAKE PARTIAL",
         "PROTECT PROFIT",
@@ -354,7 +355,7 @@ class Settings:
             ),
             pushover_portfolio_alert_decisions=_csv_upper(
                 "PUSHOVER_PORTFOLIO_ALERT_DECISIONS",
-                "BUY MORE,HOLD,TAKE PARTIAL,PROTECT PROFIT,EXIT WARNING",
+                "BUY MORE,REBOUND WATCH,HOLD,TAKE PARTIAL,PROTECT PROFIT,EXIT WARNING",
             ),
             pushover_high_priority_decisions=_csv_upper(
                 "PUSHOVER_HIGH_PRIORITY_DECISIONS",
@@ -864,6 +865,7 @@ class Settings:
             )
         portfolio_alerts = {
             "BUY MORE",
+            "REBOUND WATCH",
             "HOLD",
             "TAKE PARTIAL",
             "PROTECT PROFIT",
