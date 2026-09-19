@@ -631,7 +631,7 @@ class JupiterSwapClient:
         data = json.dumps(payload).encode() if payload is not None else None
         headers = {
             "Accept": "application/json",
-            "User-Agent": "solana-launch-guard/0.21.0",
+            "User-Agent": "solana-launch-guard/0.23.0",
             "x-api-key": self.api_key,
         }
         if data is not None:

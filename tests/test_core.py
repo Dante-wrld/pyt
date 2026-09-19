@@ -3995,3 +3995,164 @@ def test_adaptive_strategy_requires_recovery_for_reentry() -> None:
 
     assert decision.action == "REENTER"
     assert "RECOVERY" in decision.reason
+
+
+def test_recommendation_refresh_extends_ttl_and_state_round_trips() -> None:
+    quote = market_quote(
+        liquidity=60_000,
+        market_cap=100_000,
+        buys=60,
+        sells=20,
+        volume=15_000,
+        change=5,
+    )
+    book = RecommendationBook(pool_size=10, ttl_seconds=10)
+    candidate = book.add(quote, CoinIntelligence().score(quote), now=100)
+    assert candidate is not None
+
+    book.update(quote, now=108)
+    book.expire(now=111)
+    assert book.ranked() == [candidate]
+
+    payload = candidate.to_json()
+    restored_book = RecommendationBook(pool_size=10, ttl_seconds=10)
+    restored = type(candidate).from_json(payload)
+    assert restored_book.restore(restored)
+    assert restored_book.ranked()[0].entry_confirmation_count == 2
+
+    restored_book.expire(now=119)
+    assert restored_book.ranked() == []
+
+
+def test_discovery_candidates_use_wall_clock_without_manual_timestamp(
+    tmp_path: Path,
+) -> None:
+    quote = market_quote(
+        liquidity=60_000,
+        market_cap=100_000,
+        buys=60,
+        sells=20,
+        volume=15_000,
+        change=5,
+    )
+    book = RecommendationBook(pool_size=10, ttl_seconds=60)
+    candidate = book.add(quote, CoinIntelligence().score(quote))
+    assert candidate is not None
+    book.update(quote)
+    book.update(quote)
+    config = settings(
+        tmp_path / "wall-clock.db",
+        auto_buy_enabled=True,
+        auto_buy_discovery=True,
+    )
+
+    assert candidate.decision == "BUY NOW"
+    assert auto_buy_discovery_rejection(candidate, config) is None
+
+
+def test_auto_buy_discovery_watch_persists_and_evicts_weakest(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(str(tmp_path / "watch-capacity.db"))
+    observed = time.time()
+    first = store.start_auto_buy_discovery_watch(
+        token_address="MintWatchOne",
+        symbol="ONE",
+        launch_payload=launch_payload(mint="MintWatchOne", symbol="ONE"),
+        first_seen_epoch=observed,
+        first_check_epoch=observed,
+        expires_at_epoch=observed + 3600,
+        max_active=1,
+    )
+    second = store.start_auto_buy_discovery_watch(
+        token_address="MintWatchTwo",
+        symbol="TWO",
+        launch_payload=launch_payload(mint="MintWatchTwo", symbol="TWO"),
+        first_seen_epoch=observed + 1,
+        first_check_epoch=observed + 1,
+        expires_at_epoch=observed + 3601,
+        max_active=1,
+    )
+
+    assert first == "CREATED"
+    assert second == "CREATED"
+    assert store.load_auto_buy_discovery_watch("MintWatchOne")["status"] == (
+        "EVICTED"
+    )
+    assert store.load_auto_buy_discovery_watch("MintWatchTwo")["status"] == (
+        "WATCHING"
+    )
+    status = store.auto_buy_discovery_status()
+    assert [item["token_address"] for item in status["active"]] == [
+        "MintWatchTwo"
+    ]
+    assert status["recent_terminal"][0]["last_reason"] == (
+        "active discovery watch capacity reached"
+    )
+    store.close()
+
+
+def test_persistent_discovery_retries_missing_quote_and_restores_candidate(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "persistent-discovery.db"
+    config = settings(
+        database,
+        auto_buy_enabled=True,
+        auto_buy_discovery=True,
+        auto_buy_watch_max_seconds=3600,
+        auto_buy_watch_retry_base_seconds=5,
+        auto_buy_watch_retry_max_seconds=60,
+    )
+    store = SQLiteStore(str(database))
+    guard = LaunchGuard(config, store)
+    quote = market_quote(
+        liquidity=60_000,
+        market_cap=100_000,
+        buys=60,
+        sells=20,
+        volume=15_000,
+        change=5,
+    )
+
+    class FakeOracle:
+        def __init__(self) -> None:
+            self.quotes: list[MarketQuote | None] = [None, quote]
+
+        async def quote(
+            self, mint: str, *, chain: str = "solana"
+        ) -> MarketQuote | None:
+            assert mint == quote.mint
+            assert chain == "solana"
+            return self.quotes.pop(0)
+
+        async def sol_usd_price(self) -> float:
+            return 100.0
+
+    guard.oracle = FakeOracle()  # type: ignore[assignment]
+    payload = launch_payload(mint=quote.mint, symbol=quote.symbol)
+    asyncio.run(guard.handle_launch(payload))
+    watch = store.load_auto_buy_discovery_watch(quote.mint)
+    assert watch is not None
+    assert watch["status"] == "WATCHING"
+
+    asyncio.run(guard._evaluate_auto_buy_discovery_watch(watch))
+    watch = store.load_auto_buy_discovery_watch(quote.mint)
+    assert watch is not None
+    assert watch["attempts"] == 1
+    assert watch["quote_failures"] == 1
+    assert watch["status"] == "WATCHING"
+
+    asyncio.run(guard._evaluate_auto_buy_discovery_watch(watch))
+    watch = store.load_auto_buy_discovery_watch(quote.mint)
+    assert watch is not None
+    assert watch["attempts"] == 2
+    assert watch["status"] == "TRACKING"
+    assert watch["candidate_json"]
+    assert quote.recommendation_key in guard.recommendations.candidates
+    store.close()
+
+    reopened = SQLiteStore(str(database))
+    restored_guard = LaunchGuard(config, reopened)
+    assert quote.recommendation_key in restored_guard.recommendations.candidates
+    reopened.close()

@@ -5,8 +5,13 @@ buyer/automatic seller for multichain crypto tokens.
 
 Launch Guard can automatically select fresh, confirmed Solana `BUY NOW`/`BUY
 ZONE` candidates and optionally execute wallet-wide `TAKE PARTIAL`, `PROTECT
-PROFIT`, and `EXIT WARNING` rules. Version 0.21.0 requires persistent
-wallet-wide sell signals and adds an opt-in, post-sale recovery re-buy watch.
+PROFIT`, and `EXIT WARNING` rules. Version 0.23.0 adds bounded, persistent
+Solana discovery watches: eligible launches are retried, tracked across board
+rotation, and restored after a restart so a later pullback or rebound can still
+reach `BUY NOW` or `BUY ZONE`. Version 0.22.0 introduced the guarded
+multi-agent paper/shadow foundation documented in `docs/MULTI_AGENT.md`.
+Version 0.21.0 requires persistent wallet-wide sell signals and adds an opt-in,
+post-sale recovery re-buy watch.
 The watch does not try to predict a bottom: it requires a measured drop,
 rebound, positive momentum, buyer pressure, retained liquidity, and repeated
 confirmation. Version 0.20.1 preserves Jupiter's `lastValidBlockHeight` as the
@@ -28,6 +33,8 @@ Fomo's app or website.
 - Uses a CORE tier for stronger setups and a $5 MOONSHOT tier for higher-risk setups.
 - Limits position size, concurrent positions, and total exposure.
 - Prints a gold top-10 paper watchlist and continuously re-ranks it using bounded live price momentum.
+- Persists automatic Solana discovery watches in SQLite with bounded retries,
+  visible expiry/eviction outcomes, and restart recovery.
 - Classifies qualified tokens as `ENTRY PENDING`, `BUY NOW`,
   `WAIT FOR PULLBACK`, `PULLBACK STARTED`, `BUY ZONE`, `WATCH`, or `AVOID`.
 - Requires repeated entry confirmation and blocks entries when live score,
@@ -138,7 +145,7 @@ pytest
 | `RECOMMENDATION_LIMIT` | `10` | Number of ranked paper candidates shown, from 1 through 10 |
 | `RECOMMENDATION_POOL_SIZE` | `30` | Qualified candidates retained for live ranking |
 | `RECOMMENDATION_POLL_SECONDS` | `15` | Seconds between quote refreshes and ranking updates |
-| `RECOMMENDATION_TTL_SECONDS` | `1800` | Seconds before a candidate ages out of the watchlist |
+| `RECOMMENDATION_TTL_SECONDS` | `1800` | Seconds without a successful quote refresh before an active candidate leaves the fast board |
 | `PULLBACK_TRIGGER_PCT` | `8` | Rise or five-minute move that anchors a pullback zone |
 | `PULLBACK_ZONE_MIN_PCT` | `4` | Shallow edge of the preferred pullback range |
 | `PULLBACK_ZONE_MAX_PCT` | `6` | Deep edge of the preferred pullback range |
@@ -186,10 +193,15 @@ pytest
 | `AUTO_SELL_EXCLUDED_MINTS` | USDC mint | Exact Solana mints never sold by wallet-wide rules |
 | `AUTO_BUY_ENABLED` | `false` | Evaluate guarded Solana candidates; remains dry-run unless live mode is also enabled |
 | `AUTO_BUY_LIVE` | `false` | Permit locally signed Jupiter USDC purchases; requires live auto-selling |
-| `AUTO_BUY_DISCOVERY` | `false` | Automatically create a one-shot policy for qualified Solana buy signals |
+| `AUTO_BUY_DISCOVERY` | `false` | Persist eligible Solana launches and automatically create a one-purchase policy only after a qualified buy signal |
 | `AUTO_BUY_DISCOVERY_MIN_SCORE` | `70` | Minimum live signal score for automatic selection |
 | `AUTO_BUY_DISCOVERY_MIN_LIQUIDITY_USD` | `50000` | Minimum quoted liquidity for automatic selection |
 | `AUTO_BUY_SIGNAL_MAX_AGE_SECONDS` | `30` | Maximum age of an automatically selected signal |
+| `AUTO_BUY_WATCH_MAX_SECONDS` | `86400` | Maximum lifetime of a persistent launch-discovery watch |
+| `AUTO_BUY_WATCH_MAX_CANDIDATES` | `250` | Maximum active discovery watches; the weakest watch is visibly evicted when full |
+| `AUTO_BUY_WATCH_BATCH_SIZE` | `10` | Maximum due discovery watches evaluated per retry pass |
+| `AUTO_BUY_WATCH_RETRY_BASE_SECONDS` | `15` | Initial retry interval for unavailable or unqualified launch quotes |
+| `AUTO_BUY_WATCH_RETRY_MAX_SECONDS` | `300` | Maximum retry interval and fallback refresh interval outside the fast board |
 | `AUTO_BUY_EXCLUDED_MINTS` | empty | Exact Solana mints never selected automatically |
 | `AUTO_BUY_SEED_SIZE_USDC` | `5.0` | Maximum USDC principal for each initial seed purchase |
 | `AUTO_BUY_MAX_SEED_BUYS` | `2` | Lifetime number of principal-funded purchases before only profit may be reused |
@@ -323,16 +335,24 @@ paper results instead of intuition.
 ### Live recommended-paper-buy watchlist
 
 When launch monitoring is active, every CORE or MOONSHOT result enters an
-in-memory watchlist even when the paper portfolio already has three open
+active watchlist even when the paper portfolio already has three open
 positions. Every 15 seconds the bot refreshes current quotes and prints up to
 10 gold rows with the rank, tier, signal score, price rise since qualification,
-five-minute change, liquidity, current price, and exact mint.
+five-minute change, liquidity, current price, and exact mint. With automatic
+discovery enabled, base-gate-qualified Solana launches are also stored in
+SQLite before their first market quote. Missing or not-yet-qualified quotes are
+retried with bounded backoff, and complete candidate state is restored after a
+process restart.
 
 The live signal score keeps the original intelligence score as the main input.
 The rise-since-observation and five-minute price inputs are capped before they
 are added, so a brief extreme pump cannot dominate the ranking solely because
-of its percentage increase. The list expires candidates after 30 minutes by
-default and starts fresh when the process restarts.
+of its percentage increase. A candidate leaves the fast board after 30 minutes
+without a successful quote refresh by default. Its persistent discovery watch
+continues for up to 24 hours by default and can place it back on the board if
+it later qualifies. At the 250-watch default capacity, the weakest active watch
+is marked `EVICTED` before a new launch is admitted; it is never removed
+silently.
 
 Use both launch scanning and public-wallet monitoring together:
 
@@ -676,6 +696,11 @@ AUTO_BUY_DISCOVERY=true
 AUTO_BUY_DISCOVERY_MIN_SCORE=70
 AUTO_BUY_DISCOVERY_MIN_LIQUIDITY_USD=50000
 AUTO_BUY_SIGNAL_MAX_AGE_SECONDS=30
+AUTO_BUY_WATCH_MAX_SECONDS=86400
+AUTO_BUY_WATCH_MAX_CANDIDATES=250
+AUTO_BUY_WATCH_BATCH_SIZE=10
+AUTO_BUY_WATCH_RETRY_BASE_SECONDS=15
+AUTO_BUY_WATCH_RETRY_MAX_SECONDS=300
 AUTO_BUY_EXCLUDED_MINTS=
 AUTO_BUY_SEED_SIZE_USDC=5.0
 AUTO_BUY_MAX_SEED_BUYS=2
@@ -685,13 +710,15 @@ AUTO_BUY_MAX_PRICE_IMPACT_PCT=5.0
 AUTO_BUY_MAX_SLIPPAGE_BPS=500
 ```
 
-Automatic discovery creates a one-shot policy when an eligible final signal
-appears. Manual allow-listing and preflight remain available for a specific
-mint:
+Automatic discovery persists eligible launches, retains their entry-zone and
+confirmation state across restarts, and creates a one-purchase policy only when
+an eligible final signal appears. Manual allow-listing and preflight remain
+available for a specific mint:
 
 ```bash
 launch-guard --arm-auto-buy-mint TOKEN_MINT --buy-symbol SYMBOL
 launch-guard --auto-buy-status
+launch-guard --auto-buy-watch-status
 launch-guard --preflight-auto-buy-mint TOKEN_MINT
 ```
 
@@ -708,9 +735,11 @@ caffeinate -i launch-guard --mode all --recommendations-window --portfolio-windo
 
 Each manual or discovered policy permits one confirmed purchase and is
 automatically disarmed afterward. A previously disarmed policy is not
-automatically rearmed. Use `--disarm-auto-buy-mint TOKEN_MINT` as the per-mint
-kill switch and set `AUTO_BUY_LIVE=false` before restarting to disable all
-purchases.
+automatically rearmed. `--auto-buy-watch-status` shows active watches plus the
+50 most recent terminal outcomes without exposing stored launch/candidate JSON.
+Use `--disarm-auto-buy-mint TOKEN_MINT` as the per-mint kill switch; it also
+cancels an active discovery watch. Set `AUTO_BUY_LIVE=false` before restarting
+to disable all purchases.
 
 #### Guarded post-sale recovery re-buy
 

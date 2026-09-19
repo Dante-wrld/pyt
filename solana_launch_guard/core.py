@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -562,6 +563,33 @@ class SQLiteStore:
                 realized_profit_usdc_raw INTEGER NOT NULL DEFAULT 0,
                 updated_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS auto_buy_discovery_watches (
+                chain TEXT NOT NULL,
+                token_address TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                status TEXT NOT NULL,
+                launch_json TEXT NOT NULL,
+                candidate_json TEXT,
+                tier TEXT,
+                intelligence_score INTEGER NOT NULL DEFAULT 0,
+                signal_score INTEGER NOT NULL DEFAULT 0,
+                decision TEXT,
+                liquidity_usd REAL,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                quote_failures INTEGER NOT NULL DEFAULT 0,
+                first_seen_epoch REAL NOT NULL,
+                last_seen_epoch REAL,
+                next_check_epoch REAL NOT NULL,
+                expires_at_epoch REAL NOT NULL,
+                last_reason TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (chain, token_address)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_auto_buy_discovery_due
+            ON auto_buy_discovery_watches(status, next_check_epoch);
 
             CREATE TABLE IF NOT EXISTS auto_rebuy_watches (
                 chain TEXT NOT NULL,
@@ -1448,6 +1476,319 @@ class SQLiteStore:
             (chain, token_address, symbol, utc_now()),
         )
         self.connection.commit()
+
+    def start_auto_buy_discovery_watch(
+        self,
+        *,
+        token_address: str,
+        symbol: str,
+        launch_payload: Mapping[str, Any],
+        first_seen_epoch: float | None = None,
+        first_check_epoch: float | None = None,
+        expires_at_epoch: float,
+        max_active: int,
+        chain: str = "solana",
+    ) -> str:
+        """Persist a launch watch, evicting the weakest watch at capacity."""
+        token_address = token_address.strip()
+        symbol = symbol.strip() or token_address[:8]
+        if not token_address:
+            raise ValueError("auto-buy discovery watch requires a token address")
+        if max_active < 1:
+            raise ValueError("auto-buy discovery watch capacity must be positive")
+        observed = time.time() if first_seen_epoch is None else first_seen_epoch
+        first_check = observed if first_check_epoch is None else first_check_epoch
+        if expires_at_epoch <= observed:
+            raise ValueError("auto-buy discovery watch expiry must be in the future")
+        launch_json = json.dumps(
+            dict(launch_payload), sort_keys=True, separators=(",", ":")
+        )
+        existing = self.connection.execute(
+            "SELECT status FROM auto_buy_discovery_watches "
+            "WHERE chain = ? AND token_address = ?",
+            (chain, token_address),
+        ).fetchone()
+        if existing is not None:
+            return "EXISTS"
+
+        now_text = utc_now()
+        with self.connection:
+            self.connection.execute(
+                "UPDATE auto_buy_discovery_watches SET status = 'EXPIRED', "
+                "last_reason = 'configured discovery watch lifetime elapsed', "
+                "updated_at = ? WHERE status IN "
+                "('WATCHING', 'TRACKING', 'QUALIFIED') "
+                "AND expires_at_epoch <= ?",
+                (now_text, observed),
+            )
+            active_count = int(
+                self.connection.execute(
+                    "SELECT COUNT(*) FROM auto_buy_discovery_watches "
+                    "WHERE status IN ('WATCHING', 'TRACKING', 'QUALIFIED')"
+                ).fetchone()[0]
+            )
+            if active_count >= max_active:
+                victim = self.connection.execute(
+                    "SELECT chain, token_address FROM auto_buy_discovery_watches "
+                    "WHERE status IN ('WATCHING', 'TRACKING', 'QUALIFIED') "
+                    "ORDER BY CASE status WHEN 'WATCHING' THEN 0 "
+                    "WHEN 'TRACKING' THEN 1 ELSE 2 END, "
+                    "intelligence_score ASC, signal_score ASC, "
+                    "first_seen_epoch ASC LIMIT 1"
+                ).fetchone()
+                if victim is not None:
+                    self.connection.execute(
+                        "UPDATE auto_buy_discovery_watches "
+                        "SET status = 'EVICTED', "
+                        "last_reason = 'active discovery watch capacity reached', "
+                        "updated_at = ? WHERE chain = ? AND token_address = ?",
+                        (now_text, victim["chain"], victim["token_address"]),
+                    )
+            self.connection.execute(
+                """
+                INSERT INTO auto_buy_discovery_watches(
+                    chain, token_address, symbol, status, launch_json,
+                    first_seen_epoch, next_check_epoch, expires_at_epoch,
+                    last_reason, created_at, updated_at
+                ) VALUES (?, ?, ?, 'WATCHING', ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    chain,
+                    token_address,
+                    symbol,
+                    launch_json,
+                    observed,
+                    first_check,
+                    expires_at_epoch,
+                    "waiting for first market observation",
+                    now_text,
+                    now_text,
+                ),
+            )
+        return "CREATED"
+
+    def expire_auto_buy_discovery_watches(
+        self, *, now_epoch: float | None = None
+    ) -> int:
+        observed = time.time() if now_epoch is None else now_epoch
+        cursor = self.connection.execute(
+            "UPDATE auto_buy_discovery_watches SET status = 'EXPIRED', "
+            "last_reason = 'configured discovery watch lifetime elapsed', "
+            "updated_at = ? WHERE status IN "
+            "('WATCHING', 'TRACKING', 'QUALIFIED') "
+            "AND expires_at_epoch <= ?",
+            (utc_now(), observed),
+        )
+        self.connection.commit()
+        return cursor.rowcount
+
+    def due_auto_buy_discovery_watches(
+        self, *, now_epoch: float | None = None, limit: int = 10
+    ) -> list[dict[str, Any]]:
+        observed = time.time() if now_epoch is None else now_epoch
+        self.expire_auto_buy_discovery_watches(now_epoch=observed)
+        rows = self.connection.execute(
+            "SELECT * FROM auto_buy_discovery_watches "
+            "WHERE status IN ('WATCHING', 'TRACKING', 'QUALIFIED') "
+            "AND next_check_epoch <= ? AND expires_at_epoch > ? "
+            "ORDER BY next_check_epoch, first_seen_epoch LIMIT ?",
+            (observed, observed, limit),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def active_auto_buy_discovery_watches(
+        self, *, now_epoch: float | None = None
+    ) -> list[dict[str, Any]]:
+        observed = time.time() if now_epoch is None else now_epoch
+        self.expire_auto_buy_discovery_watches(now_epoch=observed)
+        rows = self.connection.execute(
+            "SELECT * FROM auto_buy_discovery_watches "
+            "WHERE status IN ('WATCHING', 'TRACKING', 'QUALIFIED') "
+            "ORDER BY signal_score DESC, intelligence_score DESC, "
+            "first_seen_epoch DESC"
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def load_auto_buy_discovery_watch(
+        self, token_address: str, *, chain: str = "solana"
+    ) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            "SELECT * FROM auto_buy_discovery_watches "
+            "WHERE chain = ? AND token_address = ?",
+            (chain, token_address),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def record_auto_buy_discovery_observation(
+        self,
+        *,
+        token_address: str,
+        symbol: str,
+        status: str,
+        next_check_epoch: float,
+        reason: str,
+        quote_available: bool,
+        candidate_json: str | None = None,
+        tier: str | None = None,
+        intelligence_score: int = 0,
+        signal_score: int = 0,
+        decision: str | None = None,
+        liquidity_usd: float | None = None,
+        observed_epoch: float | None = None,
+        chain: str = "solana",
+    ) -> None:
+        if status not in {"WATCHING", "TRACKING", "QUALIFIED"}:
+            raise ValueError("invalid active auto-buy discovery status")
+        observed = time.time() if observed_epoch is None else observed_epoch
+        self.connection.execute(
+            """
+            UPDATE auto_buy_discovery_watches
+            SET symbol = ?, status = ?,
+                candidate_json = COALESCE(?, candidate_json),
+                tier = ?, intelligence_score = ?, signal_score = ?,
+                decision = ?, liquidity_usd = ?, attempts = attempts + 1,
+                quote_failures = quote_failures + ?,
+                last_seen_epoch = CASE WHEN ? THEN ? ELSE last_seen_epoch END,
+                next_check_epoch = ?, last_reason = ?, updated_at = ?
+            WHERE chain = ? AND token_address = ?
+              AND status IN ('WATCHING', 'TRACKING', 'QUALIFIED')
+            """,
+            (
+                symbol,
+                status,
+                candidate_json,
+                tier,
+                intelligence_score,
+                signal_score,
+                decision,
+                liquidity_usd,
+                int(not quote_available),
+                int(quote_available),
+                observed,
+                next_check_epoch,
+                reason[:500],
+                utc_now(),
+                chain,
+                token_address,
+            ),
+        )
+        self.connection.commit()
+
+    def save_auto_buy_discovery_candidate(
+        self,
+        *,
+        token_address: str,
+        symbol: str,
+        candidate_json: str,
+        tier: str,
+        intelligence_score: int,
+        signal_score: int,
+        decision: str,
+        liquidity_usd: float | None,
+        next_check_epoch: float,
+        reason: str,
+        status: str = "TRACKING",
+        observed_epoch: float | None = None,
+        chain: str = "solana",
+    ) -> None:
+        if status not in {"TRACKING", "QUALIFIED"}:
+            raise ValueError("invalid tracked auto-buy discovery status")
+        observed = time.time() if observed_epoch is None else observed_epoch
+        self.connection.execute(
+            """
+            UPDATE auto_buy_discovery_watches
+            SET symbol = ?, status = ?, candidate_json = ?, tier = ?,
+                intelligence_score = ?, signal_score = ?, decision = ?,
+                liquidity_usd = ?, last_seen_epoch = ?, next_check_epoch = ?,
+                last_reason = ?, updated_at = ?
+            WHERE chain = ? AND token_address = ?
+              AND status IN ('WATCHING', 'TRACKING', 'QUALIFIED')
+            """,
+            (
+                symbol,
+                status,
+                candidate_json,
+                tier,
+                intelligence_score,
+                signal_score,
+                decision,
+                liquidity_usd,
+                observed,
+                next_check_epoch,
+                reason[:500],
+                utc_now(),
+                chain,
+                token_address,
+            ),
+        )
+        self.connection.commit()
+
+    def mark_auto_buy_discovery_watch(
+        self,
+        token_address: str,
+        *,
+        status: str,
+        reason: str,
+        chain: str = "solana",
+    ) -> bool:
+        allowed = {
+            "WATCHING",
+            "TRACKING",
+            "QUALIFIED",
+            "BOUGHT",
+            "REVIEW",
+            "CANCELLED",
+            "EXPIRED",
+            "EVICTED",
+        }
+        if status not in allowed:
+            raise ValueError("invalid auto-buy discovery watch status")
+        cursor = self.connection.execute(
+            "UPDATE auto_buy_discovery_watches SET status = ?, "
+            "last_reason = ?, updated_at = ? "
+            "WHERE chain = ? AND token_address = ? AND status IN "
+            "('WATCHING', 'TRACKING', 'QUALIFIED')",
+            (status, reason[:500], utc_now(), chain, token_address),
+        )
+        self.connection.commit()
+        return cursor.rowcount == 1
+
+    def cancel_auto_buy_discovery_watch(
+        self, token_address: str, *, chain: str = "solana"
+    ) -> bool:
+        cursor = self.connection.execute(
+            "UPDATE auto_buy_discovery_watches SET status = 'CANCELLED', "
+            "last_reason = 'cancelled by operator', updated_at = ? "
+            "WHERE chain = ? AND token_address = ? AND status IN "
+            "('WATCHING', 'TRACKING', 'QUALIFIED')",
+            (utc_now(), chain, token_address),
+        )
+        self.connection.commit()
+        return cursor.rowcount == 1
+
+    def auto_buy_discovery_status(self) -> dict[str, list[dict[str, Any]]]:
+        self.expire_auto_buy_discovery_watches()
+        columns = (
+            "chain, token_address, symbol, status, tier, "
+            "intelligence_score, signal_score, decision, liquidity_usd, "
+            "attempts, quote_failures, first_seen_epoch, last_seen_epoch, "
+            "next_check_epoch, expires_at_epoch, last_reason, updated_at"
+        )
+        active = self.connection.execute(
+            f"SELECT {columns} FROM auto_buy_discovery_watches "
+            "WHERE status IN ('WATCHING', 'TRACKING', 'QUALIFIED') "
+            "ORDER BY signal_score DESC, intelligence_score DESC, "
+            "first_seen_epoch DESC"
+        ).fetchall()
+        terminal = self.connection.execute(
+            f"SELECT {columns} FROM auto_buy_discovery_watches "
+            "WHERE status NOT IN ('WATCHING', 'TRACKING', 'QUALIFIED') "
+            "ORDER BY updated_at DESC LIMIT 50"
+        ).fetchall()
+        return {
+            "active": [dict(row) for row in active],
+            "recent_terminal": [dict(row) for row in terminal],
+        }
 
     def disarm_auto_buy(
         self, token_address: str, *, chain: str = "solana"

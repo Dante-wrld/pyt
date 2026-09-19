@@ -31,7 +31,7 @@ from .execution import (
     SolanaAutoSeller,
     store_fomo_solana_key,
 )
-from .intelligence import CoinIntelligence
+from .intelligence import CoinIntelligence, IntelligenceResult
 from .market import DexScreenerOracle, MarketQuote
 from .multichain import (
     EvmRpc,
@@ -387,6 +387,44 @@ class LaunchGuard:
                     state["baseline_liquidity_usd"]
                 ),
             )
+        self._restore_auto_buy_discovery_candidates()
+
+    def _restore_auto_buy_discovery_candidates(self) -> None:
+        if not (
+            self.settings.auto_buy_enabled
+            and self.settings.auto_buy_discovery
+        ):
+            return
+        now = time.time()
+        restored = 0
+        for watch in self.store.active_auto_buy_discovery_watches(
+            now_epoch=now
+        ):
+            payload = watch.get("candidate_json")
+            if not payload:
+                continue
+            try:
+                candidate = RecommendationCandidate.from_json(str(payload))
+            except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                self.store.mark_auto_buy_discovery_watch(
+                    str(watch["token_address"]),
+                    status="REVIEW",
+                    reason=f"invalid persisted candidate state: {exc}",
+                )
+                continue
+            if (
+                candidate.chain != "solana"
+                or candidate.mint != watch["token_address"]
+                or now - candidate.updated_at
+                > self.settings.recommendation_ttl_seconds
+            ):
+                continue
+            restored += int(self.recommendations.restore(candidate))
+        if restored:
+            LOGGER.info(
+                "Restored %d persistent auto-buy discovery candidate(s)",
+                restored,
+            )
 
     async def handle_launch(self, payload: Mapping[str, Any]) -> None:
         try:
@@ -408,6 +446,35 @@ class LaunchGuard:
                 launch.mint,
                 "; ".join(decision.reasons),
             )
+            return
+
+        if (
+            self.settings.auto_buy_enabled
+            and self.settings.auto_buy_discovery
+        ):
+            observed = time.time()
+            outcome = self.store.start_auto_buy_discovery_watch(
+                token_address=launch.mint,
+                symbol=launch.symbol,
+                launch_payload=launch.raw,
+                first_seen_epoch=observed,
+                first_check_epoch=(
+                    observed + self.settings.intelligence_wait_seconds
+                ),
+                expires_at_epoch=(
+                    observed + self.settings.auto_buy_watch_max_seconds
+                ),
+                max_active=self.settings.auto_buy_watch_max_candidates,
+            )
+            if outcome == "CREATED":
+                LOGGER.info(
+                    "AUTO-BUY WATCH %-10s mint=%s first-check=%.0fs "
+                    "lifetime=%.0fs",
+                    launch.symbol,
+                    launch.mint,
+                    self.settings.intelligence_wait_seconds,
+                    self.settings.auto_buy_watch_max_seconds,
+                )
             return
 
         if len(self.candidate_tasks) >= self.settings.max_pending_candidates:
@@ -466,6 +533,17 @@ class LaunchGuard:
 
         self.recommendations.add(quote, result)
 
+        await self._maybe_open_paper_position(launch, quote, result)
+
+    async def _maybe_open_paper_position(
+        self,
+        launch: Launch,
+        quote: MarketQuote,
+        result: IntelligenceResult,
+    ) -> None:
+        """Preserve the existing paper-trade path for qualified watches."""
+
+        symbol = quote.symbol
         sol_usd = await self.oracle.sol_usd_price()
         if sol_usd is None:
             LOGGER.info(
@@ -544,6 +622,173 @@ class LaunchGuard:
             take_profit,
             stop_loss,
         )
+
+    def _auto_buy_watch_retry_delay(self, attempts: int) -> float:
+        retry_bucket = min(5, max(0, attempts - 1) // 4)
+        return min(
+            self.settings.auto_buy_watch_retry_max_seconds,
+            self.settings.auto_buy_watch_retry_base_seconds
+            * (2**retry_bucket),
+        )
+
+    async def _evaluate_auto_buy_discovery_watch(
+        self, watch: Mapping[str, Any]
+    ) -> None:
+        observed = time.time()
+        mint = str(watch["token_address"])
+        attempts = int(watch["attempts"]) + 1
+        delay = self._auto_buy_watch_retry_delay(attempts)
+        try:
+            payload = json.loads(str(watch["launch_json"]))
+            if not isinstance(payload, dict):
+                raise TypeError("launch snapshot is not a JSON object")
+            launch = Launch.from_payload(payload)
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            self.store.mark_auto_buy_discovery_watch(
+                mint,
+                status="REVIEW",
+                reason=f"invalid persisted launch state: {exc}",
+            )
+            return
+
+        quote = await self.oracle.quote(mint)
+        current = self.store.load_auto_buy_discovery_watch(mint)
+        if current is None or current["status"] not in {
+            "WATCHING",
+            "TRACKING",
+            "QUALIFIED",
+        }:
+            return
+        result = self.intelligence.score(quote)
+        symbol = quote.symbol if quote is not None else launch.symbol
+        self.store.save_intelligence_score(
+            mint=mint,
+            symbol=symbol,
+            tier=result.tier,
+            total_score=result.total_score,
+            safety_score=result.safety_score,
+            momentum_score=result.momentum_score,
+            reasons=result.reasons,
+        )
+        if quote is None or not result.accepted:
+            reason = "; ".join(result.reasons) or "market quote unavailable"
+            self.store.record_auto_buy_discovery_observation(
+                token_address=mint,
+                symbol=symbol,
+                status="WATCHING",
+                next_check_epoch=observed + delay,
+                reason=reason,
+                quote_available=quote is not None,
+                tier=result.tier,
+                intelligence_score=result.total_score,
+                liquidity_usd=(quote.liquidity_usd if quote else None),
+                observed_epoch=observed,
+            )
+            return
+
+        key = quote.recommendation_key
+        candidate = self.recommendations.candidates.get(key)
+        if candidate is None and watch.get("candidate_json"):
+            try:
+                restored = RecommendationCandidate.from_json(
+                    str(watch["candidate_json"])
+                )
+                if restored.mint == mint and restored.chain == "solana":
+                    self.recommendations.restore(restored)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                LOGGER.warning(
+                    "Discarding invalid candidate state for %s; rebuilding",
+                    mint,
+                )
+            candidate = self.recommendations.candidates.get(key)
+        if candidate is None:
+            candidate = self.recommendations.add(quote, result)
+        else:
+            candidate = self.recommendations.update(quote)
+
+        retained = (
+            candidate is not None
+            and candidate.key in self.recommendations.candidates
+        )
+        reason = (
+            candidate.decision_reason
+            if retained and candidate is not None
+            else "intelligence qualified; waiting for active shortlist space"
+        )
+        self.store.record_auto_buy_discovery_observation(
+            token_address=mint,
+            symbol=symbol,
+            status="TRACKING" if retained else "WATCHING",
+            next_check_epoch=(
+                observed + self.settings.auto_buy_watch_retry_max_seconds
+            ),
+            reason=reason,
+            quote_available=True,
+            candidate_json=(candidate.to_json() if candidate else None),
+            tier=result.tier,
+            intelligence_score=result.total_score,
+            signal_score=(candidate.signal_score if candidate else 0),
+            decision=(candidate.decision if candidate else None),
+            liquidity_usd=quote.liquidity_usd,
+            observed_epoch=observed,
+        )
+        if not watch.get("candidate_json"):
+            await self._maybe_open_paper_position(launch, quote, result)
+
+    async def run_auto_buy_discovery_monitor(self) -> None:
+        LOGGER.info(
+            "Persistent auto-buy discovery active (lifetime %.0fs, "
+            "capacity %d, batch %d)",
+            self.settings.auto_buy_watch_max_seconds,
+            self.settings.auto_buy_watch_max_candidates,
+            self.settings.auto_buy_watch_batch_size,
+        )
+        while True:
+            due = self.store.due_auto_buy_discovery_watches(
+                limit=self.settings.auto_buy_watch_batch_size
+            )
+            semaphore = asyncio.Semaphore(5)
+
+            async def evaluate(
+                watch: Mapping[str, Any],
+                limiter: asyncio.Semaphore = semaphore,
+            ) -> None:
+                async with limiter:
+                    try:
+                        await self._evaluate_auto_buy_discovery_watch(watch)
+                    except (ConnectionError, RuntimeError, ValueError) as exc:
+                        attempts = int(watch["attempts"]) + 1
+                        self.store.record_auto_buy_discovery_observation(
+                            token_address=str(watch["token_address"]),
+                            symbol=str(watch["symbol"]),
+                            status=str(watch["status"]),
+                            next_check_epoch=(
+                                time.time()
+                                + self._auto_buy_watch_retry_delay(attempts)
+                            ),
+                            reason=f"temporary evaluation failure: {exc}",
+                            quote_available=False,
+                            candidate_json=watch.get("candidate_json"),
+                            tier=watch.get("tier"),
+                            intelligence_score=int(
+                                watch.get("intelligence_score") or 0
+                            ),
+                            signal_score=int(watch.get("signal_score") or 0),
+                            decision=watch.get("decision"),
+                            liquidity_usd=watch.get("liquidity_usd"),
+                        )
+                        LOGGER.warning(
+                            "AUTO-BUY WATCH RETRY %s mint=%s (%s)",
+                            watch["symbol"],
+                            watch["token_address"],
+                            exc,
+                        )
+
+            if due:
+                await asyncio.gather(*(evaluate(watch) for watch in due))
+            await asyncio.sleep(
+                self.settings.auto_buy_watch_retry_base_seconds
+            )
 
     async def handle_wallet_trade(self, trade: WalletTrade) -> None:
         quote = await self.oracle.quote(trade.mint)
@@ -1688,6 +1933,15 @@ class LaunchGuard:
             )
         if policy is None or not bool(policy["armed"]):
             return
+        if self.settings.auto_buy_discovery:
+            self.store.mark_auto_buy_discovery_watch(
+                candidate.mint,
+                status="QUALIFIED",
+                reason=(
+                    f"{candidate.decision} passed discovery gates; "
+                    "awaiting budget and execution gates"
+                ),
+            )
         seed_raw = round(self.settings.auto_buy_seed_size_usdc * 1_000_000)
         try:
             amount_raw, funding_source = self.store.preview_auto_buy_budget(
@@ -1743,6 +1997,12 @@ class LaunchGuard:
             prepared = simulation.prepared
         except (ConnectionError, RuntimeError, ValueError) as exc:
             LOGGER.warning("AUTO-BUY NOT SUBMITTED %s (%s)", intent.symbol, exc)
+            if self.settings.auto_buy_discovery:
+                self.store.mark_auto_buy_discovery_watch(
+                    candidate.mint,
+                    status="QUALIFIED",
+                    reason=f"buy gate blocked submission: {exc}",
+                )
             return
         claimed = self.store.begin_auto_buy_execution(
             event_key=event_key,
@@ -1785,8 +2045,20 @@ class LaunchGuard:
                 error=str(exc),
                 signature=getattr(exc, "signature", None),
             )
+            if self.settings.auto_buy_discovery:
+                self.store.mark_auto_buy_discovery_watch(
+                    candidate.mint,
+                    status="REVIEW",
+                    reason=f"execution requires review: {exc}",
+                )
             LOGGER.error("AUTO-BUY FROZEN FOR REVIEW %s (%s)", intent.symbol, exc)
             return
+        if self.settings.auto_buy_discovery:
+            self.store.mark_auto_buy_discovery_watch(
+                candidate.mint,
+                status="BOUGHT",
+                reason=f"confirmed purchase {receipt.signature}",
+            )
         LOGGER.warning(
             "AUTO-BUY CONFIRMED %s amount=$%.2f signature=%s",
             intent.symbol,
@@ -1814,7 +2086,30 @@ class LaunchGuard:
                 async with limiter:
                     quote = await self.oracle.quote(mint, chain=chain)
                 if quote is not None:
-                    self.recommendations.update(quote)
+                    candidate = self.recommendations.update(quote)
+                    if (
+                        candidate is not None
+                        and chain == "solana"
+                        and self.settings.auto_buy_enabled
+                        and self.settings.auto_buy_discovery
+                    ):
+                        self.store.save_auto_buy_discovery_candidate(
+                            token_address=candidate.mint,
+                            symbol=candidate.symbol,
+                            candidate_json=candidate.to_json(),
+                            tier=candidate.tier,
+                            intelligence_score=(
+                                candidate.intelligence_score
+                            ),
+                            signal_score=candidate.signal_score,
+                            decision=candidate.decision,
+                            liquidity_usd=candidate.liquidity_usd,
+                            next_check_epoch=(
+                                time.time()
+                                + self.settings.auto_buy_watch_retry_max_seconds
+                            ),
+                            reason=candidate.decision_reason,
+                        )
 
             if candidates:
                 await asyncio.gather(
@@ -2112,6 +2407,15 @@ class LaunchGuard:
             tasks.append(asyncio.create_task(self.run_portfolio_monitor()))
         if mode in {"launches", "both", "all"}:
             tasks.append(asyncio.create_task(self.run_launch_feed()))
+            if (
+                self.settings.auto_buy_enabled
+                and self.settings.auto_buy_discovery
+            ):
+                tasks.append(
+                    asyncio.create_task(
+                        self.run_auto_buy_discovery_monitor()
+                    )
+                )
 
         if mode == "robinhood":
             tasks.append(
@@ -2401,6 +2705,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--auto-buy-status",
         action="store_true",
         help="show the seed counter, profit pool, allow-list, and positions",
+    )
+    parser.add_argument(
+        "--auto-buy-watch-status",
+        action="store_true",
+        help="show persistent discovery watches, retry state, and outcomes",
     )
     parser.add_argument(
         "--preflight-auto-buy-mint",
@@ -3129,9 +3438,12 @@ def main() -> None:
             )
         elif args.disarm_auto_buy_mint:
             store.disarm_auto_buy(args.disarm_auto_buy_mint)
+            store.cancel_auto_buy_discovery_watch(args.disarm_auto_buy_mint)
             LOGGER.info("Auto-buy disarmed for %s", args.disarm_auto_buy_mint)
         elif args.auto_buy_status:
             print(json.dumps(store.auto_buy_status(), indent=2))
+        elif args.auto_buy_watch_status:
+            print(json.dumps(store.auto_buy_discovery_status(), indent=2))
         elif args.auto_rebuy_status:
             print(json.dumps(store.auto_rebuy_status(), indent=2))
         elif args.cancel_auto_rebuy_mint:
