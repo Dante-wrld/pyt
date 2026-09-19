@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from solana_launch_guard.agents import AgentRole
-from solana_launch_guard.agent_cli import build_parser, friendly_api_error
+from solana_launch_guard.agent_cli import build_parser, friendly_api_error, _priced_sell_signal
 from solana_launch_guard.openai_agents import (
     OpenAIProposalModel,
     ProposalOutput,
@@ -70,6 +70,16 @@ def test_agent_cli_requires_one_safe_command():
         ["--initialize-capital", "30"]
     ).initialize_capital == 30
     assert build_parser().parse_args(["--shadow-once"]).shadow_once is True
+    assert build_parser().parse_args(["--shadow-portfolio-sell-once"]).shadow_portfolio_sell_once is True
+
+
+def test_portfolio_sell_selection_skips_unpriced_and_non_solana():
+    unpriced = {"chain": "solana", "decision": "UNPRICED", "current_price": None}
+    ethereum = {"chain": "ethereum", "decision": "EXIT WARNING", "current_price": 1, "current_value_usd": 10, "liquidity_usd": 10000}
+    partial = {"chain": "solana", "decision": "TAKE PARTIAL", "current_price": 1, "current_value_usd": 4, "liquidity_usd": 10000}
+    exit_warning = {"chain": "solana", "decision": "EXIT WARNING", "current_price": 2, "current_value_usd": 2, "liquidity_usd": 5000}
+    assert _priced_sell_signal([unpriced, ethereum, partial, exit_warning]) is exit_warning
+    assert _priced_sell_signal([unpriced, ethereum]) == {}
 
 
 def test_credit_error_is_explained_without_a_traceback_message():
