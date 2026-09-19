@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -53,6 +53,17 @@ class RecommendationCandidate:
     planned_entry_price: float | None = None
     planned_stop_pct: float = 20.0
     planned_target_pct: float = 40.0
+
+    def to_json(self) -> str:
+        """Serialize the complete signal state for restart-safe monitoring."""
+        return json.dumps(asdict(self), sort_keys=True, separators=(",", ":"))
+
+    @classmethod
+    def from_json(cls, payload: str) -> RecommendationCandidate:
+        values = json.loads(payload)
+        if not isinstance(values, dict):
+            raise TypeError("candidate snapshot must be a JSON object")
+        return cls(**values)
 
     @property
     def rise_pct(self) -> float:
@@ -254,7 +265,7 @@ class RecommendationBook:
         price = quote.recommendation_price
         if not result.accepted or price <= 0:
             return None
-        timestamp = time.monotonic() if now is None else now
+        timestamp = time.time() if now is None else now
         existing = self.candidates.get(quote.recommendation_key)
         if existing is not None:
             self.update(quote, now=timestamp)
@@ -318,7 +329,7 @@ class RecommendationBook:
         candidate.sells_m5 = quote.sells_m5
         candidate.price_change_m5_pct = quote.price_change_m5_pct
         candidate.buy_sell_ratio = quote.buy_sell_ratio
-        candidate.updated_at = time.monotonic() if now is None else now
+        candidate.updated_at = time.time() if now is None else now
         previous_decision = candidate.decision
         self._refresh_decision(candidate)
         if (
@@ -352,14 +363,27 @@ class RecommendationBook:
         return sorted(alerts, key=lambda item: item.signal_score, reverse=True)
 
     def expire(self, *, now: float | None = None) -> None:
-        timestamp = time.monotonic() if now is None else now
+        timestamp = time.time() if now is None else now
         expired = [
             key
             for key, candidate in self.candidates.items()
-            if timestamp - candidate.observed_at > self.ttl_seconds
+            if timestamp - candidate.updated_at > self.ttl_seconds
         ]
         for key in expired:
             del self.candidates[key]
+
+    def restore(self, candidate: RecommendationCandidate) -> bool:
+        """Restore persisted state without making a stale signal look fresh."""
+        if (
+            not candidate.mint
+            or not candidate.chain
+            or candidate.initial_price <= 0
+            or candidate.current_price <= 0
+        ):
+            return False
+        self.candidates[candidate.key] = candidate
+        self._trim()
+        return candidate.key in self.candidates
 
     def ranked(self, limit: int = 10) -> list[RecommendationCandidate]:
         ordered = sorted(

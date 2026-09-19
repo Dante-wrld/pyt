@@ -197,6 +197,11 @@ class Settings:
     auto_buy_discovery_min_score: int = 70
     auto_buy_discovery_min_liquidity_usd: float = 50_000.0
     auto_buy_signal_max_age_seconds: float = 30.0
+    auto_buy_watch_max_seconds: float = 86_400.0
+    auto_buy_watch_max_candidates: int = 250
+    auto_buy_watch_batch_size: int = 10
+    auto_buy_watch_retry_base_seconds: float = 15.0
+    auto_buy_watch_retry_max_seconds: float = 300.0
     auto_buy_excluded_mints: tuple[str, ...] = ()
     auto_buy_seed_size_usdc: float = 5.0
     auto_buy_max_seed_buys: int = 2
@@ -438,6 +443,21 @@ class Settings:
             auto_buy_signal_max_age_seconds=_float(
                 "AUTO_BUY_SIGNAL_MAX_AGE_SECONDS", 30.0
             ),
+            auto_buy_watch_max_seconds=_float(
+                "AUTO_BUY_WATCH_MAX_SECONDS", 86_400.0
+            ),
+            auto_buy_watch_max_candidates=_int(
+                "AUTO_BUY_WATCH_MAX_CANDIDATES", 250
+            ),
+            auto_buy_watch_batch_size=_int(
+                "AUTO_BUY_WATCH_BATCH_SIZE", 10
+            ),
+            auto_buy_watch_retry_base_seconds=_float(
+                "AUTO_BUY_WATCH_RETRY_BASE_SECONDS", 15.0
+            ),
+            auto_buy_watch_retry_max_seconds=_float(
+                "AUTO_BUY_WATCH_RETRY_MAX_SECONDS", 300.0
+            ),
             auto_buy_excluded_mints=_addresses(
                 "AUTO_BUY_EXCLUDED_MINTS"
             ),
@@ -659,6 +679,43 @@ class Settings:
         if self.auto_buy_signal_max_age_seconds < 5:
             raise ValueError(
                 "AUTO_BUY_SIGNAL_MAX_AGE_SECONDS must be at least 5"
+            )
+        if self.auto_buy_watch_max_seconds < 300:
+            raise ValueError(
+                "AUTO_BUY_WATCH_MAX_SECONDS must be at least 300"
+            )
+        if not 1 <= self.auto_buy_watch_max_candidates <= 5_000:
+            raise ValueError(
+                "AUTO_BUY_WATCH_MAX_CANDIDATES must be from 1 through 5000"
+            )
+        if not 1 <= self.auto_buy_watch_batch_size <= 50:
+            raise ValueError(
+                "AUTO_BUY_WATCH_BATCH_SIZE must be from 1 through 50"
+            )
+        if (
+            self.auto_buy_watch_batch_size
+            > self.auto_buy_watch_max_candidates
+        ):
+            raise ValueError(
+                "AUTO_BUY_WATCH_BATCH_SIZE cannot exceed watch capacity"
+            )
+        if self.auto_buy_watch_retry_base_seconds < 5:
+            raise ValueError(
+                "AUTO_BUY_WATCH_RETRY_BASE_SECONDS must be at least 5"
+            )
+        if (
+            self.auto_buy_watch_retry_max_seconds
+            < self.auto_buy_watch_retry_base_seconds
+        ):
+            raise ValueError(
+                "AUTO_BUY_WATCH_RETRY_MAX_SECONDS must be at least the base"
+            )
+        if (
+            self.auto_buy_watch_retry_max_seconds
+            > self.auto_buy_watch_max_seconds
+        ):
+            raise ValueError(
+                "AUTO_BUY_WATCH_RETRY_MAX_SECONDS cannot exceed watch lifetime"
             )
         if self.auto_buy_live and not self.auto_buy_enabled:
             raise ValueError("AUTO_BUY_LIVE requires AUTO_BUY_ENABLED=true")
