@@ -302,7 +302,9 @@ def shadow_once(model: OpenAIProposalModel | None, book: CapitalBook, *, portfol
     if portfolio_sell_only:
         inputs = (inputs[1],)
     if core_only:
-        inputs = tuple(item for item in inputs[:2] if next(iter(item[2].values())))
+        # Review portfolio exits first: each model request consumes time, and
+        # a sell quote may age out while Hunter evaluates a separate token.
+        inputs = tuple(item for item in (inputs[1], inputs[0]) if next(iter(item[2].values())))
         if not inputs:
             return {"mode": "shadow", "live_execution": False, "agents": [], "reason": "no eligible Solana opportunity or priced sell recommendation", "capital": book.public_status()}
     if model is None:

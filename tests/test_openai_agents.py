@@ -1,9 +1,12 @@
 from types import SimpleNamespace
 
 import pytest
+import json
+import time
 
 from solana_launch_guard.agents import AgentRole
-from solana_launch_guard.agent_cli import build_parser, friendly_api_error, _priced_sell_signal, _solana_opportunity, _snapshot_is_fresh
+from solana_launch_guard.agent_cli import build_parser, friendly_api_error, _priced_sell_signal, _solana_opportunity, _snapshot_is_fresh, shadow_once
+from solana_launch_guard.agent_capital import CapitalBook
 from solana_launch_guard.openai_agents import (
     OpenAIProposalModel,
     ProposalOutput,
@@ -80,6 +83,23 @@ def test_loop_skips_stale_or_future_snapshots():
     assert not _snapshot_is_fresh({"generated_at": 100}, now=116)
     assert not _snapshot_is_fresh({"generated_at": 101}, now=100)
     assert not _snapshot_is_fresh({}, now=100)
+
+
+def test_core_cycle_reviews_sell_before_hunter(tmp_path, monkeypatch):
+    recommendations = tmp_path / "recommendations.json"
+    portfolio = tmp_path / "portfolio.json"
+    recommendations.write_text(json.dumps({"generated_at": time.time(), "candidates": [{"chain": "solana", "mint": "A" * 32, "decision": "WATCH", "liquidity_usd": 20000}]}))
+    portfolio.write_text(json.dumps({"generated_at": time.time(), "signals": [{"chain": "solana", "token_address": "B" * 32, "decision": "EXIT WARNING", "current_price": 1, "current_value_usd": 2, "liquidity_usd": 20000}]}))
+    monkeypatch.setenv("RECOMMENDATION_SNAPSHOT_PATH", str(recommendations))
+    monkeypatch.setenv("PORTFOLIO_SNAPSHOT_PATH", str(portfolio))
+    monkeypatch.setenv("AGENT_DECISION_LOG_PATH", str(tmp_path / "decisions.jsonl"))
+    book = CapitalBook(tmp_path / "capital.json")
+    book.initialize(30)
+    class Model:
+        def propose(self, *, role, context):
+            return {"action": "HOLD", "mint": "", "confidence": 0.8, "thesis": "test"}
+    result = shadow_once(Model(), book, core_only=True)
+    assert [item["agent_id"] for item in result["agents"]] == ["portfolio-v1", "hunter-v1"]
 
 
 def test_solana_opportunity_skips_other_chains_and_avoid():
