@@ -329,6 +329,7 @@ def build_portfolio_snapshot(
     wallet: str | None,
     poll_seconds: float,
     execution_mode: str = "read-only",
+    loss_sale_reviews: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     priority = {
         "EXIT WARNING": 4,
@@ -354,6 +355,7 @@ def build_portfolio_snapshot(
         "poll_seconds": poll_seconds,
         "execution_mode": execution_mode,
         "signals": [asdict(item) for item in ordered],
+        "loss_sale_reviews": loss_sale_reviews or [],
     }
 
 
@@ -374,7 +376,8 @@ def read_portfolio_snapshot(path: str | Path) -> dict[str, Any] | None:
 
 
 def format_portfolio_dashboard(
-    snapshot: dict[str, Any], *, color: bool = True
+    snapshot: dict[str, Any], *, color: bool = True, show_all: bool = False,
+    min_visible_usd: float = 2.0,
 ) -> str:
     reset = "\033[0m" if color else ""
     bold = "\033[1m" if color else ""
@@ -393,7 +396,13 @@ def format_portfolio_dashboard(
         generated, tz=timezone.utc
     ).astimezone().strftime("%Y-%m-%d %H:%M:%S")
     wallet = str(snapshot.get("wallet") or "manual/imported holdings")
-    rows = snapshot.get("signals") or []
+    all_rows = snapshot.get("signals") or []
+    rows = (all_rows if show_all else [
+        item for item in all_rows
+        if item.get("current_value_usd") is not None
+        and float(item["current_value_usd"]) >= min_visible_usd
+    ])
+    hidden = len(all_rows) - len(rows)
     execution_mode = str(snapshot.get("execution_mode") or "read-only")
     mode_label = {
         "live": "AUTO-SELL LIVE",
@@ -402,7 +411,7 @@ def format_portfolio_dashboard(
     lines = [
         f"{bold}LAUNCH GUARD — MY HOLDINGS ({mode_label}){reset}",
         f"Wallet: {wallet}",
-        f"Updated: {updated} | Holdings: {len(rows)}",
+        f"Updated: {updated} | Holdings: {len(all_rows)} | Shown: {len(rows)}",
         (
             "Only armed 2x/3x profit-ladder events can submit a USDC sell."
             if execution_mode == "live"
@@ -410,8 +419,23 @@ def format_portfolio_dashboard(
         ),
         "",
     ]
+    if hidden:
+        lines.append(
+            f"{hidden} small or unpriced holdings hidden. "
+            "Run launch-guard --show-all-holdings for the complete list."
+        )
+        lines.append("")
+    reviews = snapshot.get("loss_sale_reviews") or []
+    ready = [item for item in reviews if item.get("decision") == "REBUY REVIEW"]
+    if ready:
+        lines.append("NET-LOSS SALES — REBOUND REVIEW (advisory only)")
+        lines.extend(
+            f"  {item['symbol']}: {item['decision']} — {item['reason']}"
+            for item in ready
+        )
+        lines.append("")
     if not rows:
-        lines.append("No non-zero priced token holdings found yet.")
+        lines.append("No holdings to display at the current minimum." if hidden else "No holdings found yet.")
         return "\n".join(lines)
 
     for index, raw in enumerate(rows, start=1):
