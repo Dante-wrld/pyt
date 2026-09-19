@@ -91,3 +91,5 @@ Version 0.26 adds a one-attempt, $1 USDC mainnet canary. It is disabled by defau
 Keep `AGENT_LIVE_KILL_SWITCH=true` except during the supervised test. First run `launch-guard-agents --live-test-preflight`. Only after reviewing that output, run `launch-guard-agents --live-test-execute --confirm SPEND_1_USDC_ON_MAINNET`. A local journal makes the canary one-attempt-only and blocks blind retry after an uncertain outcome.
 
 A confirmed canary is written into the normal auto-buy execution ledger, saved as an owned holding with its exact cost basis, and automatically armed for the existing sell engine. Any uncertain execution is frozen for manual reconciliation and cannot be retried blindly.
+
+To review an actionable priced Solana sell signal with just the Portfolio Manager in shadow mode, run `launch-guard-agents --shadow-portfolio-sell-once` while the portfolio monitor updates. The command reports when no eligible sell signal exists, without requesting an AI response or broadcasting a trade.

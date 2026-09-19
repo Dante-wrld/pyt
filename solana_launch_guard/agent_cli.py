@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import os
 import time
 from pathlib import Path
@@ -82,6 +83,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--shadow-once",
         action="store_true",
         help="make one decision per agent from current read-only snapshots",
+    )
+    group.add_argument(
+        "--shadow-portfolio-sell-once",
+        action="store_true",
+        help="review one priced sell recommendation with the portfolio agent only",
     )
     group.add_argument(
         "--live-test-preflight",
@@ -187,7 +193,28 @@ def _first_dict(value: object) -> dict[str, object]:
     return {}
 
 
-def shadow_once(model: OpenAIProposalModel, book: CapitalBook) -> dict[str, object]:
+def _priced_sell_signal(value: object) -> dict[str, object]:
+    if not isinstance(value, list):
+        return {}
+    priorities = {"EXIT WARNING": 3, "PROTECT PROFIT": 2, "TAKE PARTIAL": 1}
+    eligible = []
+    for item in value:
+        if not isinstance(item, dict) or item.get("chain") != "solana":
+            continue
+        if item.get("decision") not in priorities:
+            continue
+        try:
+            price = float(item.get("current_price") or 0)
+            amount = float(item.get("current_value_usd") or 0)
+            liquidity = float(item.get("liquidity_usd") or 0)
+        except (TypeError, ValueError):
+            continue
+        if all(map(math.isfinite, (price, amount, liquidity))) and min(price, amount, liquidity) > 0:
+            eligible.append(item)
+    return max(eligible, key=lambda x: (priorities[x["decision"]], float(x["current_value_usd"])), default={})
+
+
+def shadow_once(model: OpenAIProposalModel, book: CapitalBook, *, portfolio_sell_only: bool = False) -> dict[str, object]:
     recommendations = _read_json(
         os.getenv("RECOMMENDATION_SNAPSHOT_PATH", "launch_guard_recommendations.json")
     )
@@ -199,13 +226,17 @@ def shadow_once(model: OpenAIProposalModel, book: CapitalBook) -> dict[str, obje
     )
     accounts = {row.agent_id: row for row in book.accounts()}
     candidate = _first_dict(recommendations.get("candidates"))
-    holding = _first_dict(portfolio.get("signals"))
+    holding = _priced_sell_signal(portfolio.get("signals")) if portfolio_sell_only else _first_dict(portfolio.get("signals"))
     leader = _first_dict(copy_data.get("signals"))
     inputs = (
         ("hunter-v1", AgentRole.OPPORTUNITY_HUNTER, {"candidate": candidate}),
         ("portfolio-v1", AgentRole.PORTFOLIO_MANAGER, {"owned_position": holding}),
         ("copy-v1", AgentRole.COPY_TRADER, {"observed_leader_trade": leader}),
     )
+    if portfolio_sell_only and not holding:
+        return {"mode": "shadow", "live_execution": False, "agents": [], "reason": "no priced Solana sell recommendation is available", "capital": book.public_status()}
+    if portfolio_sell_only:
+        inputs = (inputs[1],)
     coordinator = AgentCoordinator(
         model,
         RiskArbiter(
@@ -309,6 +340,9 @@ def main() -> None:
         elif args.shadow_once:
             model = OpenAIProposalModel()
             result = shadow_once(model, book)
+        elif args.shadow_portfolio_sell_once:
+            model = OpenAIProposalModel() if _priced_sell_signal(_read_json(os.getenv("PORTFOLIO_SNAPSHOT_PATH", "launch_guard_portfolio.json")).get("signals")) else None
+            result = shadow_once(model, book, portfolio_sell_only=True)
         elif args.live_test_preflight or args.live_test_execute:
             from .agent_live_test import run_live_canary
 
