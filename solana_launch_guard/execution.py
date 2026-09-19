@@ -168,7 +168,7 @@ class OrderClient(Protocol):
         input_mint: str,
         output_mint: str = USDC_MINT,
         amount_raw: int,
-        taker: str,
+        taker: str | None = None,
         exclude_routers: tuple[str, ...] = (),
     ) -> dict[str, Any]: ...
 
@@ -530,8 +530,9 @@ class JupiterSwapClient:
             "inputMint": input_mint,
             "outputMint": output_mint,
             "amount": str(amount_raw),
-            "taker": taker,
         }
+        if taker is not None:
+            parameters["taker"] = taker
         if exclude_routers:
             parameters["excludeRouters"] = ",".join(exclude_routers)
         query = urllib.parse.urlencode(parameters)
