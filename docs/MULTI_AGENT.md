@@ -93,3 +93,5 @@ Keep `AGENT_LIVE_KILL_SWITCH=true` except during the supervised test. First run 
 A confirmed canary is written into the normal auto-buy execution ledger, saved as an owned holding with its exact cost basis, and automatically armed for the existing sell engine. Any uncertain execution is frozen for manual reconciliation and cannot be retried blindly.
 
 To review an actionable priced Solana sell signal with just the Portfolio Manager in shadow mode, run `launch-guard-agents --shadow-portfolio-sell-once` while the portfolio monitor updates. The command reports when no eligible sell signal exists, without requesting an AI response or broadcasting a trade.
+
+Run `launch-guard-agents --shadow-core-once` to review only the Opportunity Hunter and Portfolio Manager. It skips Copy Trader, ignores non-Solana and AVOID candidates, and chooses a priced Solana sell recommendation if available. This is a one-shot shadow review; no sale or live trade is submitted.
