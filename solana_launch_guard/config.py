@@ -176,6 +176,7 @@ class Settings:
     portfolio_snapshot_path: str = "launch_guard_portfolio.json"
     portfolio_poll_seconds: float = 15.0
     portfolio_min_value_usd: float = 0.01
+    portfolio_min_sell_value_usd: float = 2.0
     auto_trade_floor_percentages: bool = False
     auto_sell_enabled: bool = False
     auto_sell_live: bool = False
@@ -191,7 +192,7 @@ class Settings:
     auto_sell_take_partial_fraction: float = 0.5
     auto_sell_protect_profit_fraction: float = 1.0
     auto_sell_exit_warning_fraction: float = 1.0
-    auto_sell_min_value_usd: float = 1.0
+    auto_sell_min_value_usd: float = 2.0
     auto_sell_signal_confirmation_polls: int = 3
     auto_sell_signal_max_gap_seconds: float = 180.0
     auto_sell_excluded_mints: tuple[str, ...] = (USDC_MINT,)
@@ -380,6 +381,9 @@ class Settings:
             portfolio_min_value_usd=_float(
                 "PORTFOLIO_MIN_VALUE_USD", 0.01
             ),
+            portfolio_min_sell_value_usd=_float(
+                "PORTFOLIO_MIN_SELL_VALUE_USD", 2.0
+            ),
             auto_trade_floor_percentages=_bool(
                 "AUTO_TRADE_FLOOR_PERCENTAGES", False
             ),
@@ -422,7 +426,7 @@ class Settings:
                 "AUTO_SELL_EXIT_WARNING_FRACTION", 1.0
             ),
             auto_sell_min_value_usd=_float(
-                "AUTO_SELL_MIN_VALUE_USD", 1.0
+                "AUTO_SELL_MIN_VALUE_USD", 2.0
             ),
             auto_sell_signal_confirmation_polls=_int(
                 "AUTO_SELL_SIGNAL_CONFIRMATION_POLLS", 3
@@ -632,6 +636,8 @@ class Settings:
                 raise ValueError(f"{name} must be above 0 and at most 1")
         if self.auto_sell_min_value_usd <= 0:
             raise ValueError("AUTO_SELL_MIN_VALUE_USD must be above 0")
+        if self.portfolio_min_sell_value_usd < 2:
+            raise ValueError("PORTFOLIO_MIN_SELL_VALUE_USD must be at least $2")
         if not 1 <= self.auto_sell_signal_confirmation_polls <= 20:
             raise ValueError(
                 "AUTO_SELL_SIGNAL_CONFIRMATION_POLLS must be from 1 through 20"
