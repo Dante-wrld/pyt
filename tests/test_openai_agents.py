@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from solana_launch_guard.agents import AgentRole
-from solana_launch_guard.agent_cli import build_parser, friendly_api_error, _priced_sell_signal, _solana_opportunity
+from solana_launch_guard.agent_cli import build_parser, friendly_api_error, _priced_sell_signal, _solana_opportunity, _snapshot_is_fresh
 from solana_launch_guard.openai_agents import (
     OpenAIProposalModel,
     ProposalOutput,
@@ -72,6 +72,14 @@ def test_agent_cli_requires_one_safe_command():
     assert build_parser().parse_args(["--shadow-once"]).shadow_once is True
     assert build_parser().parse_args(["--shadow-portfolio-sell-once"]).shadow_portfolio_sell_once is True
     assert build_parser().parse_args(["--shadow-core-once"]).shadow_core_once is True
+    assert build_parser().parse_args(["--shadow-core-loop"]).shadow_core_loop is True
+
+
+def test_loop_skips_stale_or_future_snapshots():
+    assert _snapshot_is_fresh({"generated_at": 100}, now=109)
+    assert not _snapshot_is_fresh({"generated_at": 100}, now=116)
+    assert not _snapshot_is_fresh({"generated_at": 101}, now=100)
+    assert not _snapshot_is_fresh({}, now=100)
 
 
 def test_solana_opportunity_skips_other_chains_and_avoid():
