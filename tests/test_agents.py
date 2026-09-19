@@ -90,6 +90,12 @@ def test_portfolio_rebuy_is_zero_dollar_advisory():
                  action=TradeAction.REBUY, requested_usd=5).validate()
 
 
+def test_hunter_can_review_a_rebuy_without_spending():
+    review = proposal(action=TradeAction.REBUY, requested_usd=0)
+    review.validate()
+    assert not RiskArbiter().evaluate(review, risk()).approved
+
+
 def test_entry_only_limits_do_not_trap_risk_reducing_sell():
     result = RiskArbiter().evaluate(
         proposal(
