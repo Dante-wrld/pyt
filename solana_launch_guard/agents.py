@@ -24,6 +24,7 @@ class AgentStatus(StrEnum):
 
 class TradeAction(StrEnum):
     BUY = "BUY"
+    REBUY = "REBUY"
     HOLD = "HOLD"
     TAKE_PARTIAL = "TAKE_PARTIAL"
     SELL = "SELL"
@@ -46,10 +47,10 @@ class TradeProposal:
     def validate(self) -> None:
         if not self.agent_id.strip():
             raise ValueError("agent_id is required")
-        if self.action in {TradeAction.BUY, TradeAction.TAKE_PARTIAL, TradeAction.SELL}:
+        if self.action in {TradeAction.BUY, TradeAction.TAKE_PARTIAL, TradeAction.SELL, TradeAction.REBUY}:
             if not self.mint.strip():
                 raise ValueError("mint is required for a trade proposal")
-            if not math.isfinite(self.requested_usd) or self.requested_usd <= 0:
+            if self.action is not TradeAction.REBUY and (not math.isfinite(self.requested_usd) or self.requested_usd <= 0):
                 raise ValueError("requested_usd must be positive and finite")
         if not 0 <= self.confidence <= 1:
             raise ValueError("confidence must be between 0 and 1")
@@ -60,7 +61,10 @@ class TradeProposal:
                 raise ValueError("copy-trader buys require an attributed leader wallet")
         if self.role is AgentRole.PORTFOLIO_MANAGER and self.action is TradeAction.BUY:
             raise ValueError("portfolio manager cannot originate buys")
+        if self.action is TradeAction.REBUY and (self.role is not AgentRole.PORTFOLIO_MANAGER or self.requested_usd != 0):
+            raise ValueError("REBUY is a zero-dollar portfolio advisory decision")
         if self.role is AgentRole.OPPORTUNITY_HUNTER and self.action in {
+            TradeAction.REBUY,
             TradeAction.TAKE_PARTIAL,
             TradeAction.SELL,
         }:
@@ -282,7 +286,7 @@ class AgentModel(Protocol):
 
 ROLE_INSTRUCTIONS: dict[AgentRole, str] = {
     AgentRole.OPPORTUNITY_HUNTER: "Find new candidates; never manage existing positions or execute trades.",
-    AgentRole.PORTFOLIO_MANAGER: "Manage owned positions and exits; never discover copy-trade leaders.",
+    AgentRole.PORTFOLIO_MANAGER: "Manage owned positions and exits; review verified net-loss sales for advisory rebuy opportunities. REBUY is advisory only and never submits an order.",
     AgentRole.COPY_TRADER: "Discover and score traders, then selectively propose attributed copies; never blindly mirror.",
 }
 
