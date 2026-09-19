@@ -20,6 +20,7 @@ def candidate_snapshot(**overrides):
         "chain": "solana",
         "mint": "A" * 32,
         "decision": "BUY NOW",
+        "quoted_at": time.time(),
         "liquidity_usd": 75_000,
         "entry_confirmation_count": 3,
         "entry_confirmation_required": 3,
@@ -44,6 +45,16 @@ def test_stale_snapshot_is_rejected():
     snapshot["generated_at"] = time.time() - 16
     with pytest.raises(ValueError, match="stale"):
         select_live_candidate(snapshot, CanaryPolicy())
+
+
+def test_fresh_snapshot_cannot_republish_stale_or_missing_quote():
+    policy = CanaryPolicy()
+    with pytest.raises(ValueError, match="no fresh"):
+        select_live_candidate(candidate_snapshot(quoted_at=time.time() - 16), policy)
+    with pytest.raises(ValueError, match="no fresh"):
+        select_live_candidate(candidate_snapshot(quoted_at=None), policy)
+    with pytest.raises(ValueError, match="no fresh"):
+        select_live_candidate(candidate_snapshot(quoted_at=time.time() + 60), policy)
 
 
 def test_live_environment_is_default_off(monkeypatch):
