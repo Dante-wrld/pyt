@@ -1,1 +1,332 @@
-ZnJvbSBfX2Z1dHVyZV9fIGltcG9ydCBhbm5vdGF0aW9ucwoKaW1wb3J0IGFyZ3BhcnNlCmltcG9ydCBhc3luY2lvCmltcG9ydCBqc29uCmltcG9ydCBvcwppbXBvcnQgdGltZQpmcm9tIHBhdGhsaWIgaW1wb3J0IFBhdGgKCmZyb20gb3BlbmFpIGltcG9ydCBPcGVuQUlFcnJvcgoKZnJvbSAuYWdlbnRfY2FwaXRhbCBpbXBvcnQgQ2FwaXRhbEJvb2sKZnJvbSAuYWdlbnRzIGltcG9ydCAoCiAgICBBZ2VudENvb3JkaW5hdG9yLAogICAgQWdlbnRSZWNvcmQsCiAgICBBZ2VudFJvbGUsCiAgICBSaXNrQXJiaXRlciwKICAgIFJpc2tQb2xpY3ksCiAgICBSaXNrU25hcHNob3QsCiAgICBUcmFkZUFjdGlvbiwKKQpmcm9tIC5vcGVuYWlfYWdlbnRzIGltcG9ydCBPcGVuQUlQcm9wb3NhbE1vZGVsLCBjb25uZWN0aW9uX3Rlc3QKCgpkZWYgbG9hZF9kb3RlbnYocGF0aDogc3RyID0gIi5lbnYiKSAtPiBOb25lOgogICAgZmlsZV9wYXRoID0gUGF0aChwYXRoKQogICAgaWYgbm90IGZpbGVfcGF0aC5leGlzdHMoKToKICAgICAgICByZXR1cm4KICAgIGZvciByYXdfbGluZSBpbiBmaWxlX3BhdGgucmVhZF90ZXh0KGVuY29kaW5nPSJ1dGYtOCIpLnNwbGl0bGluZXMoKToKICAgICAgICBsaW5lID0gcmF3X2xpbmUuc3RyaXAoKQogICAgICAgIGlmIG5vdCBsaW5lIG9yIGxpbmUuc3RhcnRzd2l0aCgiIyIpIG9yICI9IiBub3QgaW4gbGluZToKICAgICAgICAgICAgY29udGludWUKICAgICAgICBrZXksIHZhbHVlID0gbGluZS5zcGxpdCgiPSIsIDEpCiAgICAgICAgaWYga2V5LnN0cmlwKCk6CiAgICAgICAgICAgIG9zLmVudmlyb24uc2V0ZGVmYXVsdChrZXkuc3RyaXAoKSwgdmFsdWUuc3RyaXAoKS5zdHJpcCgnIicpLnN0cmlwKCInIikpCgoKZGVmIGZyaWVuZGx5X2FwaV9lcnJvcihleGM6IEV4Y2VwdGlvbikgLT4gc3RyOgogICAgY29kZSA9IHN0cihnZXRhdHRyKGV4YywgImNvZGUiLCAiIikgb3IgIiIpCiAgICBtZXNzYWdlID0gc3RyKGV4YykuY2FzZWZvbGQoKQogICAgaWYgY29kZSBpbiB7ImNyZWRpdF9iYWxhbmNlX2V4aGF1c3RlZCIsICJpbnN1ZmZpY2llbnRfcXVvdGEifSBvciBhbnkoCiAgICAgICAgcGhyYXNlIGluIG1lc3NhZ2UKICAgICAgICBmb3IgcGhyYXNlIGluICgibm8gY3JlZGl0cyByZW1haW5pbmciLCAiY3JlZGl0IGJhbGFuY2UiLCAiaW5zdWZmaWNpZW50X3F1b3RhIikKICAgICk6CiAgICAgICAgcmV0dXJuICgKICAgICAgICAgICAgIk9wZW5BSSBBUEkgY3JlZGl0cyBhcmUgZXhoYXVzdGVkLiBBZGQgQVBJIGNyZWRpdHMgYXQgIgogICAgICAgICAgICAiaHR0cHM6Ly9wbGF0Zm9ybS5vcGVuYWkuY29tL3NldHRpbmdzL29yZ2FuaXphdGlvbi9iaWxsaW5nLyAiCiAgICAgICAgICAgICJhbmQgdGhlbiByZXJ1biB0aGlzIGNvbW1hbmQuIE5vIHRyYWRlIHdhcyBleGVjdXRlZC4iCiAgICAgICAgKQogICAgaWYgImludmFsaWRfYXBpX2tleSIgaW4gY29kZSBvciAiaW5jb3JyZWN0IGFwaSBrZXkiIGluIG1lc3NhZ2U6CiAgICAgICAgcmV0dXJuICJPUEVOQUlfQVBJX0tFWSB3YXMgcmVqZWN0ZWQuIFJlcGxhY2UgaXQgaW4gLmVudiBhbmQgdHJ5IGFnYWluLiIKICAgIHJldHVybiBmIk9wZW5BSSBBUEkgcmVxdWVzdCBmYWlsZWQ6IHtleGN9IgoKCmRlZiBidWlsZF9wYXJzZXIoKSAtPiBhcmdwYXJzZS5Bcmd1bWVudFBhcnNlcjoKICAgIHBhcnNlciA9IGFyZ3BhcnNlLkFyZ3VtZW50UGFyc2VyKAogICAgICAgIGRlc2NyaXB0aW9uPSJSdW4gTGF1bmNoIEd1YXJkIEFJLWFnZW50IGNvbm5lY3Rpb24gYW5kIHBhcGVyLW9ubHkgdGVzdHMuIgogICAgKQogICAgZ3JvdXAgPSBwYXJzZXIuYWRkX211dHVhbGx5X2V4Y2x1c2l2ZV9ncm91cChyZXF1aXJlZD1UcnVlKQogICAgZ3JvdXAuYWRkX2FyZ3VtZW50KAogICAgICAgICItLXRlc3QtYXBpIiwKICAgICAgICBhY3Rpb249InN0b3JlX3RydWUiLAogICAgICAgIGhlbHA9Im1ha2Ugb25lIHN5bnRoZXRpYyBIT0xEIHJlcXVlc3Q7IG5ldmVyIGFjY2VzcyBhIHdhbGxldCBvciBleGVjdXRlIiwKICAgICkKICAgIGdyb3VwLmFkZF9hcmd1bWVudCgKICAgICAgICAiLS1wYXBlci1kZW1vIiwKICAgICAgICBhY3Rpb249InN0b3JlX3RydWUiLAogICAgICAgIGhlbHA9ImFzayBhbGwgdGhyZWUgYWdlbnRzIGFib3V0IHN5bnRoZXRpYyBkYXRhIGFuZCBhcmJpdHJhdGUgaW4gcGFwZXIgbW9kZSIsCiAgICApCiAgICBncm91cC5hZGRfYXJndW1lbnQoCiAgICAgICAgIi0taW5pdGlhbGl6ZS1jYXBpdGFsIiwKICAgICAgICB0eXBlPWZsb2F0LAogICAgICAgIG1ldGF2YXI9IlVTRF9QRVJfQUdFTlQiLAogICAgICAgIGhlbHA9ImNyZWF0ZSB0aHJlZSBpc29sYXRlZCBzaGFkb3cgYWNjb3VudHMgd2l0aG91dCB3YWxsZXQgYWNjZXNzIiwKICAgICkKICAgIGdyb3VwLmFkZF9hcmd1bWVudCgKICAgICAgICAiLS1jYXBpdGFsLXN0YXR1cyIsCiAgICAgICAgYWN0aW9uPSJzdG9yZV90cnVlIiwKICAgICAgICBoZWxwPSJzaG93IHNoYWRvdyBjYXNoLCByZXNlcnZlZCBjYXBpdGFsLCBhbmQgb3Blbi1wb3NpdGlvbiBjb3VudHMiLAogICAgKQogICAgZ3JvdXAuYWRkX2FyZ3VtZW50KAogICAgICAgICItLXNoYWRvdy1vbmNlIiwKICAgICAgICBhY3Rpb249InN0b3JlX3RydWUiLAogICAgICAgIGhlbHA9Im1ha2Ugb25lIGRlY2lzaW9uIHBlciBhZ2VudCBmcm9tIGN1cnJlbnQgcmVhZC1vbmx5IHNuYXBzaG90cyIsCiAgICApCiAgICBncm91cC5hZGRfYXJndW1lbnQoCiAgICAgICAgIi0tbGl2ZS10ZXN0LXByZWZsaWdodCIsCiAgICAgICAgYWN0aW9uPSJzdG9yZV90cnVlIiwKICAgICAgICBoZWxwPSJzaW11bGF0ZSB0aGUgb25lLXRpbWUgJDEgbWFpbm5ldCBjYW5hcnk7IG5ldmVyIGJyb2FkY2FzdCIsCiAgICApCiAgICBncm91cC5hZGRfYXJndW1lbnQoCiAgICAgICAgIi0tbGl2ZS10ZXN0LWV4ZWN1dGUiLAogICAgICAgIGFjdGlvbj0ic3RvcmVfdHJ1ZSIsCiAgICAgICAgaGVscD0icmVydW4gc2ltdWxhdGlvbiBhbmQgYnJvYWRjYXN0IHRoZSBvbmUtdGltZSAkMSBtYWlubmV0IGNhbmFyeSIsCiAgICApCiAgICBwYXJzZXIuYWRkX2FyZ3VtZW50KAogICAgICAgICItLWNvbmZpcm0iLAogICAgICAgIGhlbHA9InJlcXVpcmVkIGxpdGVyYWwgY29uZmlybWF0aW9uIGZvciAtLWxpdmUtdGVzdC1leGVjdXRlIiwKICAgICkKICAgIHJldHVybiBwYXJzZXIKCgpkZWYgcGFwZXJfZGVtbyhtb2RlbDogT3BlbkFJUHJvcG9zYWxNb2RlbCkgLT4gZGljdFtzdHIsIG9iamVjdF06CiAgICBjb29yZGluYXRvciA9IEFnZW50Q29vcmRpbmF0b3IobW9kZWwpCiAgICBzY2VuYXJpb3MgPSAoCiAgICAgICAgKAogICAgICAgICAgICBBZ2VudFJlY29yZCgiaHVudGVyLXYxIiwgQWdlbnRSb2xlLk9QUE9SVFVOSVRZX0hVTlRFUiksCiAgICAgICAgICAgIHsKICAgICAgICAgICAgICAgICJtb2RlIjogInBhcGVyIiwKICAgICAgICAgICAgICAgICJtYXJrZXQiOiB7CiAgICAgICAgICAgICAgICAgICAgIm1pbnQiOiAiU1lOVEhFVElDX01JTlQiLAogICAgICAgICAgICAgICAgICAgICJsaXF1aWRpdHlfdXNkIjogMjVfMDAwLAogICAgICAgICAgICAgICAgICAgICJwcmljZV9jaGFuZ2VfbTVfcGN0IjogMywKICAgICAgICAgICAgICAgICAgICAiYnV5c19tNSI6IDMwLAogICAgICAgICAgICAgICAgICAgICJzZWxsc19tNSI6IDIwLAogICAgICAgICAgICAgICAgfSwKICAgICAgICAgICAgfSwKICAgICAgICApLAogICAgICAgICgKICAgICAgICAgICAgQWdlbnRSZWNvcmQoInBvcnRmb2xpby12MSIsIEFnZW50Um9sZS5QT1JURk9MSU9fTUFOQUdFUiksCiAgICAgICAgICAgIHsKICAgICAgICAgICAgICAgICJtb2RlIjogInBhcGVyIiwKICAgICAgICAgICAgICAgICJvd25lZF9wb3NpdGlvbiI6IHsKICAgICAgICAgICAgICAgICAgICAibWludCI6ICJTWU5USEVUSUNfTUlOVCIsCiAgICAgICAgICAgICAgICAgICAgInZhbHVlX3VzZCI6IDUsCiAgICAgICAgICAgICAgICAgICAgInVucmVhbGl6ZWRfcG5sX3BjdCI6IDgsCiAgICAgICAgICAgICAgICB9LAogICAgICAgICAgICB9LAogICAgICAgICksCiAgICAgICAgKAogICAgICAgICAgICBBZ2VudFJlY29yZCgiY29weS12MSIsIEFnZW50Um9sZS5DT1BZX1RSQURFUiksCiAgICAgICAgICAgIHsKICAgICAgICAgICAgICAgICJtb2RlIjogInBhcGVyIiwKICAgICAgICAgICAgICAgICJvYnNlcnZlZF9sZWFkZXJfdHJhZGUiOiB7CiAgICAgICAgICAgICAgICAgICAgImxlYWRlcl93YWxsZXQiOiAiU1lOVEhFVElDX1BVQkxJQ19XQUxMRVQiLAogICAgICAgICAgICAgICAgICAgICJtaW50IjogIlNZTlRIRVRJQ19NSU5UIiwKICAgICAgICAgICAgICAgICAgICAicHJpY2VfbW92ZV9zaW5jZV9lbnRyeV9wY3QiOiAxLAogICAgICAgICAgICAgICAgfSwKICAgICAgICAgICAgfSwKICAgICAgICApLAogICAgKQogICAgcmlzayA9IFJpc2tTbmFwc2hvdCgKICAgICAgICBtb2RlPSJwYXBlciIsCiAgICAgICAgZXF1aXR5X3VzZD01MDAsCiAgICAgICAgbGlxdWlkaXR5X3VzZD0yNV8wMDAsCiAgICAgICAgcXVvdGVkX3ByaWNlX2ltcGFjdF9wY3Q9MSwKICAgICkKICAgIHJlc3VsdHM6IGxpc3RbZGljdFtzdHIsIG9iamVjdF1dID0gW10KICAgIGZvciByZWNvcmQsIGNvbnRleHQgaW4gc2NlbmFyaW9zOgogICAgICAgIHByb3Bvc2FsLCBhcmJpdHJhdGlvbiA9IGNvb3JkaW5hdG9yLmFzayhyZWNvcmQsIGNvbnRleHQsIHJpc2spCiAgICAgICAgcmVzdWx0cy5hcHBlbmQoCiAgICAgICAgICAgIHsKICAgICAgICAgICAgICAgICJhZ2VudF9pZCI6IHJlY29yZC5hZ2VudF9pZCwKICAgICAgICAgICAgICAgICJyb2xlIjogcmVjb3JkLnJvbGUudmFsdWUsCiAgICAgICAgICAgICAgICAicHJvcG9zYWwiOiB7CiAgICAgICAgICAgICAgICAgICAgImFjdGlvbiI6IHByb3Bvc2FsLmFjdGlvbi52YWx1ZSwKICAgICAgICAgICAgICAgICAgICAibWludCI6IHByb3Bvc2FsLm1pbnQsCiAgICAgICAgICAgICAgICAgICAgInJlcXVlc3RlZF91c2QiOiBwcm9wb3NhbC5yZXF1ZXN0ZWRfdXNkLAogICAgICAgICAgICAgICAgICAgICJjb25maWRlbmNlIjogcHJvcG9zYWwuY29uZmlkZW5jZSwKICAgICAgICAgICAgICAgICAgICAidGhlc2lzIjogcHJvcG9zYWwudGhlc2lzLAogICAgICAgICAgICAgICAgICAgICJldmlkZW5jZSI6IGxpc3QocHJvcG9zYWwuZXZpZGVuY2UpLAogICAgICAgICAgICAgICAgICAgICJsZWFkZXJfd2FsbGV0IjogcHJvcG9zYWwubGVhZGVyX3dhbGxldCwKICAgICAgICAgICAgICAgIH0sCiAgICAgICAgICAgICAgICAiYXJiaXRyYXRpb24iOiB7CiAgICAgICAgICAgICAgICAgICAgImFwcHJvdmVkIjogYXJiaXRyYXRpb24uYXBwcm92ZWQsCiAgICAgICAgICAgICAgICAgICAgImFwcHJvdmVkX3VzZCI6IGFyYml0cmF0aW9uLmFwcHJvdmVkX3VzZCwKICAgICAgICAgICAgICAgICAgICAicmVhc29ucyI6IGxpc3QoYXJiaXRyYXRpb24ucmVhc29ucyksCiAgICAgICAgICAgICAgICB9LAogICAgICAgICAgICB9CiAgICAgICAgKQogICAgcmV0dXJuIHsibW9kZSI6ICJwYXBlciIsICJsaXZlX2V4ZWN1dGlvbiI6IEZhbHNlLCAiYWdlbnRzIjogcmVzdWx0c30KCgpkZWYgX3JlYWRfanNvbihwYXRoOiBzdHIpIC0+IGRpY3Rbc3RyLCBvYmplY3RdOgogICAgdHJ5OgogICAgICAgIHZhbHVlID0ganNvbi5sb2FkcyhQYXRoKHBhdGgpLnJlYWRfdGV4dChlbmNvZGluZz0idXRmLTgiKSkKICAgIGV4Y2VwdCBGaWxlTm90Rm91bmRFcnJvcjoKICAgICAgICByZXR1cm4ge30KICAgIGV4Y2VwdCAoT1NFcnJvciwgVmFsdWVFcnJvcikgYXMgZXhjOgogICAgICAgIHJhaXNlIFZhbHVlRXJyb3IoZiJjb3VsZCBub3QgcmVhZCBzaGFkb3cgaW5wdXQge3BhdGh9OiB7ZXhjfSIpIGZyb20gZXhjCiAgICByZXR1cm4gdmFsdWUgaWYgaXNpbnN0YW5jZSh2YWx1ZSwgZGljdCkgZWxzZSB7fQoKCmRlZiBfZmlyc3RfZGljdCh2YWx1ZTogb2JqZWN0KSAtPiBkaWN0W3N0ciwgb2JqZWN0XToKICAgIGlmIGlzaW5zdGFuY2UodmFsdWUsIGxpc3QpOgogICAgICAgIHJldHVybiBuZXh0KChpdGVtIGZvciBpdGVtIGluIHZhbHVlIGlmIGlzaW5zdGFuY2UoaXRlbSwgZGljdCkpLCB7fSkKICAgIHJldHVybiB7fQoKCmRlZiBzaGFkb3dfb25jZShtb2RlbDogT3BlbkFJUHJvcG9zYWxNb2RlbCwgYm9vazogQ2FwaXRhbEJvb2spIC0+IGRpY3Rbc3RyLCBvYmplY3RdOgogICAgcmVjb21tZW5kYXRpb25zID0gX3JlYWRfanNvbigKICAgICAgICBvcy5nZXRlbnYoIlJFQ09NTUVOREFUSU9OX1NOQVBTSE9UX1BBVEgiLCAibGF1bmNoX2d1YXJkX3JlY29tbWVuZGF0aW9ucy5qc29uIikKICAgICkKICAgIHBvcnRmb2xpbyA9IF9yZWFkX2pzb24oCiAgICAgICAgb3MuZ2V0ZW52KCJQT1JURk9MSU9fU05BUFNIT1RfUEFUSCIsICJsYXVuY2hfZ3VhcmRfcG9ydGZvbGlvLmpzb24iKQogICAgKQogICAgY29weV9kYXRhID0gX3JlYWRfanNvbigKICAgICAgICBvcy5nZXRlbnYoIkFHRU5UX0NPUFlfU0lHTkFMX1BBVEgiLCAibGF1bmNoX2d1YXJkX2NvcHlfc2lnbmFscy5qc29uIikKICAgICkKICAgIGFjY291bnRzID0ge3Jvdy5hZ2VudF9pZDogcm93IGZvciByb3cgaW4gYm9vay5hY2NvdW50cygpfQogICAgY2FuZGlkYXRlID0gX2ZpcnN0X2RpY3QocmVjb21tZW5kYXRpb25zLmdldCgiY2FuZGlkYXRlcyIpKQogICAgaG9sZGluZyA9IF9maXJzdF9kaWN0KHBvcnRmb2xpby5nZXQoInNpZ25hbHMiKSkKICAgIGxlYWRlciA9IF9maXJzdF9kaWN0KGNvcHlfZGF0YS5nZXQoInNpZ25hbHMiKSkKICAgIGlucHV0cyA9ICgKICAgICAgICAoImh1bnRlci12MSIsIEFnZW50Um9sZS5PUFBPUlRVTklUWV9IVU5URVIsIHsiY2FuZGlkYXRlIjogY2FuZGlkYXRlfSksCiAgICAgICAgKCJwb3J0Zm9saW8tdjEiLCBBZ2VudFJvbGUuUE9SVEZPTElPX01BTkFHRVIsIHsib3duZWRfcG9zaXRpb24iOiBob2xkaW5nfSksCiAgICAgICAgKCJjb3B5LXYxIiwgQWdlbnRSb2xlLkNPUFlfVFJBREVSLCB7Im9ic2VydmVkX2xlYWRlcl90cmFkZSI6IGxlYWRlcn0pLAogICAgKQogICAgY29vcmRpbmF0b3IgPSBBZ2VudENvb3JkaW5hdG9yKAogICAgICAgIG1vZGVsLAogICAgICAgIFJpc2tBcmJpdGVyKAogICAgICAgICAgICBSaXNrUG9saWN5KAogICAgICAgICAgICAgICAgbWF4X29yZGVyX3VzZD01LAogICAgICAgICAgICAgICAgbWF4X3Bvc2l0aW9uX3BjdD0xMDAsCiAgICAgICAgICAgICAgICBtYXhfb3Blbl9wb3NpdGlvbnM9MiwKICAgICAgICAgICAgKQogICAgICAgICksCiAgICApCiAgICByZXN1bHRzOiBsaXN0W2RpY3Rbc3RyLCBvYmplY3RdXSA9IFtdCiAgICBmb3IgYWdlbnRfaWQsIHJvbGUsIGNvbnRleHQgaW4gaW5wdXRzOgogICAgICAgIGFjY291bnQgPSBhY2NvdW50c1thZ2VudF9pZF0KICAgICAgICBzb3VyY2UgPSBuZXh0KGl0ZXIoY29udGV4dC52YWx1ZXMoKSkpCiAgICAgICAgbGlxdWlkaXR5ID0gZmxvYXQoc291cmNlLmdldCgibGlxdWlkaXR5X3VzZCIpIG9yIDApIGlmIHNvdXJjZSBlbHNlIDAKICAgICAgICBnZW5lcmF0ZWQgPSB7CiAgICAgICAgICAgIEFnZW50Um9sZS5PUFBPUlRVTklUWV9IVU5URVI6IHJlY29tbWVuZGF0aW9ucy5nZXQoImdlbmVyYXRlZF9hdCIpLAogICAgICAgICAgICBBZ2VudFJvbGUuUE9SVEZPTElPX01BTkFHRVI6IHBvcnRmb2xpby5nZXQoImdlbmVyYXRlZF9hdCIpLAogICAgICAgICAgICBBZ2VudFJvbGUuQ09QWV9UUkFERVI6IGNvcHlfZGF0YS5nZXQoImdlbmVyYXRlZF9hdCIpLAogICAgICAgIH1bcm9sZV0KICAgICAgICBxdW90ZV9hZ2UgPSBtYXgoMCwgdGltZS50aW1lKCkgLSBmbG9hdChnZW5lcmF0ZWQgb3IgdGltZS50aW1lKCkpKQogICAgICAgIHByb3Bvc2FsLCBhcmJpdHJhdGlvbiA9IGNvb3JkaW5hdG9yLmFzaygKICAgICAgICAgICAgQWdlbnRSZWNvcmQoYWdlbnRfaWQsIHJvbGUpLAogICAgICAgICAgICB7CiAgICAgICAgICAgICAgICAibW9kZSI6ICJzaGFkb3ciLAogICAgICAgICAgICAgICAgImNhcGl0YWwiOiB7CiAgICAgICAgICAgICAgICAgICAgImNhc2hfdXNkIjogYWNjb3VudC5jYXNoX3VzZCwKICAgICAgICAgICAgICAgICAgICAiZXF1aXR5X3VzZCI6IGFjY291bnQuZXF1aXR5X3VzZCwKICAgICAgICAgICAgICAgICAgICAibWF4aW11bV9vcmRlcl91c2QiOiA1LAogICAgICAgICAgICAgICAgICAgICJtYXhpbXVtX29wZW5fcG9zaXRpb25zIjogMiwKICAgICAgICAgICAgICAgIH0sCiAgICAgICAgICAgICAgICAqKmNvbnRleHQsCiAgICAgICAgICAgIH0sCiAgICAgICAgICAgIFJpc2tTbmFwc2hvdCgKICAgICAgICAgICAgICAgIG1vZGU9InNoYWRvdyIsCiAgICAgICAgICAgICAgICBlcXVpdHlfdXNkPWFjY291bnQuZXF1aXR5X3VzZCwKICAgICAgICAgICAgICAgIG9wZW5fcG9zaXRpb25zPWFjY291bnQub3Blbl9wb3NpdGlvbnMsCiAgICAgICAgICAgICAgICBsaXF1aWRpdHlfdXNkPWxpcXVpZGl0eSwKICAgICAgICAgICAgICAgIHF1b3RlX2FnZV9zZWNvbmRzPXF1b3RlX2FnZSwKICAgICAgICAgICAgKSwKICAgICAgICApCiAgICAgICAgc2hhZG93X3Bvc2l0aW9uID0gTm9uZQogICAgICAgIGlmIGFyYml0cmF0aW9uLmFwcHJvdmVkIGFuZCBwcm9wb3NhbC5hY3Rpb24gaXMgVHJhZGVBY3Rpb24uQlVZOgogICAgICAgICAgICBwcmljZSA9IGZsb2F0KHNvdXJjZS5nZXQoInByaWNlIikgb3Igc291cmNlLmdldCgiY3VycmVudF9wcmljZSIpIG9yIDApCiAgICAgICAgICAgIHNoYWRvd19wb3NpdGlvbiA9IGJvb2sucmVzZXJ2ZV9zaGFkb3dfYnV5KAogICAgICAgICAgICAgICAgYWdlbnRfaWQ9YWdlbnRfaWQsCiAgICAgICAgICAgICAgICBtaW50PXByb3Bvc2FsLm1pbnQsCiAgICAgICAgICAgICAgICBzeW1ib2w9c3RyKHNvdXJjZS5nZXQoInN5bWJvbCIpIG9yIHByb3Bvc2FsLm1pbnRbOjhdKSwKICAgICAgICAgICAgICAgIGFtb3VudF91c2Q9YXJiaXRyYXRpb24uYXBwcm92ZWRfdXNkLAogICAgICAgICAgICAgICAgZW50cnlfcHJpY2U9cHJpY2UsCiAgICAgICAgICAgICAgICBwcmljZV9jdXJyZW5jeT1zdHIoc291cmNlLmdldCgicHJpY2VfY3VycmVuY3kiKSBvciAiVU5LTk9XTiIpLAogICAgICAgICAgICApCiAgICAgICAgcmVzdWx0cy5hcHBlbmQoCiAgICAgICAgICAgIHsKICAgICAgICAgICAgICAgICJhZ2VudF9pZCI6IGFnZW50X2lkLAogICAgICAgICAgICAgICAgInJvbGUiOiByb2xlLnZhbHVlLAogICAgICAgICAgICAgICAgImlucHV0X2F2YWlsYWJsZSI6IGJvb2woc291cmNlKSwKICAgICAgICAgICAgICAgICJwcm9wb3NhbCI6IHsKICAgICAgICAgICAgICAgICAgICAiYWN0aW9uIjogcHJvcG9zYWwuYWN0aW9uLnZhbHVlLAogICAgICAgICAgICAgICAgICAgICJtaW50IjogcHJvcG9zYWwubWludCwKICAgICAgICAgICAgICAgICAgICAicmVxdWVzdGVkX3VzZCI6IHByb3Bvc2FsLnJlcXVlc3RlZF91c2QsCiAgICAgICAgICAgICAgICAgICAgImNvbmZpZGVuY2UiOiBwcm9wb3NhbC5jb25maWRlbmNlLAogICAgICAgICAgICAgICAgICAgICJ0aGVzaXMiOiBwcm9wb3NhbC50aGVzaXMsCiAgICAgICAgICAgICAgICAgICAgImV2aWRlbmNlIjogbGlzdChwcm9wb3NhbC5ldmlkZW5jZSksCiAgICAgICAgICAgICAgICAgICAgImxlYWRlcl93YWxsZXQiOiBwcm9wb3NhbC5sZWFkZXJfd2FsbGV0LAogICAgICAgICAgICAgICAgfSwKICAgICAgICAgICAgICAgICJhcmJpdHJhdGlvbiI6IHsKICAgICAgICAgICAgICAgICAgICAiYXBwcm92ZWQiOiBhcmJpdHJhdGlvbi5hcHByb3ZlZCwKICAgICAgICAgICAgICAgICAgICAiYXBwcm92ZWRfdXNkIjogYXJiaXRyYXRpb24uYXBwcm92ZWRfdXNkLAogICAgICAgICAgICAgICAgICAgICJyZWFzb25zIjogbGlzdChhcmJpdHJhdGlvbi5yZWFzb25zKSwKICAgICAgICAgICAgICAgIH0sCiAgICAgICAgICAgICAgICAic2hhZG93X3Bvc2l0aW9uIjogc2hhZG93X3Bvc2l0aW9uLAogICAgICAgICAgICB9CiAgICAgICAgKQogICAgb3V0cHV0ID0gewogICAgICAgICJtb2RlIjogInNoYWRvdyIsCiAgICAgICAgImxpdmVfZXhlY3V0aW9uIjogRmFsc2UsCiAgICAgICAgImdlbmVyYXRlZF9hdCI6IHRpbWUudGltZSgpLAogICAgICAgICJhZ2VudHMiOiByZXN1bHRzLAogICAgICAgICJjYXBpdGFsIjogYm9vay5wdWJsaWNfc3RhdHVzKCksCiAgICB9CiAgICBsb2dfcGF0aCA9IFBhdGgob3MuZ2V0ZW52KCJBR0VOVF9ERUNJU0lPTl9MT0dfUEFUSCIsICJsYXVuY2hfZ3VhcmRfYWdlbnRfZGVjaXNpb25zLmpzb25sIikpCiAgICB3aXRoIGxvZ19wYXRoLm9wZW4oImEiLCBlbmNvZGluZz0idXRmLTgiKSBhcyBoYW5kbGU6CiAgICAgICAgaGFuZGxlLndyaXRlKGpzb24uZHVtcHMob3V0cHV0LCBzb3J0X2tleXM9VHJ1ZSkgKyAiXG4iKQogICAgcmV0dXJuIG91dHB1dAoKCmRlZiBtYWluKCkgLT4gTm9uZToKICAgIGFyZ3MgPSBidWlsZF9wYXJzZXIoKS5wYXJzZV9hcmdzKCkKICAgIGxvYWRfZG90ZW52KCkKICAgIGNhcGl0YWxfcGF0aCA9IG9zLmdldGVudigKICAgICAgICAiQUdFTlRfQ0FQSVRBTF9QQVRIIiwgImxhdW5jaF9ndWFyZF9hZ2VudF9jYXBpdGFsLmpzb24iCiAgICApCiAgICBib29rID0gQ2FwaXRhbEJvb2soY2FwaXRhbF9wYXRoKQogICAgdHJ5OgogICAgICAgIGlmIGFyZ3MuaW5pdGlhbGl6ZV9jYXBpdGFsIGlzIG5vdCBOb25lOgogICAgICAgICAgICBib29rLmluaXRpYWxpemUoYXJncy5pbml0aWFsaXplX2NhcGl0YWwpCiAgICAgICAgICAgIHJlc3VsdCA9IGJvb2sucHVibGljX3N0YXR1cygpCiAgICAgICAgZWxpZiBhcmdzLmNhcGl0YWxfc3RhdHVzOgogICAgICAgICAgICByZXN1bHQgPSBib29rLnB1YmxpY19zdGF0dXMoKQogICAgICAgIGVsaWYgYXJncy5zaGFkb3dfb25jZToKICAgICAgICAgICAgbW9kZWwgPSBPcGVuQUlQcm9wb3NhbE1vZGVsKCkKICAgICAgICAgICAgcmVzdWx0ID0gc2hhZG93X29uY2UobW9kZWwsIGJvb2spCiAgICAgICAgZWxpZiBhcmdzLmxpdmVfdGVzdF9wcmVmbGlnaHQgb3IgYXJncy5saXZlX3Rlc3RfZXhlY3V0ZToKICAgICAgICAgICAgZnJvbSAuYWdlbnRfbGl2ZV90ZXN0IGltcG9ydCBydW5fbGl2ZV9jYW5hcnkKCiAgICAgICAgICAgIHJlc3VsdCA9IGFzeW5jaW8ucnVuKAogICAgICAgICAgICAgICAgcnVuX2xpdmVfY2FuYXJ5KAogICAgICAgICAgICAgICAgICAgIGV4ZWN1dGU9YXJncy5saXZlX3Rlc3RfZXhlY3V0ZSwKICAgICAgICAgICAgICAgICAgICBjb25maXJtYXRpb249YXJncy5jb25maXJtLAogICAgICAgICAgICAgICAgKQogICAgICAgICAgICApCiAgICAgICAgZWxzZToKICAgICAgICAgICAgbW9kZWwgPSBPcGVuQUlQcm9wb3NhbE1vZGVsKCkKICAgICAgICAgICAgcmVzdWx0ID0gY29ubmVjdGlvbl90ZXN0KG1vZGVsKSBpZiBhcmdzLnRlc3RfYXBpIGVsc2UgcGFwZXJfZGVtbyhtb2RlbCkKICAgIGV4Y2VwdCBPcGVuQUlFcnJvciBhcyBleGM6CiAgICAgICAgcmFpc2UgU3lzdGVtRXhpdChmcmllbmRseV9hcGlfZXJyb3IoZXhjKSkgZnJvbSBOb25lCiAgICBleGNlcHQgKFZhbHVlRXJyb3IsIFJ1bnRpbWVFcnJvcikgYXMgZXhjOgogICAgICAgIHJhaXNlIFN5c3RlbUV4aXQoc3RyKGV4YykpIGZyb20gZXhjCiAgICBwcmludChqc29uLmR1bXBzKHJlc3VsdCwgaW5kZW50PTIpKQoKCmlmIF9fbmFtZV9fID09ICJfX21haW5fXyI6CiAgICBtYWluKCkK
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import os
+import time
+from pathlib import Path
+
+from openai import OpenAIError
+
+from .agent_capital import CapitalBook
+from .agents import (
+    AgentCoordinator,
+    AgentRecord,
+    AgentRole,
+    RiskArbiter,
+    RiskPolicy,
+    RiskSnapshot,
+    TradeAction,
+)
+from .openai_agents import OpenAIProposalModel, connection_test
+
+
+def load_dotenv(path: str = ".env") -> None:
+    file_path = Path(path)
+    if not file_path.exists():
+        return
+    for raw_line in file_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        if key.strip():
+            os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+
+
+def friendly_api_error(exc: Exception) -> str:
+    code = str(getattr(exc, "code", "") or "")
+    message = str(exc).casefold()
+    if code in {"credit_balance_exhausted", "insufficient_quota"} or any(
+        phrase in message
+        for phrase in ("no credits remaining", "credit balance", "insufficient_quota")
+    ):
+        return (
+            "OpenAI API credits are exhausted. Add API credits at "
+            "https://platform.openai.com/settings/organization/billing/ "
+            "and then rerun this command. No trade was executed."
+        )
+    if "invalid_api_key" in code or "incorrect api key" in message:
+        return "OPENAI_API_KEY was rejected. Replace it in .env and try again."
+    return f"OpenAI API request failed: {exc}"
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Run Launch Guard AI-agent connection and paper-only tests."
+    )
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument(
+        "--test-api",
+        action="store_true",
+        help="make one synthetic HOLD request; never access a wallet or execute",
+    )
+    group.add_argument(
+        "--paper-demo",
+        action="store_true",
+        help="ask all three agents about synthetic data and arbitrate in paper mode",
+    )
+    group.add_argument(
+        "--initialize-capital",
+        type=float,
+        metavar="USD_PER_AGENT",
+        help="create three isolated shadow accounts without wallet access",
+    )
+    group.add_argument(
+        "--capital-status",
+        action="store_true",
+        help="show shadow cash, reserved capital, and open-position counts",
+    )
+    group.add_argument(
+        "--shadow-once",
+        action="store_true",
+        help="make one decision per agent from current read-only snapshots",
+    )
+    group.add_argument(
+        "--live-test-preflight",
+        action="store_true",
+        help="simulate the one-time $1 mainnet canary; never broadcast",
+    )
+    group.add_argument(
+        "--live-test-execute",
+        action="store_true",
+        help="rerun simulation and broadcast the one-time $1 mainnet canary",
+    )
+    parser.add_argument(
+        "--confirm",
+        help="required literal confirmation for --live-test-execute",
+    )
+    return parser
+
+
+def paper_demo(model: OpenAIProposalModel) -> dict[str, object]:
+    coordinator = AgentCoordinator(model)
+    scenarios = (
+        (
+            AgentRecord("hunter-v1", AgentRole.OPPORTUNITY_HUNTER),
+            {
+                "mode": "paper",
+                "market": {
+                    "mint": "SYNTHETIC_MINT",
+                    "liquidity_usd": 25_000,
+                    "price_change_m5_pct": 3,
+                    "buys_m5": 30,
+                    "sells_m5": 20,
+                },
+            },
+        ),
+        (
+            AgentRecord("portfolio-v1", AgentRole.PORTFOLIO_MANAGER),
+            {
+                "mode": "paper",
+                "owned_position": {
+                    "mint": "SYNTHETIC_MINT",
+                    "value_usd": 5,
+                    "unrealized_pnl_pct": 8,
+                },
+            },
+        ),
+        (
+            AgentRecord("copy-v1", AgentRole.COPY_TRADER),
+            {
+                "mode": "paper",
+                "observed_leader_trade": {
+                    "leader_wallet": "SYNTHETIC_PUBLIC_WALLET",
+                    "mint": "SYNTHETIC_MINT",
+                    "price_move_since_entry_pct": 1,
+                },
+            },
+        ),
+    )
+    risk = RiskSnapshot(
+        mode="paper",
+        equity_usd=500,
+        liquidity_usd=25_000,
+        quoted_price_impact_pct=1,
+    )
+    results: list[dict[str, object]] = []
+    for record, context in scenarios:
+        proposal, arbitration = coordinator.ask(record, context, risk)
+        results.append(
+            {
+                "agent_id": record.agent_id,
+                "role": record.role.value,
+                "proposal": {
+                    "action": proposal.action.value,
+                    "mint": proposal.mint,
+                    "requested_usd": proposal.requested_usd,
+                    "confidence": proposal.confidence,
+                    "thesis": proposal.thesis,
+                    "evidence": list(proposal.evidence),
+                    "leader_wallet": proposal.leader_wallet,
+                },
+                "arbitration": {
+                    "approved": arbitration.approved,
+                    "approved_usd": arbitration.approved_usd,
+                    "reasons": list(arbitration.reasons),
+                },
+            }
+        )
+    return {"mode": "paper", "live_execution": False, "agents": results}
+
+
+def _read_json(path: str) -> dict[str, object]:
+    try:
+        value = json.loads(Path(path).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"could not read shadow input {path}: {exc}") from exc
+    return value if isinstance(value, dict) else {}
+
+
+def _first_dict(value: object) -> dict[str, object]:
+    if isinstance(value, list):
+        return next((item for item in value if isinstance(item, dict)), {})
+    return {}
+
+
+def shadow_once(model: OpenAIProposalModel, book: CapitalBook) -> dict[str, object]:
+    recommendations = _read_json(
+        os.getenv("RECOMMENDATION_SNAPSHOT_PATH", "launch_guard_recommendations.json")
+    )
+    portfolio = _read_json(
+        os.getenv("PORTFOLIO_SNAPSHOT_PATH", "launch_guard_portfolio.json")
+    )
+    copy_data = _read_json(
+        os.getenv("AGENT_COPY_SIGNAL_PATH", "launch_guard_copy_signals.json")
+    )
+    accounts = {row.agent_id: row for row in book.accounts()}
+    candidate = _first_dict(recommendations.get("candidates"))
+    holding = _first_dict(portfolio.get("signals"))
+    leader = _first_dict(copy_data.get("signals"))
+    inputs = (
+        ("hunter-v1", AgentRole.OPPORTUNITY_HUNTER, {"candidate": candidate}),
+        ("portfolio-v1", AgentRole.PORTFOLIO_MANAGER, {"owned_position": holding}),
+        ("copy-v1", AgentRole.COPY_TRADER, {"observed_leader_trade": leader}),
+    )
+    coordinator = AgentCoordinator(
+        model,
+        RiskArbiter(
+            RiskPolicy(
+                max_order_usd=5,
+                max_position_pct=100,
+                max_open_positions=2,
+            )
+        ),
+    )
+    results: list[dict[str, object]] = []
+    for agent_id, role, context in inputs:
+        account = accounts[agent_id]
+        source = next(iter(context.values()))
+        liquidity = float(source.get("liquidity_usd") or 0) if source else 0
+        generated = {
+            AgentRole.OPPORTUNITY_HUNTER: recommendations.get("generated_at"),
+            AgentRole.PORTFOLIO_MANAGER: portfolio.get("generated_at"),
+            AgentRole.COPY_TRADER: copy_data.get("generated_at"),
+        }[role]
+        quote_age = max(0, time.time() - float(generated or time.time()))
+        proposal, arbitration = coordinator.ask(
+            AgentRecord(agent_id, role),
+            {
+                "mode": "shadow",
+                "capital": {
+                    "cash_usd": account.cash_usd,
+                    "equity_usd": account.equity_usd,
+                    "maximum_order_usd": 5,
+                    "maximum_open_positions": 2,
+                },
+                **context,
+            },
+            RiskSnapshot(
+                mode="shadow",
+                equity_usd=account.equity_usd,
+                open_positions=account.open_positions,
+                liquidity_usd=liquidity,
+                quote_age_seconds=quote_age,
+            ),
+        )
+        shadow_position = None
+        if arbitration.approved and proposal.action is TradeAction.BUY:
+            price = float(source.get("price") or source.get("current_price") or 0)
+            shadow_position = book.reserve_shadow_buy(
+                agent_id=agent_id,
+                mint=proposal.mint,
+                symbol=str(source.get("symbol") or proposal.mint[:8]),
+                amount_usd=arbitration.approved_usd,
+                entry_price=price,
+                price_currency=str(source.get("price_currency") or "UNKNOWN"),
+            )
+        results.append(
+            {
+                "agent_id": agent_id,
+                "role": role.value,
+                "input_available": bool(source),
+                "proposal": {
+                    "action": proposal.action.value,
+                    "mint": proposal.mint,
+                    "requested_usd": proposal.requested_usd,
+                    "confidence": proposal.confidence,
+                    "thesis": proposal.thesis,
+                    "evidence": list(proposal.evidence),
+                    "leader_wallet": proposal.leader_wallet,
+                },
+                "arbitration": {
+                    "approved": arbitration.approved,
+                    "approved_usd": arbitration.approved_usd,
+                    "reasons": list(arbitration.reasons),
+                },
+                "shadow_position": shadow_position,
+            }
+        )
+    output = {
+        "mode": "shadow",
+        "live_execution": False,
+        "generated_at": time.time(),
+        "agents": results,
+        "capital": book.public_status(),
+    }
+    log_path = Path(os.getenv("AGENT_DECISION_LOG_PATH", "launch_guard_agent_decisions.jsonl"))
+    with log_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(output, sort_keys=True) + "\n")
+    return output
+
+
+def main() -> None:
+    args = build_parser().parse_args()
+    load_dotenv()
+    capital_path = os.getenv(
+        "AGENT_CAPITAL_PATH", "launch_guard_agent_capital.json"
+    )
+    book = CapitalBook(capital_path)
+    try:
+        if args.initialize_capital is not None:
+            book.initialize(args.initialize_capital)
+            result = book.public_status()
+        elif args.capital_status:
+            result = book.public_status()
+        elif args.shadow_once:
+            model = OpenAIProposalModel()
+            result = shadow_once(model, book)
+        elif args.live_test_preflight or args.live_test_execute:
+            from .agent_live_test import run_live_canary
+
+            result = asyncio.run(
+                run_live_canary(
+                    execute=args.live_test_execute,
+                    confirmation=args.confirm,
+                )
+            )
+        else:
+            model = OpenAIProposalModel()
+            result = connection_test(model) if args.test_api else paper_demo(model)
+    except OpenAIError as exc:
+        raise SystemExit(friendly_api_error(exc)) from None
+    except (ValueError, RuntimeError) as exc:
+        raise SystemExit(str(exc)) from exc
+    print(json.dumps(result, indent=2))
+
+
+if __name__ == "__main__":
+    main()

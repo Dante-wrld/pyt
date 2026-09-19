@@ -1,1 +1,70 @@
-ZnJvbSBfX2Z1dHVyZV9fIGltcG9ydCBhbm5vdGF0aW9ucwoKaW1wb3J0IHRpbWUKCmltcG9ydCBweXRlc3QKCmZyb20gc29sYW5hX2xhdW5jaF9ndWFyZC5hZ2VudF9saXZlX3Rlc3QgaW1wb3J0ICgKICAgIENhbmFyeUpvdXJuYWwsCiAgICBDYW5hcnlQb2xpY3ksCiAgICBMSVZFX0NPTkZJUk1BVElPTiwKICAgIHNlbGVjdF9saXZlX2NhbmRpZGF0ZSwKICAgIHZhbGlkYXRlX2xpdmVfZW52aXJvbm1lbnQsCikKCgpkZWYgY2FuZGlkYXRlX3NuYXBzaG90KCoqb3ZlcnJpZGVzKToKICAgIGNhbmRpZGF0ZSA9IHsKICAgICAgICAiY2hhaW4iOiAic29sYW5hIiwKICAgICAgICAibWludCI6ICJBIiAqIDMyLAogICAgICAgICJkZWNpc2lvbiI6ICJCVVkgTk9XIiwKICAgICAgICAibGlxdWlkaXR5X3VzZCI6IDc1XzAwMCwKICAgICAgICAiZW50cnlfY29uZmlybWF0aW9uX2NvdW50IjogMywKICAgICAgICAiZW50cnlfY29uZmlybWF0aW9uX3JlcXVpcmVkIjogMywKICAgIH0KICAgIGNhbmRpZGF0ZS51cGRhdGUob3ZlcnJpZGVzKQogICAgcmV0dXJuIHsiZ2VuZXJhdGVkX2F0IjogdGltZS50aW1lKCksICJjYW5kaWRhdGVzIjogW2NhbmRpZGF0ZV19CgoKZGVmIHRlc3Rfc2VsZWN0c19vbmx5X2NvbmZpcm1lZF9saXF1aWRfZnJlc2hfY2FuZGlkYXRlKCk6CiAgICBzZWxlY3RlZCA9IHNlbGVjdF9saXZlX2NhbmRpZGF0ZShjYW5kaWRhdGVfc25hcHNob3QoKSwgQ2FuYXJ5UG9saWN5KCkpCiAgICBhc3NlcnQgc2VsZWN0ZWRbIm1pbnQiXSA9PSAiQSIgKiAzMgogICAgd2l0aCBweXRlc3QucmFpc2VzKFZhbHVlRXJyb3IsIG1hdGNoPSJubyBmcmVzaCIpOgogICAgICAgIHNlbGVjdF9saXZlX2NhbmRpZGF0ZShjYW5kaWRhdGVfc25hcHNob3QobGlxdWlkaXR5X3VzZD00OV85OTkpLCBDYW5hcnlQb2xpY3koKSkKICAgIHdpdGggcHl0ZXN0LnJhaXNlcyhWYWx1ZUVycm9yLCBtYXRjaD0ibm8gZnJlc2giKToKICAgICAgICBzZWxlY3RfbGl2ZV9jYW5kaWRhdGUoCiAgICAgICAgICAgIGNhbmRpZGF0ZV9zbmFwc2hvdChlbnRyeV9jb25maXJtYXRpb25fY291bnQ9MiksIENhbmFyeVBvbGljeSgpCiAgICAgICAgKQoKCmRlZiB0ZXN0X3N0YWxlX3NuYXBzaG90X2lzX3JlamVjdGVkKCk6CiAgICBzbmFwc2hvdCA9IGNhbmRpZGF0ZV9zbmFwc2hvdCgpCiAgICBzbmFwc2hvdFsiZ2VuZXJhdGVkX2F0Il0gPSB0aW1lLnRpbWUoKSAtIDE2CiAgICB3aXRoIHB5dGVzdC5yYWlzZXMoVmFsdWVFcnJvciwgbWF0Y2g9InN0YWxlIik6CiAgICAgICAgc2VsZWN0X2xpdmVfY2FuZGlkYXRlKHNuYXBzaG90LCBDYW5hcnlQb2xpY3koKSkKCgpkZWYgdGVzdF9saXZlX2Vudmlyb25tZW50X2lzX2RlZmF1bHRfb2ZmKG1vbmtleXBhdGNoKToKICAgIG1vbmtleXBhdGNoLmRlbGVudigiQUdFTlRfTElWRV9URVNUX0VOQUJMRUQiLCByYWlzaW5nPUZhbHNlKQogICAgd2l0aCBweXRlc3QucmFpc2VzKFZhbHVlRXJyb3IsIG1hdGNoPSJFTkFCTEVEIGlzIGZhbHNlIik6CiAgICAgICAgdmFsaWRhdGVfbGl2ZV9lbnZpcm9ubWVudChleGVjdXRlPUZhbHNlLCBjb25maXJtYXRpb249Tm9uZSkKCgpkZWYgdGVzdF9leGVjdXRpb25fbmVlZHNfa2lsbF9zd2l0Y2hfb2ZmX2V4aXRfYW5kX2xpdGVyYWwobW9ua2V5cGF0Y2gpOgogICAgbW9ua2V5cGF0Y2guc2V0ZW52KCJBR0VOVF9MSVZFX1RFU1RfRU5BQkxFRCIsICJ0cnVlIikKICAgIG1vbmtleXBhdGNoLnNldGVudigiQUdFTlRfTElWRV9LSUxMX1NXSVRDSCIsICJmYWxzZSIpCiAgICBtb25rZXlwYXRjaC5zZXRlbnYoIlNPTEFOQV9XQUxMRVRfQUREUkVTUyIsICJBIiAqIDMyKQogICAgbW9ua2V5cGF0Y2guc2V0ZW52KCJKVVBJVEVSX0FQSV9LRVkiLCAidGVzdCIpCiAgICBtb25rZXlwYXRjaC5zZXRlbnYoIkFVVE9fU0VMTF9FTkFCTEVEIiwgInRydWUiKQogICAgbW9ua2V5cGF0Y2guc2V0ZW52KCJBVVRPX1NFTExfTElWRSIsICJ0cnVlIikKICAgIHdpdGggcHl0ZXN0LnJhaXNlcyhWYWx1ZUVycm9yLCBtYXRjaD0icmVxdWlyZXMgLS1jb25maXJtIik6CiAgICAgICAgdmFsaWRhdGVfbGl2ZV9lbnZpcm9ubWVudChleGVjdXRlPVRydWUsIGNvbmZpcm1hdGlvbj0id3JvbmciKQogICAgdmFsaWRhdGVfbGl2ZV9lbnZpcm9ubWVudChleGVjdXRlPVRydWUsIGNvbmZpcm1hdGlvbj1MSVZFX0NPTkZJUk1BVElPTikKCgpkZWYgdGVzdF9jYW5hcnlfam91cm5hbF9pc19vbmVfYXR0ZW1wdF9vbmx5KHRtcF9wYXRoKToKICAgIGpvdXJuYWwgPSBDYW5hcnlKb3VybmFsKHRtcF9wYXRoIC8gImNhbmFyeS5qc29uIikKICAgIGpvdXJuYWwuYXNzZXJ0X3VudXNlZCgpCiAgICBqb3VybmFsLnJlY29yZCh7InN0YXR1cyI6ICJQRU5ESU5HIn0pCiAgICB3aXRoIHB5dGVzdC5yYWlzZXMoVmFsdWVFcnJvciwgbWF0Y2g9ImFscmVhZHkgYmVlbiBhdHRlbXB0ZWQiKToKICAgICAgICBqb3VybmFsLmFzc2VydF91bnVzZWQoKQo=
+from __future__ import annotations
+
+import time
+
+import pytest
+
+from solana_launch_guard.agent_live_test import (
+    CanaryJournal,
+    CanaryPolicy,
+    LIVE_CONFIRMATION,
+    select_live_candidate,
+    validate_live_environment,
+)
+
+
+def candidate_snapshot(**overrides):
+    candidate = {
+        "chain": "solana",
+        "mint": "A" * 32,
+        "decision": "BUY NOW",
+        "liquidity_usd": 75_000,
+        "entry_confirmation_count": 3,
+        "entry_confirmation_required": 3,
+    }
+    candidate.update(overrides)
+    return {"generated_at": time.time(), "candidates": [candidate]}
+
+
+def test_selects_only_confirmed_liquid_fresh_candidate():
+    selected = select_live_candidate(candidate_snapshot(), CanaryPolicy())
+    assert selected["mint"] == "A" * 32
+    with pytest.raises(ValueError, match="no fresh"):
+        select_live_candidate(candidate_snapshot(liquidity_usd=49_999), CanaryPolicy())
+    with pytest.raises(ValueError, match="no fresh"):
+        select_live_candidate(
+            candidate_snapshot(entry_confirmation_count=2), CanaryPolicy()
+        )
+
+
+def test_stale_snapshot_is_rejected():
+    snapshot = candidate_snapshot()
+    snapshot["generated_at"] = time.time() - 16
+    with pytest.raises(ValueError, match="stale"):
+        select_live_candidate(snapshot, CanaryPolicy())
+
+
+def test_live_environment_is_default_off(monkeypatch):
+    monkeypatch.delenv("AGENT_LIVE_TEST_ENABLED", raising=False)
+    with pytest.raises(ValueError, match="ENABLED is false"):
+        validate_live_environment(execute=False, confirmation=None)
+
+
+def test_execution_needs_kill_switch_off_exit_and_literal(monkeypatch):
+    monkeypatch.setenv("AGENT_LIVE_TEST_ENABLED", "true")
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    monkeypatch.setenv("SOLANA_WALLET_ADDRESS", "A" * 32)
+    monkeypatch.setenv("JUPITER_API_KEY", "test")
+    monkeypatch.setenv("AUTO_SELL_ENABLED", "true")
+    monkeypatch.setenv("AUTO_SELL_LIVE", "true")
+    with pytest.raises(ValueError, match="requires --confirm"):
+        validate_live_environment(execute=True, confirmation="wrong")
+    validate_live_environment(execute=True, confirmation=LIVE_CONFIRMATION)
+
+
+def test_canary_journal_is_one_attempt_only(tmp_path):
+    journal = CanaryJournal(tmp_path / "canary.json")
+    journal.assert_unused()
+    journal.record({"status": "PENDING"})
+    with pytest.raises(ValueError, match="already been attempted"):
+        journal.assert_unused()

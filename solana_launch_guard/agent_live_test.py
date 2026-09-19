@@ -1,1 +1,215 @@
-ZnJvbSBfX2Z1dHVyZV9fIGltcG9ydCBhbm5vdGF0aW9ucwoKaW1wb3J0IGpzb24KaW1wb3J0IG1hdGgKaW1wb3J0IG9zCmltcG9ydCB0aW1lCmZyb20gZGF0YWNsYXNzZXMgaW1wb3J0IGRhdGFjbGFzcwpmcm9tIHBhdGhsaWIgaW1wb3J0IFBhdGgKZnJvbSB0eXBpbmcgaW1wb3J0IEFueQoKCkxJVkVfQ09ORklSTUFUSU9OID0gIlNQRU5EXzFfVVNEQ19PTl9NQUlOTkVUIgpVU0RDX0RFQ0lNQUxTID0gNgoKCmRlZiBfZW5hYmxlZChuYW1lOiBzdHIsIGRlZmF1bHQ6IGJvb2wgPSBGYWxzZSkgLT4gYm9vbDoKICAgIHJhdyA9IG9zLmdldGVudihuYW1lKQogICAgaWYgcmF3IGlzIE5vbmU6CiAgICAgICAgcmV0dXJuIGRlZmF1bHQKICAgIHJldHVybiByYXcuc3RyaXAoKS5jYXNlZm9sZCgpIGluIHsiMSIsICJ0cnVlIiwgInllcyIsICJvbiJ9CgoKQGRhdGFjbGFzcyhmcm96ZW49VHJ1ZSwgc2xvdHM9VHJ1ZSkKY2xhc3MgQ2FuYXJ5UG9saWN5OgogICAgYW1vdW50X3VzZDogZmxvYXQgPSAxLjAKICAgIG1pbmltdW1fbGlxdWlkaXR5X3VzZDogZmxvYXQgPSA1MF8wMDAuMAogICAgbWF4aW11bV9zaWduYWxfYWdlX3NlY29uZHM6IGZsb2F0ID0gMTUuMAogICAgbWF4aW11bV9wcmljZV9pbXBhY3RfcGN0OiBmbG9hdCA9IDMuMAogICAgbWF4aW11bV9zbGlwcGFnZV9icHM6IGludCA9IDMwMAoKICAgIEBjbGFzc21ldGhvZAogICAgZGVmIGZyb21fZW52KGNscykgLT4gIkNhbmFyeVBvbGljeSI6CiAgICAgICAgYW1vdW50ID0gZmxvYXQob3MuZ2V0ZW52KCJBR0VOVF9MSVZFX1RFU1RfQU1PVU5UX1VTRCIsICIxIikpCiAgICAgICAgaWYgbm90IG1hdGguaXNjbG9zZShhbW91bnQsIDEuMCk6CiAgICAgICAgICAgIHJhaXNlIFZhbHVlRXJyb3IoInRoZSBmaXJzdCBsaXZlIGNhbmFyeSBpcyBoYXJkLWxpbWl0ZWQgdG8gZXhhY3RseSAkMSIpCiAgICAgICAgcmV0dXJuIGNscyhhbW91bnRfdXNkPWFtb3VudCkKCgpkZWYgc2VsZWN0X2xpdmVfY2FuZGlkYXRlKHNuYXBzaG90OiBkaWN0W3N0ciwgQW55XSwgcG9saWN5OiBDYW5hcnlQb2xpY3kpIC0+IGRpY3Rbc3RyLCBBbnldOgogICAgZ2VuZXJhdGVkX2F0ID0gZmxvYXQoc25hcHNob3QuZ2V0KCJnZW5lcmF0ZWRfYXQiKSBvciAwKQogICAgYWdlID0gdGltZS50aW1lKCkgLSBnZW5lcmF0ZWRfYXQKICAgIGlmIGdlbmVyYXRlZF9hdCA8PSAwIG9yIGFnZSA8IDAgb3IgYWdlID4gcG9saWN5Lm1heGltdW1fc2lnbmFsX2FnZV9zZWNvbmRzOgogICAgICAgIHJhaXNlIFZhbHVlRXJyb3IoInJlY29tbWVuZGF0aW9uIHNuYXBzaG90IGlzIG1pc3Npbmcgb3Igc3RhbGUiKQogICAgY2FuZGlkYXRlcyA9IHNuYXBzaG90LmdldCgiY2FuZGlkYXRlcyIpCiAgICBpZiBub3QgaXNpbnN0YW5jZShjYW5kaWRhdGVzLCBsaXN0KToKICAgICAgICByYWlzZSBWYWx1ZUVycm9yKCJyZWNvbW1lbmRhdGlvbiBzbmFwc2hvdCBoYXMgbm8gY2FuZGlkYXRlcyIpCiAgICBmb3IgcmF3IGluIGNhbmRpZGF0ZXM6CiAgICAgICAgaWYgbm90IGlzaW5zdGFuY2UocmF3LCBkaWN0KToKICAgICAgICAgICAgY29udGludWUKICAgICAgICBpZiByYXcuZ2V0KCJjaGFpbiIpIG5vdCBpbiB7Tm9uZSwgInNvbGFuYSJ9OgogICAgICAgICAgICBjb250aW51ZQogICAgICAgIGlmIHJhdy5nZXQoImRlY2lzaW9uIikgbm90IGluIHsiQlVZIE5PVyIsICJCVVkgWk9ORSJ9OgogICAgICAgICAgICBjb250aW51ZQogICAgICAgIGlmIGZsb2F0KHJhdy5nZXQoImxpcXVpZGl0eV91c2QiKSBvciAwKSA8IHBvbGljeS5taW5pbXVtX2xpcXVpZGl0eV91c2Q6CiAgICAgICAgICAgIGNvbnRpbnVlCiAgICAgICAgaWYgaW50KHJhdy5nZXQoImVudHJ5X2NvbmZpcm1hdGlvbl9jb3VudCIpIG9yIDApIDwgaW50KAogICAgICAgICAgICByYXcuZ2V0KCJlbnRyeV9jb25maXJtYXRpb25fcmVxdWlyZWQiKSBvciAzCiAgICAgICAgKToKICAgICAgICAgICAgY29udGludWUKICAgICAgICBtaW50ID0gc3RyKHJhdy5nZXQoIm1pbnQiKSBvciAiIikKICAgICAgICBpZiAzMiA8PSBsZW4obWludCkgPD0gNDQ6CiAgICAgICAgICAgIHJldHVybiByYXcKICAgIHJhaXNlIFZhbHVlRXJyb3IoIm5vIGZyZXNoLCBjb25maXJtZWQsIHN1ZmZpY2llbnRseSBsaXF1aWQgU29sYW5hIGJ1eSBjYW5kaWRhdGUiKQoKCmNsYXNzIENhbmFyeUpvdXJuYWw6CiAgICBkZWYgX19pbml0X18oc2VsZiwgcGF0aDogc3RyIHwgUGF0aCkgLT4gTm9uZToKICAgICAgICBzZWxmLnBhdGggPSBQYXRoKHBhdGgpCgogICAgZGVmIGxvYWQoc2VsZikgLT4gZGljdFtzdHIsIEFueV06CiAgICAgICAgdHJ5OgogICAgICAgICAgICB2YWx1ZSA9IGpzb24ubG9hZHMoc2VsZi5wYXRoLnJlYWRfdGV4dChlbmNvZGluZz0idXRmLTgiKSkKICAgICAgICBleGNlcHQgRmlsZU5vdEZvdW5kRXJyb3I6CiAgICAgICAgICAgIHJldHVybiB7InZlcnNpb24iOiAxLCAiYXR0ZW1wdHMiOiBbXX0KICAgICAgICBpZiBub3QgaXNpbnN0YW5jZSh2YWx1ZSwgZGljdCkgb3Igbm90IGlzaW5zdGFuY2UodmFsdWUuZ2V0KCJhdHRlbXB0cyIpLCBsaXN0KToKICAgICAgICAgICAgcmFpc2UgVmFsdWVFcnJvcigibGl2ZSBjYW5hcnkgam91cm5hbCBpcyBpbnZhbGlkIikKICAgICAgICByZXR1cm4gdmFsdWUKCiAgICBkZWYgYXNzZXJ0X3VudXNlZChzZWxmKSAtPiBOb25lOgogICAgICAgIGF0dGVtcHRzID0gc2VsZi5sb2FkKClbImF0dGVtcHRzIl0KICAgICAgICBpZiBhdHRlbXB0czoKICAgICAgICAgICAgcmFpc2UgVmFsdWVFcnJvcigKICAgICAgICAgICAgICAgICJ0aGUgb25lLXRpbWUgbGl2ZSBjYW5hcnkgaGFzIGFscmVhZHkgYmVlbiBhdHRlbXB0ZWQ7IGluc3BlY3QgaXRzIGpvdXJuYWwiCiAgICAgICAgICAgICkKCiAgICBkZWYgcmVjb3JkKHNlbGYsIGVudHJ5OiBkaWN0W3N0ciwgQW55XSkgLT4gTm9uZToKICAgICAgICBwYXlsb2FkID0gc2VsZi5sb2FkKCkKICAgICAgICBwYXlsb2FkWyJhdHRlbXB0cyJdLmFwcGVuZChlbnRyeSkKICAgICAgICB0ZW1wb3JhcnkgPSBzZWxmLnBhdGgud2l0aF9zdWZmaXgoc2VsZi5wYXRoLnN1ZmZpeCArICIudG1wIikKICAgICAgICB0ZW1wb3Jhcnkud3JpdGVfdGV4dChqc29uLmR1bXBzKHBheWxvYWQsIGluZGVudD0yKSwgZW5jb2Rpbmc9InV0Zi04IikKICAgICAgICBvcy5yZXBsYWNlKHRlbXBvcmFyeSwgc2VsZi5wYXRoKQoKCmRlZiB2YWxpZGF0ZV9saXZlX2Vudmlyb25tZW50KCosIGV4ZWN1dGU6IGJvb2wsIGNvbmZpcm1hdGlvbjogc3RyIHwgTm9uZSkgLT4gQ2FuYXJ5UG9saWN5OgogICAgcG9saWN5ID0gQ2FuYXJ5UG9saWN5LmZyb21fZW52KCkKICAgIGlmIG5vdCBfZW5hYmxlZCgiQUdFTlRfTElWRV9URVNUX0VOQUJMRUQiKToKICAgICAgICByYWlzZSBWYWx1ZUVycm9yKCJBR0VOVF9MSVZFX1RFU1RfRU5BQkxFRCBpcyBmYWxzZSIpCiAgICBpZiBfZW5hYmxlZCgiQUdFTlRfTElWRV9LSUxMX1NXSVRDSCIsIFRydWUpOgogICAgICAgIHJhaXNlIFZhbHVlRXJyb3IoIkFHRU5UX0xJVkVfS0lMTF9TV0lUQ0ggaXMgYWN0aXZlIikKICAgIHJlcXVpcmVkID0gKCJTT0xBTkFfV0FMTEVUX0FERFJFU1MiLCAiSlVQSVRFUl9BUElfS0VZIikKICAgIG1pc3NpbmcgPSBbbmFtZSBmb3IgbmFtZSBpbiByZXF1aXJlZCBpZiBub3Qgb3MuZ2V0ZW52KG5hbWUpXQogICAgaWYgbWlzc2luZzoKICAgICAgICByYWlzZSBWYWx1ZUVycm9yKCJtaXNzaW5nIGxpdmUgc2V0dGluZyhzKTogIiArICIsICIuam9pbihtaXNzaW5nKSkKICAgIGlmIG5vdCAoX2VuYWJsZWQoIkFVVE9fU0VMTF9FTkFCTEVEIikgYW5kIF9lbmFibGVkKCJBVVRPX1NFTExfTElWRSIpKToKICAgICAgICByYWlzZSBWYWx1ZUVycm9yKCJsaXZlIGNhbmFyeSByZXF1aXJlcyBsaXZlIGV4aXQgcHJvdGVjdGlvbiIpCiAgICBpZiBleGVjdXRlIGFuZCBjb25maXJtYXRpb24gIT0gTElWRV9DT05GSVJNQVRJT046CiAgICAgICAgcmFpc2UgVmFsdWVFcnJvcihmImxpdmUgZXhlY3V0aW9uIHJlcXVpcmVzIC0tY29uZmlybSB7TElWRV9DT05GSVJNQVRJT059IikKICAgIHJldHVybiBwb2xpY3kKCgphc3luYyBkZWYgcnVuX2xpdmVfY2FuYXJ5KAogICAgKiwgZXhlY3V0ZTogYm9vbCwgY29uZmlybWF0aW9uOiBzdHIgfCBOb25lID0gTm9uZQopIC0+IGRpY3Rbc3RyLCBBbnldOgogICAgcG9saWN5ID0gdmFsaWRhdGVfbGl2ZV9lbnZpcm9ubWVudChleGVjdXRlPWV4ZWN1dGUsIGNvbmZpcm1hdGlvbj1jb25maXJtYXRpb24pCiAgICBzbmFwc2hvdF9wYXRoID0gUGF0aCgKICAgICAgICBvcy5nZXRlbnYoIlJFQ09NTUVOREFUSU9OX1NOQVBTSE9UX1BBVEgiLCAibGF1bmNoX2d1YXJkX3JlY29tbWVuZGF0aW9ucy5qc29uIikKICAgICkKICAgIHRyeToKICAgICAgICBzbmFwc2hvdCA9IGpzb24ubG9hZHMoc25hcHNob3RfcGF0aC5yZWFkX3RleHQoZW5jb2Rpbmc9InV0Zi04IikpCiAgICBleGNlcHQgKE9TRXJyb3IsIFZhbHVlRXJyb3IpIGFzIGV4YzoKICAgICAgICByYWlzZSBWYWx1ZUVycm9yKGYiY291bGQgbm90IHJlYWQgcmVjb21tZW5kYXRpb24gc25hcHNob3Q6IHtleGN9IikgZnJvbSBleGMKICAgIGNhbmRpZGF0ZSA9IHNlbGVjdF9saXZlX2NhbmRpZGF0ZShzbmFwc2hvdCwgcG9saWN5KQogICAgbWludCA9IHN0cihjYW5kaWRhdGVbIm1pbnQiXSkKICAgIHN5bWJvbCA9IHN0cihjYW5kaWRhdGUuZ2V0KCJzeW1ib2wiKSBvciBtaW50Wzo4XSkKICAgIGpvdXJuYWwgPSBDYW5hcnlKb3VybmFsKAogICAgICAgIG9zLmdldGVudigiQUdFTlRfTElWRV9DQU5BUllfUEFUSCIsICJsYXVuY2hfZ3VhcmRfbGl2ZV9jYW5hcnkuanNvbiIpCiAgICApCiAgICBqb3VybmFsLmFzc2VydF91bnVzZWQoKQoKICAgICMgTGF6eSBpbXBvcnRzIGtlZXAgc2hhZG93LW9ubHkgY29tbWFuZHMgaW5kZXBlbmRlbnQgZnJvbSBsaXZlIGRlcGVuZGVuY2llcy4KICAgIGZyb20gLmV4ZWN1dGlvbiBpbXBvcnQgKAogICAgICAgIEJ1eUludGVudCwKICAgICAgICBKdXBpdGVyRXhlY3V0aW9uRXJyb3IsCiAgICAgICAgSnVwaXRlclN3YXBDbGllbnQsCiAgICAgICAgS2V5cmluZ1NvbGFuYVNpZ25lciwKICAgICAgICBTb2xhbmFBdXRvQnV5ZXIsCiAgICAgICAgVVNEQ19NSU5ULAogICAgKQogICAgZnJvbSAud2FsbGV0IGltcG9ydCBTb2xhbmFScGMKCiAgICB3YWxsZXQgPSBzdHIob3MuZW52aXJvblsiU09MQU5BX1dBTExFVF9BRERSRVNTIl0pCiAgICBzaWduZXIgPSBLZXlyaW5nU29sYW5hU2lnbmVyKGV4cGVjdGVkX3B1YmxpY19rZXk9d2FsbGV0KQogICAgcnBjID0gU29sYW5hUnBjKG9zLmdldGVudigiU09MQU5BX1JQQ19IVFRQX1VSTCIsICJodHRwczovL2FwaS5tYWlubmV0LWJldGEuc29sYW5hLmNvbSIpKQogICAgYW1vdW50X3JhdyA9IGludChwb2xpY3kuYW1vdW50X3VzZCAqICgxMCoqVVNEQ19ERUNJTUFMUykpCiAgICB1c2RjID0gYXdhaXQgcnBjLnRva2VuX2JhbGFuY2Uod2FsbGV0LCBVU0RDX01JTlQpCiAgICBpZiB1c2RjLnJhd19hbW91bnQgPCBhbW91bnRfcmF3OgogICAgICAgIHJhaXNlIFZhbHVlRXJyb3IoIndhbGxldCBVU0RDIGJhbGFuY2UgaXMgYmVsb3cgJDEiKQogICAgZXhpc3RpbmcgPSBhd2FpdCBycGMudG9rZW5fYmFsYW5jZSh3YWxsZXQsIG1pbnQpCiAgICBpZiBleGlzdGluZy5yYXdfYW1vdW50ID4gMDoKICAgICAgICByYWlzZSBWYWx1ZUVycm9yKCJ3YWxsZXQgYWxyZWFkeSBob2xkcyB0aGUgY2FuZGlkYXRlOyBjb3N0LWJhc2lzIG1peGluZyBibG9ja2VkIikKCiAgICBidXllciA9IFNvbGFuYUF1dG9CdXllcigKICAgICAgICBjbGllbnQ9SnVwaXRlclN3YXBDbGllbnQoYXBpX2tleT1zdHIob3MuZW52aXJvblsiSlVQSVRFUl9BUElfS0VZIl0pKSwKICAgICAgICBzaWduZXI9c2lnbmVyLAogICAgICAgIG1heF9wcmljZV9pbXBhY3RfcGN0PXBvbGljeS5tYXhpbXVtX3ByaWNlX2ltcGFjdF9wY3QsCiAgICAgICAgbWF4X3NsaXBwYWdlX2Jwcz1wb2xpY3kubWF4aW11bV9zbGlwcGFnZV9icHMsCiAgICApCiAgICBpbnRlbnQgPSBCdXlJbnRlbnQoCiAgICAgICAgbWludD1taW50LAogICAgICAgIHN5bWJvbD1zeW1ib2wsCiAgICAgICAgZXZlbnRfa2V5PWYiYWdlbnQtbGl2ZS1jYW5hcnk6e21pbnR9IiwKICAgICAgICBhbW91bnRfdXNkY19yYXc9YW1vdW50X3JhdywKICAgICAgICBmdW5kaW5nX3NvdXJjZT0ib25lLXRpbWUtbGl2ZS1jYW5hcnkiLAogICAgKQogICAgcHJlZmxpZ2h0ID0gYXdhaXQgYnV5ZXIucHJlZmxpZ2h0KGludGVudCwgcnBjKQogICAgcmVzdWx0OiBkaWN0W3N0ciwgQW55XSA9IHsKICAgICAgICAibW9kZSI6ICJsaXZlLWNhbmFyeS1wcmVmbGlnaHQiLAogICAgICAgICJicm9hZGNhc3QiOiBGYWxzZSwKICAgICAgICAid2FsbGV0Ijogc2lnbmVyLnB1YmxpY19rZXksCiAgICAgICAgIm1pbnQiOiBtaW50LAogICAgICAgICJzeW1ib2wiOiBzeW1ib2wsCiAgICAgICAgImlucHV0X3VzZGMiOiBwb2xpY3kuYW1vdW50X3VzZCwKICAgICAgICAibGlxdWlkaXR5X3VzZCI6IGZsb2F0KGNhbmRpZGF0ZS5nZXQoImxpcXVpZGl0eV91c2QiKSBvciAwKSwKICAgICAgICAicHJpY2VfaW1wYWN0X3BjdCI6IHByZWZsaWdodC5wcmVwYXJlZC5wcmljZV9pbXBhY3RfcGN0LAogICAgICAgICJzbGlwcGFnZV9icHMiOiBwcmVmbGlnaHQucHJlcGFyZWQuc2xpcHBhZ2VfYnBzLAogICAgICAgICJzaW11bGF0aW9uX3VuaXRzX2NvbnN1bWVkIjogcHJlZmxpZ2h0LnVuaXRzX2NvbnN1bWVkLAogICAgfQogICAgaWYgbm90IGV4ZWN1dGU6CiAgICAgICAgcmV0dXJuIHJlc3VsdAoKICAgIGF0dGVtcHQgPSB7KipyZXN1bHQsICJhdHRlbXB0ZWRfYXQiOiB0aW1lLnRpbWUoKSwgInN0YXR1cyI6ICJQRU5ESU5HIn0KICAgIGpvdXJuYWwucmVjb3JkKGF0dGVtcHQpCiAgICB0cnk6CiAgICAgICAgcmVjZWlwdCA9IGF3YWl0IGJ1eWVyLmV4ZWN1dGUocHJlZmxpZ2h0LnByZXBhcmVkKQogICAgZXhjZXB0IEp1cGl0ZXJFeGVjdXRpb25FcnJvciBhcyBleGM6CiAgICAgICAgam91cm5hbC5yZWNvcmQoCiAgICAgICAgICAgIHsKICAgICAgICAgICAgICAgICJhdHRlbXB0ZWRfYXQiOiB0aW1lLnRpbWUoKSwKICAgICAgICAgICAgICAgICJzdGF0dXMiOiAiUkVWSUVXX1JFUVVJUkVEIiwKICAgICAgICAgICAgICAgICJtaW50IjogbWludCwKICAgICAgICAgICAgICAgICJzaWduYXR1cmUiOiBleGMuc2lnbmF0dXJlLAogICAgICAgICAgICAgICAgInJlYXNvbiI6IHN0cihleGMpLAogICAgICAgICAgICB9CiAgICAgICAgKQogICAgICAgIHJhaXNlIFJ1bnRpbWVFcnJvcigKICAgICAgICAgICAgImxpdmUgY2FuYXJ5IG91dGNvbWUgaXMgdW5jZXJ0YWluOyBkbyBub3QgcmV0cnkgdW50aWwgdGhlIGpvdXJuYWwgYW5kICIKICAgICAgICAgICAgIm9uLWNoYWluIGhpc3RvcnkgYXJlIHJlY29uY2lsZWQiCiAgICAgICAgKSBmcm9tIGV4YwogICAgam91cm5hbC5yZWNvcmQoCiAgICAgICAgewogICAgICAgICAgICAiYXR0ZW1wdGVkX2F0IjogdGltZS50aW1lKCksCiAgICAgICAgICAgICJzdGF0dXMiOiAiQ09ORklSTUVEIiwKICAgICAgICAgICAgIm1pbnQiOiBtaW50LAogICAgICAgICAgICAic2lnbmF0dXJlIjogcmVjZWlwdC5zaWduYXR1cmUsCiAgICAgICAgICAgICJpbnB1dF91c2RjX3JhdyI6IHJlY2VpcHQuaW5wdXRfYW1vdW50X3JhdywKICAgICAgICAgICAgIm91dHB1dF9hbW91bnRfcmF3IjogcmVjZWlwdC5vdXRwdXRfYW1vdW50X3JhdywKICAgICAgICB9CiAgICApCiAgICByZXR1cm4gewogICAgICAgICoqcmVzdWx0LAogICAgICAgICJtb2RlIjogImxpdmUtY2FuYXJ5IiwKICAgICAgICAiYnJvYWRjYXN0IjogVHJ1ZSwKICAgICAgICAic2lnbmF0dXJlIjogcmVjZWlwdC5zaWduYXR1cmUsCiAgICAgICAgIm91dHB1dF9hbW91bnRfcmF3IjogcmVjZWlwdC5vdXRwdXRfYW1vdW50X3JhdywKICAgIH0K
+from __future__ import annotations
+
+import json
+import math
+import os
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+
+LIVE_CONFIRMATION = "SPEND_1_USDC_ON_MAINNET"
+USDC_DECIMALS = 6
+
+
+def _enabled(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().casefold() in {"1", "true", "yes", "on"}
+
+
+@dataclass(frozen=True, slots=True)
+class CanaryPolicy:
+    amount_usd: float = 1.0
+    minimum_liquidity_usd: float = 50_000.0
+    maximum_signal_age_seconds: float = 15.0
+    maximum_price_impact_pct: float = 3.0
+    maximum_slippage_bps: int = 300
+
+    @classmethod
+    def from_env(cls) -> "CanaryPolicy":
+        amount = float(os.getenv("AGENT_LIVE_TEST_AMOUNT_USD", "1"))
+        if not math.isclose(amount, 1.0):
+            raise ValueError("the first live canary is hard-limited to exactly $1")
+        return cls(amount_usd=amount)
+
+
+def select_live_candidate(snapshot: dict[str, Any], policy: CanaryPolicy) -> dict[str, Any]:
+    generated_at = float(snapshot.get("generated_at") or 0)
+    age = time.time() - generated_at
+    if generated_at <= 0 or age < 0 or age > policy.maximum_signal_age_seconds:
+        raise ValueError("recommendation snapshot is missing or stale")
+    candidates = snapshot.get("candidates")
+    if not isinstance(candidates, list):
+        raise ValueError("recommendation snapshot has no candidates")
+    for raw in candidates:
+        if not isinstance(raw, dict):
+            continue
+        if raw.get("chain") not in {None, "solana"}:
+            continue
+        if raw.get("decision") not in {"BUY NOW", "BUY ZONE"}:
+            continue
+        if float(raw.get("liquidity_usd") or 0) < policy.minimum_liquidity_usd:
+            continue
+        if int(raw.get("entry_confirmation_count") or 0) < int(
+            raw.get("entry_confirmation_required") or 3
+        ):
+            continue
+        mint = str(raw.get("mint") or "")
+        if 32 <= len(mint) <= 44:
+            return raw
+    raise ValueError("no fresh, confirmed, sufficiently liquid Solana buy candidate")
+
+
+class CanaryJournal:
+    def __init__(self, path: str | Path) -> None:
+        self.path = Path(path)
+
+    def load(self) -> dict[str, Any]:
+        try:
+            value = json.loads(self.path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return {"version": 1, "attempts": []}
+        if not isinstance(value, dict) or not isinstance(value.get("attempts"), list):
+            raise ValueError("live canary journal is invalid")
+        return value
+
+    def assert_unused(self) -> None:
+        attempts = self.load()["attempts"]
+        if attempts:
+            raise ValueError(
+                "the one-time live canary has already been attempted; inspect its journal"
+            )
+
+    def record(self, entry: dict[str, Any]) -> None:
+        payload = self.load()
+        payload["attempts"].append(entry)
+        temporary = self.path.with_suffix(self.path.suffix + ".tmp")
+        temporary.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        os.replace(temporary, self.path)
+
+
+def validate_live_environment(*, execute: bool, confirmation: str | None) -> CanaryPolicy:
+    policy = CanaryPolicy.from_env()
+    if not _enabled("AGENT_LIVE_TEST_ENABLED"):
+        raise ValueError("AGENT_LIVE_TEST_ENABLED is false")
+    if _enabled("AGENT_LIVE_KILL_SWITCH", True):
+        raise ValueError("AGENT_LIVE_KILL_SWITCH is active")
+    required = ("SOLANA_WALLET_ADDRESS", "JUPITER_API_KEY")
+    missing = [name for name in required if not os.getenv(name)]
+    if missing:
+        raise ValueError("missing live setting(s): " + ", ".join(missing))
+    if not (_enabled("AUTO_SELL_ENABLED") and _enabled("AUTO_SELL_LIVE")):
+        raise ValueError("live canary requires live exit protection")
+    if execute and confirmation != LIVE_CONFIRMATION:
+        raise ValueError(f"live execution requires --confirm {LIVE_CONFIRMATION}")
+    return policy
+
+
+async def run_live_canary(
+    *, execute: bool, confirmation: str | None = None
+) -> dict[str, Any]:
+    policy = validate_live_environment(execute=execute, confirmation=confirmation)
+    snapshot_path = Path(
+        os.getenv("RECOMMENDATION_SNAPSHOT_PATH", "launch_guard_recommendations.json")
+    )
+    try:
+        snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"could not read recommendation snapshot: {exc}") from exc
+    candidate = select_live_candidate(snapshot, policy)
+    mint = str(candidate["mint"])
+    symbol = str(candidate.get("symbol") or mint[:8])
+    journal = CanaryJournal(
+        os.getenv("AGENT_LIVE_CANARY_PATH", "launch_guard_live_canary.json")
+    )
+    journal.assert_unused()
+
+    # Lazy imports keep shadow-only commands independent from live dependencies.
+    from .execution import (
+        BuyIntent,
+        JupiterExecutionError,
+        JupiterSwapClient,
+        KeyringSolanaSigner,
+        SolanaAutoBuyer,
+        USDC_MINT,
+    )
+    from .wallet import SolanaRpc
+
+    wallet = str(os.environ["SOLANA_WALLET_ADDRESS"])
+    signer = KeyringSolanaSigner(expected_public_key=wallet)
+    rpc = SolanaRpc(os.getenv("SOLANA_RPC_HTTP_URL", "https://api.mainnet-beta.solana.com"))
+    amount_raw = int(policy.amount_usd * (10**USDC_DECIMALS))
+    usdc = await rpc.token_balance(wallet, USDC_MINT)
+    if usdc.raw_amount < amount_raw:
+        raise ValueError("wallet USDC balance is below $1")
+    existing = await rpc.token_balance(wallet, mint)
+    if existing.raw_amount > 0:
+        raise ValueError("wallet already holds the candidate; cost-basis mixing blocked")
+
+    buyer = SolanaAutoBuyer(
+        client=JupiterSwapClient(api_key=str(os.environ["JUPITER_API_KEY"])),
+        signer=signer,
+        max_price_impact_pct=policy.maximum_price_impact_pct,
+        max_slippage_bps=policy.maximum_slippage_bps,
+    )
+    intent = BuyIntent(
+        mint=mint,
+        symbol=symbol,
+        event_key=f"agent-live-canary:{mint}",
+        amount_usdc_raw=amount_raw,
+        funding_source="one-time-live-canary",
+    )
+    preflight = await buyer.preflight(intent, rpc)
+    result: dict[str, Any] = {
+        "mode": "live-canary-preflight",
+        "broadcast": False,
+        "wallet": signer.public_key,
+        "mint": mint,
+        "symbol": symbol,
+        "input_usdc": policy.amount_usd,
+        "liquidity_usd": float(candidate.get("liquidity_usd") or 0),
+        "price_impact_pct": preflight.prepared.price_impact_pct,
+        "slippage_bps": preflight.prepared.slippage_bps,
+        "simulation_units_consumed": preflight.units_consumed,
+    }
+    if not execute:
+        return result
+
+    attempt = {**result, "attempted_at": time.time(), "status": "PENDING"}
+    journal.record(attempt)
+    try:
+        receipt = await buyer.execute(preflight.prepared)
+    except JupiterExecutionError as exc:
+        journal.record(
+            {
+                "attempted_at": time.time(),
+                "status": "REVIEW_REQUIRED",
+                "mint": mint,
+                "signature": exc.signature,
+                "reason": str(exc),
+            }
+        )
+        raise RuntimeError(
+            "live canary outcome is uncertain; do not retry until the journal and "
+            "on-chain history are reconciled"
+        ) from exc
+    journal.record(
+        {
+            "attempted_at": time.time(),
+            "status": "CONFIRMED",
+            "mint": mint,
+            "signature": receipt.signature,
+            "input_usdc_raw": receipt.input_amount_raw,
+            "output_amount_raw": receipt.output_amount_raw,
+        }
+    )
+    return {
+        **result,
+        "mode": "live-canary",
+        "broadcast": True,
+        "signature": receipt.signature,
+        "output_amount_raw": receipt.output_amount_raw,
+    }
