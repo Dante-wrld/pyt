@@ -3,15 +3,20 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import time
 from pathlib import Path
 
 from openai import OpenAIError
 
+from .agent_capital import CapitalBook
 from .agents import (
     AgentCoordinator,
     AgentRecord,
     AgentRole,
+    RiskArbiter,
+    RiskPolicy,
     RiskSnapshot,
+    TradeAction,
 )
 from .openai_agents import OpenAIProposalModel, connection_test
 
@@ -60,6 +65,22 @@ def build_parser() -> argparse.ArgumentParser:
         "--paper-demo",
         action="store_true",
         help="ask all three agents about synthetic data and arbitrate in paper mode",
+    )
+    group.add_argument(
+        "--initialize-capital",
+        type=float,
+        metavar="USD_PER_AGENT",
+        help="create three isolated shadow accounts without wallet access",
+    )
+    group.add_argument(
+        "--capital-status",
+        action="store_true",
+        help="show shadow cash, reserved capital, and open-position counts",
+    )
+    group.add_argument(
+        "--shadow-once",
+        action="store_true",
+        help="make one decision per agent from current read-only snapshots",
     )
     return parser
 
@@ -135,12 +156,147 @@ def paper_demo(model: OpenAIProposalModel) -> dict[str, object]:
     return {"mode": "paper", "live_execution": False, "agents": results}
 
 
+def _read_json(path: str) -> dict[str, object]:
+    try:
+        value = json.loads(Path(path).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"could not read shadow input {path}: {exc}") from exc
+    return value if isinstance(value, dict) else {}
+
+
+def _first_dict(value: object) -> dict[str, object]:
+    if isinstance(value, list):
+        return next((item for item in value if isinstance(item, dict)), {})
+    return {}
+
+
+def shadow_once(model: OpenAIProposalModel, book: CapitalBook) -> dict[str, object]:
+    recommendations = _read_json(
+        os.getenv("RECOMMENDATION_SNAPSHOT_PATH", "launch_guard_recommendations.json")
+    )
+    portfolio = _read_json(
+        os.getenv("PORTFOLIO_SNAPSHOT_PATH", "launch_guard_portfolio.json")
+    )
+    copy_data = _read_json(
+        os.getenv("AGENT_COPY_SIGNAL_PATH", "launch_guard_copy_signals.json")
+    )
+    accounts = {row.agent_id: row for row in book.accounts()}
+    candidate = _first_dict(recommendations.get("candidates"))
+    holding = _first_dict(portfolio.get("signals"))
+    leader = _first_dict(copy_data.get("signals"))
+    inputs = (
+        ("hunter-v1", AgentRole.OPPORTUNITY_HUNTER, {"candidate": candidate}),
+        ("portfolio-v1", AgentRole.PORTFOLIO_MANAGER, {"owned_position": holding}),
+        ("copy-v1", AgentRole.COPY_TRADER, {"observed_leader_trade": leader}),
+    )
+    coordinator = AgentCoordinator(
+        model,
+        RiskArbiter(
+            RiskPolicy(
+                max_order_usd=5,
+                max_position_pct=100,
+                max_open_positions=2,
+            )
+        ),
+    )
+    results: list[dict[str, object]] = []
+    for agent_id, role, context in inputs:
+        account = accounts[agent_id]
+        source = next(iter(context.values()))
+        liquidity = float(source.get("liquidity_usd") or 0) if source else 0
+        generated = {
+            AgentRole.OPPORTUNITY_HUNTER: recommendations.get("generated_at"),
+            AgentRole.PORTFOLIO_MANAGER: portfolio.get("generated_at"),
+            AgentRole.COPY_TRADER: copy_data.get("generated_at"),
+        }[role]
+        quote_age = max(0, time.time() - float(generated or time.time()))
+        proposal, arbitration = coordinator.ask(
+            AgentRecord(agent_id, role),
+            {
+                "mode": "shadow",
+                "capital": {
+                    "cash_usd": account.cash_usd,
+                    "equity_usd": account.equity_usd,
+                    "maximum_order_usd": 5,
+                    "maximum_open_positions": 2,
+                },
+                **context,
+            },
+            RiskSnapshot(
+                mode="shadow",
+                equity_usd=account.equity_usd,
+                open_positions=account.open_positions,
+                liquidity_usd=liquidity,
+                quote_age_seconds=quote_age,
+            ),
+        )
+        shadow_position = None
+        if arbitration.approved and proposal.action is TradeAction.BUY:
+            price = float(source.get("price") or source.get("current_price") or 0)
+            shadow_position = book.reserve_shadow_buy(
+                agent_id=agent_id,
+                mint=proposal.mint,
+                symbol=str(source.get("symbol") or proposal.mint[:8]),
+                amount_usd=arbitration.approved_usd,
+                entry_price=price,
+                price_currency=str(source.get("price_currency") or "UNKNOWN"),
+            )
+        results.append(
+            {
+                "agent_id": agent_id,
+                "role": role.value,
+                "input_available": bool(source),
+                "proposal": {
+                    "action": proposal.action.value,
+                    "mint": proposal.mint,
+                    "requested_usd": proposal.requested_usd,
+                    "confidence": proposal.confidence,
+                    "thesis": proposal.thesis,
+                    "evidence": list(proposal.evidence),
+                    "leader_wallet": proposal.leader_wallet,
+                },
+                "arbitration": {
+                    "approved": arbitration.approved,
+                    "approved_usd": arbitration.approved_usd,
+                    "reasons": list(arbitration.reasons),
+                },
+                "shadow_position": shadow_position,
+            }
+        )
+    output = {
+        "mode": "shadow",
+        "live_execution": False,
+        "generated_at": time.time(),
+        "agents": results,
+        "capital": book.public_status(),
+    }
+    log_path = Path(os.getenv("AGENT_DECISION_LOG_PATH", "launch_guard_agent_decisions.jsonl"))
+    with log_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(output, sort_keys=True) + "\n")
+    return output
+
+
 def main() -> None:
     args = build_parser().parse_args()
     load_dotenv()
+    capital_path = os.getenv(
+        "AGENT_CAPITAL_PATH", "launch_guard_agent_capital.json"
+    )
+    book = CapitalBook(capital_path)
     try:
-        model = OpenAIProposalModel()
-        result = connection_test(model) if args.test_api else paper_demo(model)
+        if args.initialize_capital is not None:
+            book.initialize(args.initialize_capital)
+            result = book.public_status()
+        elif args.capital_status:
+            result = book.public_status()
+        elif args.shadow_once:
+            model = OpenAIProposalModel()
+            result = shadow_once(model, book)
+        else:
+            model = OpenAIProposalModel()
+            result = connection_test(model) if args.test_api else paper_demo(model)
     except OpenAIError as exc:
         raise SystemExit(friendly_api_error(exc)) from None
     except (ValueError, RuntimeError) as exc:
