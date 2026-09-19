@@ -58,6 +58,13 @@ class TradeProposal:
         if self.role is AgentRole.COPY_TRADER and self.action is TradeAction.BUY:
             if not self.leader_wallet:
                 raise ValueError("copy-trader buys require an attributed leader wallet")
+        if self.role is AgentRole.PORTFOLIO_MANAGER and self.action is TradeAction.BUY:
+            raise ValueError("portfolio manager cannot originate buys")
+        if self.role is AgentRole.OPPORTUNITY_HUNTER and self.action in {
+            TradeAction.TAKE_PARTIAL,
+            TradeAction.SELL,
+        }:
+            raise ValueError("opportunity hunter cannot manage owned positions")
 
 
 @dataclass(frozen=True, slots=True)
