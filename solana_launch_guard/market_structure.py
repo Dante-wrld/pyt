@@ -128,6 +128,39 @@ class MarketStructureScanner:
         self.cache_seconds = cache_seconds
         self._cache: dict[tuple[str, str, str], tuple[float, list[Candle] | None]] = {}
         self._request_times: list[float] = []
+        self._exit_pending: dict[tuple[str, str], asyncio.Task] = {}
+
+    def exit_research(self, *, pool: str, mint: str) -> dict | None:
+        """Refresh in background so candle research cannot delay a live risk exit."""
+        key = (pool, mint)
+        task = self._exit_pending.get(key)
+        if task is not None and task.done():
+            if not task.cancelled():
+                task.exception()  # Observe failures; cached data still must pass freshness checks.
+            self._exit_pending.pop(key, None)
+        cached = self._cache.get((pool, mint, "minute:1"))
+        if (not cached or time.monotonic() - cached[0] >= 60) and key not in self._exit_pending:
+            self._exit_pending[key] = asyncio.create_task(self.scan_exit(pool=pool, mint=mint))
+        return assess_dynamic_exit(cached[1] or [], now=time.time()) if cached else None
+
+    async def scan_exit(self, *, pool: str, mint: str) -> dict | None:
+        """Closed one-minute candles; research evidence, never an execution order."""
+        key = (pool, mint, "minute:1")
+        now = time.monotonic()
+        cached = self._cache.get(key)
+        if cached and now - cached[0] < 60:
+            candles = cached[1]
+        else:
+            self._request_times = [t for t in self._request_times if now - t < 60]
+            if not pool or not mint or len(self._request_times) >= 8:
+                return None
+            self._request_times.append(now)
+            try:
+                candles = await asyncio.to_thread(self._fetch, pool, mint, ("minute", 1, 60))
+            except (OSError, ValueError, KeyError, TypeError, TimeoutError):
+                candles = None
+            self._cache[key] = (now, candles)
+        return assess_dynamic_exit(candles or [], now=time.time())
 
     def _fetch(self, pool: str, mint: str, frame: tuple[str, int, int]) -> list[Candle] | None:
         timeframe, aggregate, period = frame
@@ -180,3 +213,81 @@ class MarketStructureScanner:
                 return None
             readings.append(candles)
         return assess_structure(readings[0], readings[1], pair=pair, now=time.time())
+
+
+def assess_dynamic_exit(
+    candles: list[Candle], *, now: float, period: int = 60,
+    half_life_seconds: float = 600,
+) -> dict | None:
+    """Research-only time/volatility rule. Half-life is evidence decay, not token life."""
+    if (len(candles) < 20 or period <= 0 or half_life_seconds <= 0
+        or not math.isfinite(now) or not math.isfinite(half_life_seconds)):
+        return None
+    bars = candles[-32:]
+    if not 0 <= now - (bars[-1].start + period) <= 2 * period:
+        return None
+    if any(b.start - a.start != period for a, b in zip(bars, bars[1:])):
+        return None
+    for bar in bars:
+        if (not all(math.isfinite(v) for v in
+                    (bar.open, bar.high, bar.low, bar.close, bar.volume))
+            or bar.low <= 0 or bar.volume < 0
+            or bar.low > min(bar.open, bar.close) or bar.high < max(bar.open, bar.close)):
+            return None
+    # Exclude the current bar from the reference range and volatility estimate.
+    prior, latest = bars[:-1], bars[-1]
+    ranges = [max(b.high - b.low, abs(b.high - a.close), abs(b.low - a.close))
+              for a, b in zip(prior, prior[1:])][-14:]
+    atr = sum(ranges) / len(ranges)
+    if atr <= 0:
+        return None
+    peak_index = max(range(len(prior)), key=lambda i: prior[i].high)
+    peak = prior[peak_index].high
+    dwell = 0
+    for bar in reversed(prior):
+        if peak - bar.close > atr:
+            break
+        dwell += period
+    # As a plateau ages, tighten from 3 ATR toward 1.5 ATR, never below it.
+    weight = 2 ** (-dwell / half_life_seconds)
+    distance = atr * (1.5 + 1.5 * weight)
+    trailing_level = peak - distance
+    weights = [2 ** (-(latest.start - b.start) / half_life_seconds) for b in prior]
+    pivot = sum(b.close * w for b, w in zip(prior, weights)) / sum(weights)
+    peaks = [i for i in range(1, len(prior) - 1)
+             if prior[i].high > prior[i - 1].high and prior[i].high >= prior[i + 1].high]
+    triple_top = False
+    failed_retest = False
+    neckline = None
+    if len(peaks) >= 3:
+        a, b, c = peaks[-3:]
+        tops = [prior[i].high for i in (a, b, c)]
+        if b - a >= 3 and c - b >= 3 and max(tops) - min(tops) <= atr:
+            neckline = min(x.low for x in prior[a:c + 1])
+            breaks = [i for i in range(c + 1, len(prior)) if prior[i].close < neckline]
+            triple_top = latest.close < neckline
+            previous = bars[-2]
+            failed_retest = bool(breaks and breaks[0] < len(prior) - 1
+                and latest.high >= neckline - atr * 0.25
+                and latest.close < neckline and latest.close < latest.open
+                and previous.close > previous.open
+                and latest.open >= previous.close and latest.close <= previous.open)
+    bearish = latest.close < latest.open and latest.close < prior[-1].close
+    volume_expansion = latest.volume > sum(b.volume for b in prior[-5:]) / 5
+    action = "HOLD_REVIEW"
+    if triple_top and failed_retest:
+        action = "EXIT_REVIEW"
+    elif latest.close < trailing_level and bearish:
+        action = "REDUCE_REVIEW"
+    elif (latest.close > peak and latest.close > latest.open and volume_expansion):
+        action = "ADD_WATCH"
+    return {
+        "status": "RESEARCH_ONLY", "action": action,
+        "as_of": latest.start + period, "period_seconds": period,
+        "atr": atr, "pivot": pivot, "reference_peak": peak,
+        "plateau_seconds": dwell, "half_life_seconds": half_life_seconds,
+        "evidence_weight": weight, "trailing_level": trailing_level,
+        "triple_top_break": triple_top, "neckline": neckline,
+        "failed_retest_bearish_engulfing": failed_retest,
+        "note": "Unvalidated evidence; no automatic trade or net-profit inference."
+    }
