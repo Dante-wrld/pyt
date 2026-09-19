@@ -291,6 +291,7 @@ def build_portfolio_snapshot(
         "TAKE PARTIAL": 2,
         "BUY MORE": 1,
         "REBOUND WATCH": 1,
+        "STRUCTURE WATCH": 1,
         "HOLD": 1,
         "UNPRICED": 0,
     }
@@ -338,6 +339,7 @@ def format_portfolio_dashboard(
         "TAKE PARTIAL": "\033[38;5;220m" if color else "",
         "BUY MORE": "\033[38;5;46m" if color else "",
         "REBOUND WATCH": "\033[38;5;39m" if color else "",
+        "STRUCTURE WATCH": "\033[38;5;46m" if color else "",
         "HOLD": "\033[38;5;46m" if color else "",
         "UNPRICED": "\033[38;5;244m" if color else "",
     }

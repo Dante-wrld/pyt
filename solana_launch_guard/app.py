@@ -33,6 +33,7 @@ from .execution import (
 )
 from .intelligence import CoinIntelligence, IntelligenceResult
 from .market import DexScreenerOracle, MarketQuote
+from .market_structure import MarketStructureScanner
 from .multichain import (
     EvmRpc,
     EvmTransfer,
@@ -323,6 +324,7 @@ class LaunchGuard:
             reentry_buy_sell_ratio=settings.reentry_buy_sell_ratio,
             max_reentries=settings.max_reentries,
         )
+        self.structure_scanner = MarketStructureScanner()
         self.portfolio_advisor = PortfolioAdvisor(
             take_partial_pct=settings.take_profit_pct,
             stop_loss_pct=settings.stop_loss_pct,
@@ -1192,6 +1194,34 @@ class LaunchGuard:
                     )
                     for holding, quote in results
                 ]
+                # Add candle evidence only to an existing advisory rebound watch.
+                # Sell and profit-protection decisions retain their precedence.
+                for index, (holding, quote) in enumerate(results):
+                    if (
+                        signals[index].decision != "REBOUND WATCH"
+                        or holding.chain != "solana"
+                        or quote is None
+                        or quote.pair_created_at_ms is None
+                    ):
+                        continue
+                    evidence = await self.structure_scanner.scan(
+                        pool=quote.pair_address,
+                        mint=holding.token_address,
+                        age_seconds=max(
+                            0, (time.time() * 1000 - quote.pair_created_at_ms) / 1000
+                        ),
+                    )
+                    if (
+                        evidence is not None
+                        and quote.price_usd is not None
+                        and quote.price_usd > 0
+                        and abs(evidence.entry / quote.price_usd - 1) <= 0.15
+                    ):
+                        signals[index] = replace(
+                            signals[index],
+                            decision="STRUCTURE WATCH",
+                            reason=evidence.description(),
+                        )
                 for signal in signals:
                     state = self.portfolio_advisor.state_for(
                         signal.chain, signal.token_address

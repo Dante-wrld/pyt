@@ -310,6 +310,7 @@ def format_portfolio_notification(
         "TAKE PARTIAL": ("🟡", "CONSIDER PARTIAL PROFIT", "cashregister"),
         "BUY MORE": ("🟢", "REVIEW ADDING TO POSITION", "pushover"),
         "REBOUND WATCH": ("🔵", "REBOUND WATCH", "pushover"),
+        "STRUCTURE WATCH": ("🟢", "RANGE SWEEP / RETEST WATCH", "pushover"),
         "HOLD": ("🔵", "HOLD POSITION", "pushover"),
     }
     icon, label, sound = presentation.get(
