@@ -17,6 +17,7 @@ def candidate_snapshot(**overrides):
     candidate = {
         "chain": "solana",
         "mint": "A" * 32,
+        "quoted_at": time.time(),
         "decision": "BUY NOW",
         "liquidity_usd": 75_000,
         "entry_confirmation_count": 3,
@@ -68,3 +69,13 @@ def test_canary_journal_is_one_attempt_only(tmp_path):
     journal.record({"status": "PENDING"})
     with pytest.raises(ValueError, match="already been attempted"):
         journal.assert_unused()
+
+
+def test_fresh_snapshot_cannot_republish_stale_or_missing_quote():
+    policy = CanaryPolicy()
+    with pytest.raises(ValueError, match="no fresh"):
+        select_live_candidate(candidate_snapshot(quoted_at=time.time() - 16), policy)
+    with pytest.raises(ValueError, match="no fresh"):
+        select_live_candidate(candidate_snapshot(quoted_at=None), policy)
+    with pytest.raises(ValueError, match="no fresh"):
+        select_live_candidate(candidate_snapshot(quoted_at=time.time() + 60), policy)

@@ -702,6 +702,7 @@ def build_snapshot(
         "candidates": [
             {
                 "rank": rank,
+                "quoted_at": candidate.updated_at,
                 "mint": candidate.mint,
                 "symbol": candidate.symbol,
                 "chain": candidate.chain,
