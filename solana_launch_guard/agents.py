@@ -113,15 +113,16 @@ class RiskArbiter:
             reasons.append("confidence is below the policy minimum")
         if state.quote_age_seconds > self.policy.max_quote_age_seconds:
             reasons.append("market quote is stale")
-        if state.liquidity_usd < self.policy.min_liquidity_usd:
-            reasons.append("liquidity is below the policy minimum")
         if abs(state.quoted_price_impact_pct) > self.policy.max_price_impact_pct:
             reasons.append("quoted price impact exceeds the policy limit")
-        if state.open_positions >= self.policy.max_open_positions and proposal.action is TradeAction.BUY:
-            reasons.append("maximum open positions reached")
-        max_loss = state.equity_usd * self.policy.max_daily_loss_pct / 100
-        if state.daily_realized_pnl_usd <= -max_loss and max_loss > 0:
-            reasons.append("daily loss limit reached")
+        if proposal.action is TradeAction.BUY:
+            if state.liquidity_usd < self.policy.min_liquidity_usd:
+                reasons.append("liquidity is below the policy minimum")
+            if state.open_positions >= self.policy.max_open_positions:
+                reasons.append("maximum open positions reached")
+            max_loss = state.equity_usd * self.policy.max_daily_loss_pct / 100
+            if state.daily_realized_pnl_usd <= -max_loss and max_loss > 0:
+                reasons.append("daily loss limit reached")
 
         if proposal.action not in {TradeAction.BUY, TradeAction.TAKE_PARTIAL, TradeAction.SELL}:
             return Arbitration(False, 0, ("proposal does not request execution",))
