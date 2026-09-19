@@ -105,7 +105,7 @@ def test_core_cycle_reviews_sell_before_hunter(tmp_path, monkeypatch):
 def test_shadow_buy_updates_reported_cash_and_sell_approval_does_not(tmp_path, monkeypatch):
     recommendations = tmp_path / "recommendations.json"
     portfolio = tmp_path / "portfolio.json"
-    recommendations.write_text(json.dumps({"generated_at": time.time(), "candidates": [{"chain": "solana", "mint": "A" * 32, "symbol": "A", "decision": "BUY ZONE", "price": 1, "liquidity_usd": 20000}]}))
+    recommendations.write_text(json.dumps({"generated_at": time.time(), "candidates": [{"chain": "solana", "mint": "A" * 32, "symbol": "A", "decision": "BUY ZONE", "price": 1, "liquidity_usd": 20000, "quoted_at": time.time()}]}))
     portfolio.write_text(json.dumps({"generated_at": time.time(), "signals": [{"chain": "solana", "token_address": "B" * 32, "decision": "EXIT WARNING", "current_price": 1, "current_value_usd": 2, "liquidity_usd": 20000}]}))
     monkeypatch.setenv("RECOMMENDATION_SNAPSHOT_PATH", str(recommendations))
     monkeypatch.setenv("PORTFOLIO_SNAPSHOT_PATH", str(portfolio))
