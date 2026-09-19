@@ -7,6 +7,50 @@ from solana_launch_guard.notifications import format_portfolio_notification
 from solana_launch_guard.notifications import PortfolioNotifier
 from dataclasses import replace
 import asyncio
+from solana_launch_guard.market_structure import Candle, assess_dynamic_exit
+
+
+def test_dynamic_pivot_uses_time_decay_without_selling_a_flat_plateau():
+    bars = [Candle(i * 60, 125, 126, 124, 125, 10) for i in range(21)]
+    evidence = assess_dynamic_exit(bars, now=21 * 60)
+    assert evidence["status"] == "RESEARCH_ONLY"
+    assert evidence["action"] == "HOLD_REVIEW"
+    assert evidence["plateau_seconds"] == 1200
+    assert evidence["evidence_weight"] == 0.25
+    slower = assess_dynamic_exit(bars, now=21 * 60, half_life_seconds=1200)
+    assert slower["trailing_level"] < evidence["trailing_level"]
+
+
+def test_dynamic_pivot_flags_a_drop_without_waiting_for_double_entry():
+    bars = [Candle(i * 60, 125, 126, 124, 125, 10) for i in range(20)]
+    bars.append(Candle(1200, 125, 125, 87, 87.5, 30))
+    evidence = assess_dynamic_exit(bars, now=1260)
+    assert evidence["action"] == "REDUCE_REVIEW"
+    assert assess_dynamic_exit(bars, now=2000) is None
+    assert assess_dynamic_exit(bars, now=1201) is None
+    assert assess_dynamic_exit(bars[:10] + bars[11:], now=1260) is None
+
+
+def test_dynamic_breakout_is_only_an_add_watch():
+    bars = [Candle(i * 60, 125, 126, 124, 125, 10) for i in range(20)]
+    bars.append(Candle(1200, 125, 130, 125, 129, 30))
+    assert assess_dynamic_exit(bars, now=1260)["action"] == "ADD_WATCH"
+
+
+def test_triple_top_needs_break_and_bearish_failed_retest():
+    bars = [Candle(i * 60, 100, 101, 99, 100, 10) for i in range(20)]
+    for i in (4, 9, 14):
+        bars[i] = Candle(i * 60, 100, 105, 99, 101, 10)
+    bars[17] = Candle(1020, 99, 99, 96, 97, 10)
+    bars[18] = Candle(1080, 97, 98, 96, 97.5, 10)
+    bars[19] = Candle(1140, 97, 100, 96, 99.5, 10)
+    bars.append(Candle(1200, 100, 101, 95, 96, 20))
+    evidence = assess_dynamic_exit(bars, now=1260)
+    assert evidence["triple_top_break"]
+    assert evidence["failed_retest_bearish_engulfing"]
+    assert evidence["action"] == "EXIT_REVIEW"
+    bars[-1] = Candle(1200, 100, 103, 99, 102, 20)
+    assert not assess_dynamic_exit(bars, now=1260)["triple_top_break"]
 
 
 def _quote(**changes):
