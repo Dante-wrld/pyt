@@ -72,9 +72,20 @@ def test_copy_buy_requires_leader_attribution():
         proposal(role=AgentRole.COPY_TRADER).validate()
 
 
+def test_agent_roles_cannot_cross_mandates():
+    with pytest.raises(ValueError, match="cannot originate buys"):
+        proposal(role=AgentRole.PORTFOLIO_MANAGER).validate()
+    with pytest.raises(ValueError, match="cannot manage owned positions"):
+        proposal(action=TradeAction.SELL).validate()
+
+
 def test_entry_only_limits_do_not_trap_risk_reducing_sell():
     result = RiskArbiter().evaluate(
-        proposal(action=TradeAction.SELL, requested_usd=5),
+        proposal(
+            role=AgentRole.PORTFOLIO_MANAGER,
+            action=TradeAction.SELL,
+            requested_usd=5,
+        ),
         risk(liquidity_usd=100, open_positions=2, daily_realized_pnl_usd=-16),
     )
     assert result.approved

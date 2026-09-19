@@ -33,3 +33,26 @@ Use videos only when the uploader has made them lawfully available and transcrip
 ## Current scope
 
 v0.22 is intentionally the safe foundation. It adds the data contracts, guardrails, reporting math, survival policy, and research-promotion policy. Model API calls, trader-data discovery adapters, video transcript providers, scheduler wiring, UI, and transaction execution are later integrations and remain disabled/absent.
+
+
+## OpenAI connection (v0.24.0)
+
+One OpenAI client powers the three logical roles through the Responses API. The adapter requests schema-validated proposals, sends requests with `store=False`, removes credential-like fields from nested context, limits prompt field sizes, and treats market/wallet content as untrusted data.
+
+After pulling and reinstalling, test the key using synthetic data only:
+
+```bash
+git pull --ff-only origin main
+.venv/bin/pip install -e ".[dev]"
+.venv/bin/launch-guard-agents --test-api
+```
+
+Expected JSON includes `"connected": true`, `"action": "HOLD"`, and `"live_execution": false`. The test does not read a wallet, propose a real token, sign, simulate, or broadcast a transaction.
+
+To run all three roles against synthetic examples:
+
+```bash
+.venv/bin/launch-guard-agents --paper-demo
+```
+
+The paper demo can approve a bounded hypothetical proposal in its output, but has no execution adapter and cannot submit it. Real market/trader/portfolio wiring remains a separate shadow-mode phase.
