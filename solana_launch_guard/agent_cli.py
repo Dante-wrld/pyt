@@ -15,6 +15,7 @@ from .agents import (
     AgentCoordinator,
     AgentRecord,
     AgentRole,
+    Arbitration,
     RiskArbiter,
     RiskPolicy,
     RiskSnapshot,
@@ -258,7 +259,10 @@ def shadow_core_loop(book: CapitalBook, *, interval_seconds: int = 60) -> None:
                 portfolio = _read_json(os.getenv("PORTFOLIO_SNAPSHOT_PATH", "launch_guard_portfolio.json"))
                 fresh = (
                     _snapshot_is_fresh(recommendations) and bool(_solana_opportunity(recommendations.get("candidates"))),
-                    _snapshot_is_fresh(portfolio) and bool(_priced_sell_signal(portfolio.get("signals"))),
+                    _snapshot_is_fresh(portfolio) and bool(
+                        _priced_sell_signal(portfolio.get("signals"))
+                        or portfolio.get("loss_sale_reviews")
+                    ),
                 )
                 signature = (
                     recommendations.get("generated_at") if fresh[0] else None,
@@ -291,9 +295,17 @@ def shadow_once(model: OpenAIProposalModel | None, book: CapitalBook, *, portfol
     candidate = _solana_opportunity(recommendations.get("candidates")) if core_only and _snapshot_is_fresh(recommendations) else ({} if core_only else _first_dict(recommendations.get("candidates")))
     holding = _priced_sell_signal(portfolio.get("signals")) if (portfolio_sell_only or core_only) and _snapshot_is_fresh(portfolio) else ({} if portfolio_sell_only or core_only else _first_dict(portfolio.get("signals")))
     leader = _first_dict(copy_data.get("signals"))
+    reviews = (
+        [item for item in portfolio.get("loss_sale_reviews", []) if isinstance(item, dict)]
+        if _snapshot_is_fresh(portfolio) and isinstance(portfolio.get("loss_sale_reviews"), list)
+        else []
+    )
     inputs = (
         ("hunter-v1", AgentRole.OPPORTUNITY_HUNTER, {"candidate": candidate}),
-        ("portfolio-v1", AgentRole.PORTFOLIO_MANAGER, {"owned_position": holding}),
+        ("portfolio-v1", AgentRole.PORTFOLIO_MANAGER,
+         {"owned_position": holding,
+          "all_holdings": portfolio.get("signals", []),
+          "loss_sale_reviews": reviews}),
         ("copy-v1", AgentRole.COPY_TRADER, {"observed_leader_trade": leader}),
     )
     if portfolio_sell_only and not holding:
@@ -303,7 +315,7 @@ def shadow_once(model: OpenAIProposalModel | None, book: CapitalBook, *, portfol
     if core_only:
         # Review portfolio exits first: each model request consumes time, and
         # a sell quote may age out while Hunter evaluates a separate token.
-        inputs = tuple(item for item in (inputs[1], inputs[0]) if next(iter(item[2].values())))
+        inputs = tuple(item for item in (inputs[1], inputs[0]) if any(item[2].values()))
         if not inputs:
             return {"mode": "shadow", "live_execution": False, "agents": [], "reason": "no eligible Solana opportunity or priced sell recommendation", "capital": book.public_status()}
     if model is None:
@@ -321,7 +333,7 @@ def shadow_once(model: OpenAIProposalModel | None, book: CapitalBook, *, portfol
     results: list[dict[str, object]] = []
     for agent_id, role, context in inputs:
         account = {row.agent_id: row for row in book.accounts()}[agent_id]
-        source = next(iter(context.values()))
+        source = next((value for value in context.values() if isinstance(value, dict) and value), {})
         liquidity = float(source.get("liquidity_usd") or 0) if source else 0
         generated = {
             AgentRole.OPPORTUNITY_HUNTER: recommendations.get("generated_at"),
@@ -349,6 +361,12 @@ def shadow_once(model: OpenAIProposalModel | None, book: CapitalBook, *, portfol
                 quote_age_seconds=quote_age,
             ),
         )
+        if proposal.action is TradeAction.REBUY and not any(
+            item.get("decision") == "REBUY REVIEW"
+            and item.get("token_address") == proposal.mint
+            for item in reviews
+        ):
+            arbitration = Arbitration(False, 0, ("no confirmed net-loss rebound review for this mint",))
         shadow_position = None
         shadow_fill = None
         if arbitration.approved and proposal.action is TradeAction.BUY:
@@ -367,7 +385,7 @@ def shadow_once(model: OpenAIProposalModel | None, book: CapitalBook, *, portfol
             {
                 "agent_id": agent_id,
                 "role": role.value,
-                "input_available": bool(source),
+                "input_available": bool(source or reviews),
                 "proposal": {
                     "action": proposal.action.value,
                     "mint": proposal.mint,
