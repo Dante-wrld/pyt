@@ -1026,3 +1026,24 @@ submit an order, arm the mint, or move the real holding. Never put a Fomo
 password, session cookie, recovery phrase, or private key in the project,
 `.env`, logs, or GitHub. The optional signing key belongs only in the hidden
 keychain prompt described above.
+
+## Pullback history
+
+The recommendation monitor saves active pullback candidates alongside the
+recommendation snapshot. With the default path, current tracked candidates are
+in `launch_guard_recommendations.json.pullbacks.json`, and observed state changes
+are appended to `launch_guard_recommendations.json.pullbacks.jsonl`. Both are
+local files ignored by Git. Inspect recent changes with:
+
+```bash
+tail -n 20 launch_guard_recommendations.json.pullbacks.jsonl
+```
+
+States include `pullback_started`, `in_zone_unconfirmed`,
+`confirmation_pending`, `confirmed_entry`, `fell_through_zone`, and
+`risk_blocked`. `left_tracking_pool` means monitoring ended because the token
+expired or the bounded recommendation pool displaced it; its later outcome is
+unknown. A candidate shown outside the top ranked display can remain in the
+tracking pool and continue receiving quotes. Restart restoration accepts only
+candidates whose last quote is within the configured recommendation TTL.
+This history is observational and does not change buy conditions or place trades.

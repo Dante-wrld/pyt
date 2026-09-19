@@ -60,6 +60,7 @@ from .recommendations import (
     read_snapshot,
     write_snapshot,
 )
+from .pullback_tracking import PullbackTracker
 from .strategy import AdaptiveStrategy
 from .wallet import SolanaRpc, SolanaTokenHolding, WalletTrade, WalletWatcher
 
@@ -271,6 +272,13 @@ class LaunchGuard:
             ),
             min_liquidity_usd=settings.intelligence_min_liquidity_usd,
         )
+        self.pullback_tracker = PullbackTracker(settings.recommendation_snapshot_path)
+        try:
+            restored = self.pullback_tracker.restore(self.recommendations)
+            if restored:
+                LOGGER.info("Restored %d tracked pullback(s)", restored)
+        except (OSError, ValueError) as exc:
+            LOGGER.warning("Could not restore pullback tracking: %s", exc)
         self.notifier: DecisionNotifier | None = None
         self.portfolio_notifier: PortfolioNotifier | None = None
         self.push_client: PushoverClient | None = None
@@ -2153,6 +2161,11 @@ class LaunchGuard:
                     self.recommendations.candidates.values()
                 ):
                     await self._maybe_auto_buy(candidate)
+
+            try:
+                self.pullback_tracker.record(self.recommendations)
+            except OSError as exc:
+                LOGGER.warning("Could not persist pullback tracking: %s", exc)
 
             alerts = (
                 self.recommendations.pop_pullback_alerts()

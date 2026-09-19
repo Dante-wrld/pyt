@@ -6,6 +6,8 @@ __pycache__/
 *.db
 launch_guard_portfolio.json
 launch_guard_recommendations.json
+*.pullbacks.json
+*.pullbacks.jsonl
 .pytest_cache/
 .ruff_cache/
 .coverage
