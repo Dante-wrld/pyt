@@ -9,7 +9,7 @@ Read pool OHLCV in USD from GeckoTerminal's public API. Reject missing pool
 metadata, a token-address mismatch, invalid OHLCV, unclosed bars, gaps in the
 nine higher or eight lower candles used, and stale bars. Require the last
 lower-frame close to be within 15% of the current DEX Screener USD quote.
-Cache responses for 5 minutes and cap attempts at 20 per rolling minute.
+Cache responses for 5 minutes and cap attempts at 8 per rolling minute.
 If unavailable, leave the original `REBOUND WATCH` unchanged.
 
 | Pool age | Key level | Entry frame |
