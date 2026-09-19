@@ -308,6 +308,8 @@ def format_portfolio_notification(
         "EXIT WARNING": ("🔴", "REVIEW SELL", "siren"),
         "PROTECT PROFIT": ("🟠", "PROTECT PROFIT", "spacealarm"),
         "TAKE PARTIAL": ("🟡", "CONSIDER PARTIAL PROFIT", "cashregister"),
+        "BUY MORE": ("🟢", "REVIEW ADDING TO POSITION", "pushover"),
+        "HOLD": ("🔵", "HOLD POSITION", "pushover"),
     }
     icon, label, sound = presentation.get(
         signal.decision, ("⚡", signal.decision, "pushover")

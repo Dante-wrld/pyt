@@ -209,6 +209,25 @@ class PortfolioAdvisor:
                 f"open gain {pnl_pct:.1f}% reached the "
                 f"{self.take_partial_pct:.1f}% partial-profit level"
             )
+        elif (
+            pnl_pct is not None
+            and -10 <= pnl_pct <= -3
+            and quote.price_change_m5_pct is not None
+            and 1 <= quote.price_change_m5_pct <= 6
+            and quote.buys_m5 >= 10
+            and quote.buys_m5 >= 2 * quote.sells_m5
+            and (quote.volume_m5_usd or 0) >= 1_000
+            and (quote.liquidity_usd or 0) >= 50_000
+            and (state.baseline_liquidity_usd <= 0 or
+                 (quote.liquidity_usd or 0) >= 0.7 * state.baseline_liquidity_usd)
+        ):
+            decision = "BUY MORE"
+            reason = (
+                f"open P/L {pnl_pct:+.1f}%; 5m move "
+                f"{quote.price_change_m5_pct:+.1f}% with "
+                f"{quote.buys_m5} buys/{quote.sells_m5} sells; "
+                "review liquidity and position size before adding"
+            )
         else:
             decision = "HOLD"
             if pnl_pct is None:
@@ -247,6 +266,7 @@ def build_portfolio_snapshot(
         "EXIT WARNING": 4,
         "PROTECT PROFIT": 3,
         "TAKE PARTIAL": 2,
+        "BUY MORE": 1,
         "HOLD": 1,
         "UNPRICED": 0,
     }
@@ -292,6 +312,7 @@ def format_portfolio_dashboard(
         "EXIT WARNING": "\033[38;5;196m" if color else "",
         "PROTECT PROFIT": "\033[38;5;208m" if color else "",
         "TAKE PARTIAL": "\033[38;5;220m" if color else "",
+        "BUY MORE": "\033[38;5;46m" if color else "",
         "HOLD": "\033[38;5;46m" if color else "",
         "UNPRICED": "\033[38;5;244m" if color else "",
     }
