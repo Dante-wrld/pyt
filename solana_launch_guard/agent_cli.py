@@ -5,6 +5,8 @@ import json
 import os
 from pathlib import Path
 
+from openai import OpenAIError
+
 from .agents import (
     AgentCoordinator,
     AgentRecord,
@@ -25,6 +27,23 @@ def load_dotenv(path: str = ".env") -> None:
         key, value = line.split("=", 1)
         if key.strip():
             os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+
+
+def friendly_api_error(exc: Exception) -> str:
+    code = str(getattr(exc, "code", "") or "")
+    message = str(exc).casefold()
+    if code in {"credit_balance_exhausted", "insufficient_quota"} or any(
+        phrase in message
+        for phrase in ("no credits remaining", "credit balance", "insufficient_quota")
+    ):
+        return (
+            "OpenAI API credits are exhausted. Add API credits at "
+            "https://platform.openai.com/settings/organization/billing/ "
+            "and then rerun this command. No trade was executed."
+        )
+    if "invalid_api_key" in code or "incorrect api key" in message:
+        return "OPENAI_API_KEY was rejected. Replace it in .env and try again."
+    return f"OpenAI API request failed: {exc}"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -122,6 +141,8 @@ def main() -> None:
     try:
         model = OpenAIProposalModel()
         result = connection_test(model) if args.test_api else paper_demo(model)
+    except OpenAIError as exc:
+        raise SystemExit(friendly_api_error(exc)) from None
     except (ValueError, RuntimeError) as exc:
         raise SystemExit(str(exc)) from exc
     print(json.dumps(result, indent=2))
