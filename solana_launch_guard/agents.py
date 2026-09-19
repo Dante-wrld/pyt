@@ -61,10 +61,9 @@ class TradeProposal:
                 raise ValueError("copy-trader buys require an attributed leader wallet")
         if self.role is AgentRole.PORTFOLIO_MANAGER and self.action is TradeAction.BUY:
             raise ValueError("portfolio manager cannot originate buys")
-        if self.action is TradeAction.REBUY and (self.role is not AgentRole.PORTFOLIO_MANAGER or self.requested_usd != 0):
-            raise ValueError("REBUY is a zero-dollar portfolio advisory decision")
+        if self.action is TradeAction.REBUY and (self.role not in {AgentRole.PORTFOLIO_MANAGER, AgentRole.OPPORTUNITY_HUNTER} or self.requested_usd != 0):
+            raise ValueError("REBUY is a zero-dollar core-agent advisory decision")
         if self.role is AgentRole.OPPORTUNITY_HUNTER and self.action in {
-            TradeAction.REBUY,
             TradeAction.TAKE_PARTIAL,
             TradeAction.SELL,
         }:
@@ -285,8 +284,8 @@ class AgentModel(Protocol):
 
 
 ROLE_INSTRUCTIONS: dict[AgentRole, str] = {
-    AgentRole.OPPORTUNITY_HUNTER: "Find new candidates; never manage existing positions or execute trades.",
-    AgentRole.PORTFOLIO_MANAGER: "Manage owned positions and exits; review verified net-loss sales for advisory rebuy opportunities. REBUY is advisory only and never submits an order.",
+    AgentRole.OPPORTUNITY_HUNTER: "Review fresh new and older watched Solana candidates and verified net-loss recovery reviews. REBUY is zero-dollar advisory only; never manage owned positions or execute trades.",
+    AgentRole.PORTFOLIO_MANAGER: "Manage owned positions and exits; review verified net-loss sales for advisory rebuy opportunities. REBUY is advisory only and never submits an order. Consider current gain, peak drawdown, momentum, liquidity, and sellability rather than relying on one fixed profit multiple.",
     AgentRole.COPY_TRADER: "Discover and score traders, then selectively propose attributed copies; never blindly mirror.",
 }
 
