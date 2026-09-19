@@ -131,6 +131,30 @@ def test_shadow_buy_updates_reported_cash_and_sell_approval_does_not(tmp_path, m
     assert book.public_status()["agents"][0]["cash_usd"] == 25
 
 
+def test_manager_reads_loss_reviews_but_cannot_execute_rebuy(tmp_path, monkeypatch):
+    portfolio = tmp_path / "portfolio.json"
+    review = {"sale_id": "tx1", "token_address": "B" * 32,
+              "decision": "REBUY REVIEW", "cost_usd": 5, "proceeds_usd": 3}
+    portfolio.write_text(json.dumps({"generated_at": time.time(),
+                                     "signals": [], "loss_sale_reviews": [review]}))
+    monkeypatch.setenv("RECOMMENDATION_SNAPSHOT_PATH", str(tmp_path / "missing.json"))
+    monkeypatch.setenv("PORTFOLIO_SNAPSHOT_PATH", str(portfolio))
+    monkeypatch.setenv("AGENT_DECISION_LOG_PATH", str(tmp_path / "decisions.jsonl"))
+    book = CapitalBook(tmp_path / "capital.json")
+    book.initialize(30)
+    class Model:
+        def propose(self, *, role, context):
+            assert context["loss_sale_reviews"] == [review]
+            return {"action": "REBUY", "mint": "B" * 32,
+                    "requested_usd": 0, "confidence": 0.9, "thesis": "review only"}
+    result = shadow_once(Model(), book, core_only=True)
+    manager = result["agents"][0]
+    assert manager["proposal"]["action"] == "REBUY"
+    assert manager["arbitration"]["approved"] is False
+    assert manager["shadow_fill"] is None
+    assert result["capital"]["agents"][1]["cash_usd"] == 30
+
+
 def test_solana_opportunity_skips_other_chains_and_avoid():
     ethereum = {"chain": "ethereum", "decision": "BUY NOW", "mint": "0x" + "a" * 40}
     avoid = {"chain": "solana", "decision": "AVOID", "mint": "B" * 32}

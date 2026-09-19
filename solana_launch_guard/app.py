@@ -43,6 +43,7 @@ from .multichain import (
     HyperCoreWatcher,
 )
 from .notifications import DecisionNotifier, PortfolioNotifier, PushoverClient
+from .rebuy_assessment import auto_rebuy_recovery_assessment
 from .portfolio import (
     OwnedHolding,
     PortfolioAdvisor,
@@ -98,107 +99,6 @@ def auto_buy_discovery_rejection(
     if age > settings.auto_buy_signal_max_age_seconds:
         return "signal is stale"
     return None
-
-
-def auto_rebuy_recovery_assessment(
-    watch: Mapping[str, Any],
-    quote: MarketQuote | None,
-    settings: Settings,
-    *,
-    now: float | None = None,
-) -> tuple[bool, str, dict[str, float]]:
-    """Evaluate an opt-in post-sale recovery without predicting a rebound."""
-    observed_at = time.time() if now is None else now
-    age = observed_at - float(watch["sold_at_epoch"])
-    if age < settings.auto_rebuy_cooldown_seconds:
-        remaining = settings.auto_rebuy_cooldown_seconds - age
-        return False, f"cooldown has {remaining:.0f}s remaining", {}
-    if age > settings.auto_rebuy_max_watch_seconds:
-        return False, "recovery watch expired", {"age_seconds": age}
-    if quote is None or quote.price_usd is None or quote.price_usd <= 0:
-        return False, "USD market quote unavailable", {}
-
-    price = quote.price_usd
-    exit_price = float(watch["exit_price_usd"])
-    low = min(float(watch["lowest_price_usd"]), price)
-    drop_pct = max(0.0, (1 - low / exit_price) * 100)
-    rebound_pct = max(0.0, (price / low - 1) * 100)
-    discount_pct = (1 - price / exit_price) * 100
-    momentum_pct = quote.price_change_m5_pct or 0.0
-    ratio = quote.buy_sell_ratio
-    liquidity = quote.liquidity_usd or 0.0
-    exit_liquidity = float(watch["exit_liquidity_usd"] or 0.0)
-    retention_pct = (
-        liquidity / exit_liquidity * 100 if exit_liquidity > 0 else 100.0
-    )
-    previous_price = watch.get("last_price_usd")
-    rising = previous_price is not None and price > float(previous_price)
-    metrics = {
-        "age_seconds": age,
-        "price_usd": price,
-        "lowest_price_usd": low,
-        "drop_pct": drop_pct,
-        "rebound_pct": rebound_pct,
-        "entry_discount_pct": discount_pct,
-        "momentum_pct": momentum_pct,
-        "buy_sell_ratio": ratio,
-        "liquidity_usd": liquidity,
-        "liquidity_retention_pct": retention_pct,
-    }
-
-    rejections: list[str] = []
-    if drop_pct < settings.auto_rebuy_min_drop_pct:
-        rejections.append(
-            f"drop {drop_pct:.1f}% is below "
-            f"{settings.auto_rebuy_min_drop_pct:.1f}%"
-        )
-    if rebound_pct < settings.auto_rebuy_min_rebound_pct:
-        rejections.append(
-            f"rebound {rebound_pct:.1f}% is below "
-            f"{settings.auto_rebuy_min_rebound_pct:.1f}%"
-        )
-    if discount_pct < settings.auto_rebuy_min_entry_discount_pct:
-        rejections.append(
-            f"entry discount {discount_pct:.1f}% is below "
-            f"{settings.auto_rebuy_min_entry_discount_pct:.1f}%"
-        )
-    if momentum_pct < settings.auto_rebuy_min_momentum_pct:
-        rejections.append(
-            f"5m momentum {momentum_pct:.1f}% is below "
-            f"{settings.auto_rebuy_min_momentum_pct:.1f}%"
-        )
-    if ratio < settings.auto_rebuy_min_buy_sell_ratio:
-        rejections.append(
-            f"buyer/seller ratio {ratio:.2f}x is below "
-            f"{settings.auto_rebuy_min_buy_sell_ratio:.2f}x"
-        )
-    if quote.buys_m5 < settings.auto_rebuy_min_buys_m5:
-        rejections.append(
-            f"5m buys {quote.buys_m5} are below "
-            f"{settings.auto_rebuy_min_buys_m5}"
-        )
-    if liquidity < settings.auto_rebuy_min_liquidity_usd:
-        rejections.append(
-            f"liquidity ${liquidity:,.0f} is below "
-            f"${settings.auto_rebuy_min_liquidity_usd:,.0f}"
-        )
-    if retention_pct < settings.auto_rebuy_min_liquidity_retention_pct:
-        rejections.append(
-            f"liquidity retention {retention_pct:.1f}% is below "
-            f"{settings.auto_rebuy_min_liquidity_retention_pct:.1f}%"
-        )
-    if not rising:
-        rejections.append("price is not rising versus the prior poll")
-    if rejections:
-        return False, "; ".join(rejections), metrics
-    return (
-        True,
-        (
-            f"recovery confirmed: {drop_pct:.1f}% drop, "
-            f"{rebound_pct:.1f}% rebound, {momentum_pct:+.1f}% momentum"
-        ),
-        metrics,
-    )
 
 
 def _is_stock_token_symbol(
@@ -1178,6 +1078,7 @@ class LaunchGuard:
 
                 if self.settings.auto_rebuy_enabled:
                     await self._monitor_auto_rebuys(balances_by_mint, rpc)
+                await self._monitor_loss_sales(balances_by_mint)
 
                 semaphore = asyncio.Semaphore(5)
 
@@ -1291,6 +1192,7 @@ class LaunchGuard:
                         signals,
                         wallet=wallet,
                         poll_seconds=self.settings.portfolio_poll_seconds,
+                        loss_sale_reviews=self.store.loss_sale_reviews(),
                         execution_mode=(
                             "live"
                             if self.auto_seller is not None
@@ -1314,6 +1216,46 @@ class LaunchGuard:
                 )
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 30)
+
+    async def _monitor_loss_sales(
+        self, balances_by_mint: Mapping[str, SolanaTokenHolding]
+    ) -> None:
+        reviews = self.store.loss_sale_reviews()
+        if not reviews:
+            return
+        semaphore = asyncio.Semaphore(5)
+
+        async def observe(mint: str) -> tuple[str, MarketQuote | None]:
+            async with semaphore:
+                return mint, await self.oracle.quote(mint, chain="solana")
+
+        quotes = dict(await asyncio.gather(*(
+            observe(mint) for mint in {row["token_address"] for row in reviews}
+        )))
+        now = time.time()
+        for review in reviews:
+            mint = str(review["token_address"])
+            if mint in balances_by_mint and balances_by_mint[mint].raw_amount > 0:
+                self.store.reset_loss_sale_review(
+                    str(review["sale_id"]), "wallet already holds this token"
+                )
+                continue
+            quote = quotes[mint]
+            if quote is None or quote.price_usd is None or quote.price_usd <= 0:
+                self.store.reset_loss_sale_review(
+                    str(review["sale_id"]), "fresh USD market quote unavailable"
+                )
+                continue
+            watch = {**review,
+                     "exit_price_usd": float(review["proceeds_usd"]) / float(review["quantity"])}
+            qualifying, reason, _ = auto_rebuy_recovery_assessment(
+                watch, quote, self.settings, now=now, advisory=True
+            )
+            self.store.update_loss_sale_review(
+                str(review["sale_id"]), price_usd=quote.price_usd,
+                qualified=qualifying, reason=reason,
+                confirmation_required=self.settings.auto_rebuy_confirmation_polls,
+            )
 
     async def _maybe_auto_sell(
         self, signal: PortfolioSignal, balance: SolanaTokenHolding
@@ -1588,6 +1530,29 @@ class LaunchGuard:
             reinvest_pct=self.settings.auto_buy_reinvest_profit_pct,
             managed_complete=managed_complete,
         )
+        allocated_cost_usd = (
+            reinvestment["allocated_cost_usdc_raw"] / 1_000_000
+            if reinvestment is not None else None
+        )
+        if (
+            allocated_cost_usd is None and holding is not None
+            and holding.price_currency == "USD" and holding.cost_amount is not None
+            and holding.quantity > 0 and balance.raw_amount > 0
+            and abs(holding.quantity - balance.amount) / balance.amount < 0.01
+        ):
+            allocated_cost_usd = (
+                holding.cost_amount * receipt.input_amount_raw / balance.raw_amount
+            )
+        sale_proceeds_usd = receipt.output_amount_raw / 1_000_000
+        if allocated_cost_usd is not None and allocated_cost_usd > sale_proceeds_usd:
+            self.store.record_loss_sale(
+                sale_id=receipt.signature, token_address=intent.mint,
+                symbol=intent.symbol, cost_usd=allocated_cost_usd,
+                proceeds_usd=sale_proceeds_usd,
+                quantity=receipt.input_amount_raw / (10 ** intent.decimals),
+                sold_at_epoch=time.time(), source="confirmed_auto_sell",
+                exit_liquidity_usd=signal.liquidity_usd,
+            )
         if (
             self.settings.auto_rebuy_enabled
             and source == "portfolio signal"
@@ -2673,6 +2638,24 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--show-all-holdings",
+        action="store_true",
+        help="print every holding in the latest portfolio snapshot, including small and unpriced positions",
+    )
+    parser.add_argument("--record-loss-sale-mint", metavar="MINT",
+                        help="record a verified manual Solana sale at a net loss for advisory rebound review")
+    parser.add_argument("--sale-id", help="unique transaction signature or local ID for the sale")
+    parser.add_argument("--sale-symbol", help="symbol of the sold token")
+    parser.add_argument("--sale-cost-usd", type=float,
+                        help="allocated USD cost including buy fees")
+    parser.add_argument("--sale-proceeds-usd", type=float,
+                        help="net USD proceeds after sell fees")
+    parser.add_argument("--sale-quantity", type=float, help="token amount sold")
+    parser.add_argument("--sale-time-epoch", type=float,
+                        help="actual sale timestamp in Unix seconds (default: now)")
+    parser.add_argument("--loss-sales-status", action="store_true",
+                        help="show recorded net-loss sales and portfolio manager rebound reviews")
+    parser.add_argument(
         "--store-fomo-solana-key",
         action="store_true",
         help=(
@@ -3390,11 +3373,31 @@ def main() -> None:
             args.portfolio_parent_pid,
         )
         return
+    if args.show_all_holdings:
+        snapshot = read_portfolio_snapshot(settings.portfolio_snapshot_path)
+        if snapshot is None:
+            raise SystemExit("No portfolio snapshot found; run the portfolio monitor first.")
+        print(format_portfolio_dashboard(snapshot, color=sys.stdout.isatty(), show_all=True))
+        return
 
     store = SQLiteStore(settings.database_path)
     guard: LaunchGuard | None = None
     try:
-        if args.arm_auto_sell_mint:
+        if args.record_loss_sale_mint:
+            if (not args.sale_id or not args.sale_symbol or
+                    args.sale_cost_usd is None or args.sale_proceeds_usd is None or
+                    args.sale_quantity is None):
+                raise ValueError("recording a loss requires --sale-id, --sale-symbol, "
+                                 "--sale-cost-usd, --sale-proceeds-usd, and --sale-quantity")
+            print(json.dumps(store.record_loss_sale(
+                sale_id=args.sale_id, token_address=args.record_loss_sale_mint,
+                symbol=args.sale_symbol, cost_usd=args.sale_cost_usd,
+                proceeds_usd=args.sale_proceeds_usd, quantity=args.sale_quantity,
+                sold_at_epoch=args.sale_time_epoch or time.time(),
+            ), indent=2))
+        elif args.loss_sales_status:
+            print(json.dumps(store.loss_sale_reviews(), indent=2))
+        elif args.arm_auto_sell_mint:
             store.arm_auto_sell(args.arm_auto_sell_mint)
             LOGGER.info("Auto-sell armed for %s", args.arm_auto_sell_mint)
         elif args.disarm_auto_sell_mint:

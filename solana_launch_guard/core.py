@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 import time
 from dataclasses import dataclass, field
@@ -456,6 +457,25 @@ class SQLiteStore:
                 below_sell_minimum INTEGER NOT NULL DEFAULT 0,
                 updated_at TEXT NOT NULL,
                 PRIMARY KEY (chain, token_address)
+            );
+
+            CREATE TABLE IF NOT EXISTS loss_sale_reviews (
+                sale_id TEXT PRIMARY KEY,
+                chain TEXT NOT NULL,
+                token_address TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                source TEXT NOT NULL,
+                cost_usd REAL NOT NULL,
+                proceeds_usd REAL NOT NULL,
+                quantity REAL NOT NULL,
+                sold_at_epoch REAL NOT NULL,
+                exit_liquidity_usd REAL,
+                lowest_price_usd REAL NOT NULL,
+                last_price_usd REAL,
+                confirmation_count INTEGER NOT NULL DEFAULT 0,
+                decision TEXT NOT NULL DEFAULT 'REBUY WATCH',
+                reason TEXT NOT NULL DEFAULT 'waiting for market evidence',
+                updated_at TEXT NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS auto_sell_policies (
@@ -929,6 +949,82 @@ class SQLiteStore:
             "FROM portfolio_states"
         ).fetchall()
         return [dict(row) for row in rows]
+
+    def record_loss_sale(
+        self, *, sale_id: str, token_address: str, symbol: str,
+        cost_usd: float, proceeds_usd: float, quantity: float,
+        sold_at_epoch: float, source: str = "manual",
+        exit_liquidity_usd: float | None = None,
+    ) -> dict[str, Any]:
+        if not sale_id.strip() or not token_address.strip() or not symbol.strip():
+            raise ValueError("sale ID, mint, and symbol are required")
+        if not all(math.isfinite(v) for v in (cost_usd, proceeds_usd, quantity, sold_at_epoch)):
+            raise ValueError("sale amounts and time must be finite")
+        if not 0 < proceeds_usd < cost_usd or quantity <= 0 or sold_at_epoch <= 0:
+            raise ValueError("a net-loss sale requires positive quantity, proceeds, and cost above proceeds")
+        if exit_liquidity_usd is not None and (not math.isfinite(exit_liquidity_usd) or exit_liquidity_usd < 0):
+            raise ValueError("exit liquidity must be nonnegative and finite")
+        existing = self.connection.execute(
+            "SELECT * FROM loss_sale_reviews WHERE sale_id = ?", (sale_id,)
+        ).fetchone()
+        if existing is not None:
+            if (existing["token_address"] != token_address or
+                    float(existing["cost_usd"]) != cost_usd or
+                    float(existing["proceeds_usd"]) != proceeds_usd or
+                    float(existing["quantity"]) != quantity):
+                raise ValueError("sale ID is already recorded with different amounts")
+            return dict(existing)
+        self.connection.execute(
+            """INSERT INTO loss_sale_reviews
+            (sale_id, chain, token_address, symbol, source, cost_usd,
+             proceeds_usd, quantity, sold_at_epoch, exit_liquidity_usd,
+             lowest_price_usd, updated_at)
+            VALUES (?, 'solana', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (sale_id, token_address, symbol, source, cost_usd, proceeds_usd,
+             quantity, sold_at_epoch, exit_liquidity_usd,
+             proceeds_usd / quantity, utc_now()),
+        )
+        self.connection.commit()
+        return dict(self.connection.execute(
+            "SELECT * FROM loss_sale_reviews WHERE sale_id = ?", (sale_id,)
+        ).fetchone())
+
+    def loss_sale_reviews(self) -> list[dict[str, Any]]:
+        return [dict(row) for row in self.connection.execute(
+            "SELECT * FROM loss_sale_reviews ORDER BY sold_at_epoch DESC"
+        ).fetchall()]
+
+    def update_loss_sale_review(
+        self, sale_id: str, *, price_usd: float, qualified: bool,
+        reason: str, confirmation_required: int,
+    ) -> dict[str, Any]:
+        row = self.connection.execute(
+            "SELECT * FROM loss_sale_reviews WHERE sale_id = ?", (sale_id,)
+        ).fetchone()
+        if row is None or not 0 < price_usd or not math.isfinite(price_usd):
+            raise ValueError("loss review requires a recorded sale and positive quote")
+        count = int(row["confirmation_count"]) + 1 if qualified else 0
+        decision = "REBUY REVIEW" if count >= confirmation_required else "REBUY WATCH"
+        self.connection.execute(
+            """UPDATE loss_sale_reviews SET lowest_price_usd = ?,
+            last_price_usd = ?, confirmation_count = ?, decision = ?,
+            reason = ?, updated_at = ? WHERE sale_id = ?""",
+            (min(float(row["lowest_price_usd"]), price_usd), price_usd,
+             count, decision, reason, utc_now(), sale_id),
+        )
+        self.connection.commit()
+        return dict(self.connection.execute(
+            "SELECT * FROM loss_sale_reviews WHERE sale_id = ?", (sale_id,)
+        ).fetchone())
+
+    def reset_loss_sale_review(self, sale_id: str, reason: str) -> None:
+        self.connection.execute(
+            """UPDATE loss_sale_reviews SET confirmation_count = 0,
+            decision = 'REBUY WATCH', reason = ?, last_price_usd = NULL,
+            updated_at = ? WHERE sale_id = ?""",
+            (reason, utc_now(), sale_id),
+        )
+        self.connection.commit()
 
     def arm_auto_sell(
         self,

@@ -79,6 +79,17 @@ def test_agent_roles_cannot_cross_mandates():
         proposal(action=TradeAction.SELL).validate()
 
 
+def test_portfolio_rebuy_is_zero_dollar_advisory():
+    review = proposal(role=AgentRole.PORTFOLIO_MANAGER,
+                      action=TradeAction.REBUY, requested_usd=0)
+    review.validate()
+    result = RiskArbiter().evaluate(review, risk())
+    assert not result.approved and result.approved_usd == 0
+    with pytest.raises(ValueError, match="zero-dollar"):
+        proposal(role=AgentRole.PORTFOLIO_MANAGER,
+                 action=TradeAction.REBUY, requested_usd=5).validate()
+
+
 def test_entry_only_limits_do_not_trap_risk_reducing_sell():
     result = RiskArbiter().evaluate(
         proposal(

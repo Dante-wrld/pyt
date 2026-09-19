@@ -101,3 +101,25 @@ def test_phone_alert_suppressed_below_floor_even_for_exit_warning():
     signal = PortfolioAdvisor().evaluate(_holding(), _quote(price_usd=7))
     assert asyncio.run(notifier.maybe_send(replace(signal, current_value_usd=1.99))) is False
     assert client.calls == 0
+
+
+def test_compact_holdings_screen_keeps_complete_snapshot():
+    priced = PortfolioAdvisor().evaluate(_holding(), _quote(price_usd=9.5))
+    small = PortfolioAdvisor().evaluate(
+        OwnedHolding("solana", "Mint222", "SMALL", 0.1, None, "USD"),
+        _quote(mint="Mint222", symbol="SMALL", price_usd=9.5),
+    )
+    unpriced = PortfolioAdvisor().evaluate(
+        OwnedHolding("solana", "Mint333", "MISSING", 1), None
+    )
+    snapshot = build_portfolio_snapshot(
+        [priced, small, unpriced], wallet=None, poll_seconds=15,
+        loss_sale_reviews=[{"sale_id": "sale1", "decision": "REBUY WATCH"}],
+    )
+    assert len(snapshot["signals"]) == 3
+    assert len(snapshot["loss_sale_reviews"]) == 1
+    compact = format_portfolio_dashboard(snapshot, color=False)
+    complete = format_portfolio_dashboard(snapshot, color=False, show_all=True)
+    assert "SMALL" not in compact and "MISSING" not in compact
+    assert "SMALL" in complete and "MISSING" in complete
+    assert "2 small or unpriced holdings hidden" in compact
