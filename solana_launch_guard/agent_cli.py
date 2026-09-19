@@ -352,6 +352,17 @@ def shadow_once(model: OpenAIProposalModel | None, book: CapitalBook, *, portfol
             AgentRecord(agent_id, role),
             {
                 "mode": "shadow",
+                "strategy_research": {
+                    "status": "RESEARCH_ONLY",
+                    "lessons": [
+                        "Repeated tops are a hypothesis; require a closed-candle support break.",
+                        "A failed retest with bearish engulfing strengthens a bearish review.",
+                        "Time near a peak and volatility can adjust review levels; elapsed time alone is not a sell signal.",
+                        "Half-life decays old evidence; it does not predict token lifespan or rebound probability.",
+                        "A breakout with volume permits add review, not automatic averaging or a buy.",
+                    ],
+                    "constraint": "Do not use unvalidated research as execution authority; existing risk checks govern trades.",
+                },
                 "capital": {
                     "cash_usd": account.cash_usd,
                     "equity_usd": account.equity_usd,
