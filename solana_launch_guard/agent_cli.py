@@ -301,7 +301,14 @@ def shadow_once(model: OpenAIProposalModel | None, book: CapitalBook, *, portfol
         else []
     )
     inputs = (
-        ("hunter-v1", AgentRole.OPPORTUNITY_HUNTER, {"candidate": candidate}),
+        ("hunter-v1", AgentRole.OPPORTUNITY_HUNTER, {
+            "candidate": candidate,
+            "watched_candidates": [item for item in recommendations.get("candidates", [])
+                                   if isinstance(item, dict) and item.get("chain") == "solana"
+                                   and 0 <= time.time() - float(item.get("quoted_at") or 0) <= 15][:20]
+                                  if _snapshot_is_fresh(recommendations) and isinstance(recommendations.get("candidates"), list) else [],
+            "loss_sale_reviews": reviews,
+        }),
         ("portfolio-v1", AgentRole.PORTFOLIO_MANAGER,
          {"owned_position": holding,
           "all_holdings": portfolio.get("signals", []),
@@ -361,6 +368,23 @@ def shadow_once(model: OpenAIProposalModel | None, book: CapitalBook, *, portfol
                 quote_age_seconds=quote_age,
             ),
         )
+        if role is AgentRole.OPPORTUNITY_HUNTER and proposal.action is TradeAction.BUY:
+            selected = next((item for item in context.get("watched_candidates", [])
+                             if item.get("mint") == proposal.mint), None)
+            if selected is None:
+                arbitration = Arbitration(False, 0, ("buy mint lacks a fresh watched quote",))
+            elif selected.get("decision") not in {"BUY NOW", "BUY ZONE"}:
+                arbitration = Arbitration(False, 0, ("candidate has no final buy decision",))
+            else:
+                arbitration = coordinator.arbiter.evaluate(
+                    proposal,
+                    RiskSnapshot(
+                        mode="shadow", equity_usd=account.equity_usd,
+                        open_positions=account.open_positions,
+                        liquidity_usd=float(selected.get("liquidity_usd") or 0),
+                        quote_age_seconds=max(0, time.time() - float(selected["quoted_at"])),
+                    ),
+                )
         if proposal.action is TradeAction.REBUY and not any(
             item.get("decision") == "REBUY REVIEW"
             and item.get("token_address") == proposal.mint

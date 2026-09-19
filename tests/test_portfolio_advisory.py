@@ -77,9 +77,21 @@ def test_recovery_across_sell_floor_requires_two_bearish_signals():
 
 def test_partial_sell_below_two_dollars_is_not_recommended():
     holding = OwnedHolding("solana", "Mint111", "TEST", 1, 2, "USD")
-    signal = PortfolioAdvisor().evaluate(holding, _quote(price_usd=3.0))
+    signal = PortfolioAdvisor().evaluate(holding, _quote(price_usd=3.0,
+                                                         price_change_m5_pct=-1,
+                                                         buys_m5=8, sells_m5=12))
     assert signal.decision == "HOLD"
     assert "partial sell" in signal.reason
+
+
+def test_profit_milestone_waits_for_reversal_then_takes_partial():
+    advisor = PortfolioAdvisor(take_partial_pct=100)
+    holding = OwnedHolding("solana", "Mint111", "TEST", 4, 1, "USD")
+    rising = advisor.evaluate(holding, _quote(price_usd=2.2))
+    assert rising.decision == "HOLD"
+    falling = advisor.evaluate(holding, _quote(price_usd=2.1, buys_m5=8,
+                                               sells_m5=12, price_change_m5_pct=-1))
+    assert falling.decision == "TAKE PARTIAL"
 
 
 def test_phone_alert_suppressed_below_floor_even_for_exit_warning():
