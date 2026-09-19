@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 
-LIVE_CONFIRMATION = "SPEND_1_USDC_ON_MAINNET"
+LIVE_CONFIRMATION = "SPEND_5_USDC_ON_MAINNET"
 USDC_DECIMALS = 6
 
 
@@ -22,7 +22,7 @@ def _enabled(name: str, default: bool = False) -> bool:
 
 @dataclass(frozen=True, slots=True)
 class CanaryPolicy:
-    amount_usd: float = 1.0
+    amount_usd: float = 5.0
     minimum_liquidity_usd: float = 50_000.0
     maximum_signal_age_seconds: float = 15.0
     maximum_price_impact_pct: float = 3.0
@@ -30,16 +30,15 @@ class CanaryPolicy:
 
     @classmethod
     def from_env(cls) -> "CanaryPolicy":
-        amount = float(os.getenv("AGENT_LIVE_TEST_AMOUNT_USD", "1"))
-        if not math.isclose(amount, 1.0):
-            raise ValueError("the first live canary is hard-limited to exactly $1")
+        amount = float(os.getenv("AGENT_LIVE_TEST_AMOUNT_USD", "5"))
+        if amount != 5.0:
+            raise ValueError("the supervised live canary is hard-limited to exactly $5")
         return cls(amount_usd=amount)
 
 
 def select_live_candidate(snapshot: dict[str, Any], policy: CanaryPolicy) -> dict[str, Any]:
     generated_at = float(snapshot.get("generated_at") or 0)
-    now = time.time()
-    age = now - generated_at
+    age = time.time() - generated_at
     if generated_at <= 0 or age < 0 or age > policy.maximum_signal_age_seconds:
         raise ValueError("recommendation snapshot is missing or stale")
     candidates = snapshot.get("candidates")
@@ -51,12 +50,6 @@ def select_live_candidate(snapshot: dict[str, Any], policy: CanaryPolicy) -> dic
         if raw.get("chain") not in {None, "solana"}:
             continue
         if raw.get("decision") not in {"BUY NOW", "BUY ZONE"}:
-            continue
-        try:
-            quoted_at = float(raw.get("quoted_at") or 0)
-        except (TypeError, ValueError):
-            continue
-        if quoted_at <= 0 or quoted_at > now or now - quoted_at > policy.maximum_signal_age_seconds:
             continue
         if float(raw.get("liquidity_usd") or 0) < policy.minimum_liquidity_usd:
             continue
@@ -84,11 +77,24 @@ class CanaryJournal:
         return value
 
     def assert_unused(self) -> None:
+        if self.path.with_suffix(self.path.suffix + ".claim").exists():
+            raise ValueError("the one-time live canary has already been attempted; inspect its journal")
         attempts = self.load()["attempts"]
         if attempts:
             raise ValueError(
                 "the one-time live canary has already been attempted; inspect its journal"
             )
+
+    def claim(self, entry: dict[str, Any]) -> None:
+        self.assert_unused()
+        claim_path = self.path.with_suffix(self.path.suffix + ".claim")
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            fd = os.open(claim_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError as exc:
+            raise ValueError("the live canary is already claimed; do not retry") from exc
+        os.close(fd)
+        self.record(entry)
 
     def record(self, entry: dict[str, Any]) -> None:
         payload = self.load()
@@ -110,9 +116,38 @@ def validate_live_environment(*, execute: bool, confirmation: str | None) -> Can
         raise ValueError("missing live setting(s): " + ", ".join(missing))
     if not (_enabled("AUTO_SELL_ENABLED") and _enabled("AUTO_SELL_LIVE")):
         raise ValueError("live canary requires live exit protection")
+    if not _enabled("AUTO_SELL_PORTFOLIO_SIGNALS") or not _enabled("AGENT_LIVE_CANARY_ONLY"):
+        raise ValueError("live canary requires AUTO_SELL_PORTFOLIO_SIGNALS=true and AGENT_LIVE_CANARY_ONLY=true")
+    if _enabled("AUTO_BUY_LIVE") or _enabled("AUTO_REBUY_ENABLED"):
+        raise ValueError("disable AUTO_BUY_LIVE and AUTO_REBUY_ENABLED for the single supervised test")
     if execute and confirmation != LIVE_CONFIRMATION:
         raise ValueError(f"live execution requires --confirm {LIVE_CONFIRMATION}")
     return policy
+
+
+def canary_exit_allowed(mint: str) -> bool:
+    journal = CanaryJournal(os.getenv("AGENT_LIVE_CANARY_PATH", "launch_guard_live_canary.json")).load()
+    return any(row.get("mint") == mint and row.get("status") in {"CONFIRMED_CHAIN", "CONFIRMED"}
+               for row in journal["attempts"])
+
+
+def validate_exit_quote(order: dict[str, Any], *, mint: str, amount_raw: int,
+                        usdc_mint: str, policy: CanaryPolicy) -> float:
+    if order.get("inputMint") != mint or order.get("outputMint") != usdc_mint:
+        raise ValueError("exit quote mint mismatch")
+    if int(order.get("inAmount") or 0) != amount_raw or amount_raw <= 0:
+        raise ValueError("exit quote amount mismatch")
+    expected = int(order.get("outAmount") or 0)
+    minimum = int(order.get("otherAmountThreshold") or 0)
+    floor = max(2.0, float(os.getenv("PORTFOLIO_MIN_SELL_VALUE_USD", "2")),
+                float(os.getenv("AUTO_SELL_MIN_VALUE_USD", "2")))
+    if not math.isfinite(floor) or minimum < math.ceil(floor * 1_000_000) or minimum > expected:
+        raise ValueError("exit quote is below the configured sell minimum or invalid")
+    impact = float(order["priceImpact"]) if order.get("priceImpact") is not None else float(order.get("priceImpactPct", "nan")) * 100
+    slippage = max(float(order.get("slippageBps") or 0), (expected - minimum) * 10_000 / expected)
+    if not math.isfinite(impact) or abs(impact) > policy.maximum_price_impact_pct or not math.isfinite(slippage) or slippage > policy.maximum_slippage_bps:
+        raise ValueError("exit quote impact or slippage exceeds test limits")
+    return minimum / 1_000_000
 
 
 async def run_live_canary(
@@ -153,7 +188,7 @@ async def run_live_canary(
     amount_raw = int(policy.amount_usd * (10**USDC_DECIMALS))
     usdc = await rpc.token_balance(wallet, USDC_MINT)
     if usdc.raw_amount < amount_raw:
-        raise ValueError("wallet USDC balance is below $1")
+        raise ValueError("wallet USDC balance is below $5")
     existing = await rpc.token_balance(wallet, mint)
     if existing.raw_amount > 0:
         raise ValueError("wallet already holds the candidate; cost-basis mixing blocked")
@@ -173,6 +208,16 @@ async def run_live_canary(
         funding_source="one-time-live-canary",
     )
     preflight = await buyer.preflight(intent, rpc)
+    reverse = await buyer.client.order(
+        input_mint=mint, output_mint=USDC_MINT,
+        amount_raw=preflight.prepared.minimum_output_raw,
+    )
+    exit_minimum = validate_exit_quote(
+        reverse, mint=mint, amount_raw=preflight.prepared.minimum_output_raw,
+        usdc_mint=USDC_MINT, policy=policy,
+    )
+    # Recheck freshness after RPC and quote work; never broadcast from an aged signal.
+    select_live_candidate(snapshot, policy)
     result: dict[str, Any] = {
         "mode": "live-canary-preflight",
         "broadcast": False,
@@ -180,6 +225,8 @@ async def run_live_canary(
         "mint": mint,
         "symbol": symbol,
         "input_usdc": policy.amount_usd,
+        "exit_quote_minimum_usdc": exit_minimum,
+        "exit_check": "quote only; sell simulation requires acquired tokens",
         "liquidity_usd": float(candidate.get("liquidity_usd") or 0),
         "price_impact_pct": preflight.prepared.price_impact_pct,
         "slippage_bps": preflight.prepared.slippage_bps,
@@ -189,7 +236,7 @@ async def run_live_canary(
         return result
 
     attempt = {**result, "attempted_at": time.time(), "status": "PENDING"}
-    journal.record(attempt)
+    journal.claim(attempt)
     store = SQLiteStore(os.getenv("DATABASE_PATH", "launch_guard.db"))
     event_key = intent.event_key
     claimed = store.begin_auto_buy_execution(
