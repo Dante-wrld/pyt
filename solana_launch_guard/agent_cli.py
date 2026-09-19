@@ -90,6 +90,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="review one priced sell recommendation with the portfolio agent only",
     )
     group.add_argument(
+        "--shadow-core-once",
+        action="store_true",
+        help="review only Solana opportunities and priced sell guidance; skip copy trader",
+    )
+    group.add_argument(
         "--live-test-preflight",
         action="store_true",
         help="simulate the one-time $1 mainnet canary; never broadcast",
@@ -214,7 +219,22 @@ def _priced_sell_signal(value: object) -> dict[str, object]:
     return max(eligible, key=lambda x: (priorities[x["decision"]], float(x["current_value_usd"])), default={})
 
 
-def shadow_once(model: OpenAIProposalModel, book: CapitalBook, *, portfolio_sell_only: bool = False) -> dict[str, object]:
+def _solana_opportunity(value: object) -> dict[str, object]:
+    if not isinstance(value, list):
+        return {}
+    for item in value:
+        if (
+            isinstance(item, dict)
+            and item.get("chain") == "solana"
+            and item.get("decision") not in {"AVOID", None}
+            and isinstance(item.get("mint"), str)
+            and 32 <= len(item["mint"]) <= 44
+        ):
+            return item
+    return {}
+
+
+def shadow_once(model: OpenAIProposalModel | None, book: CapitalBook, *, portfolio_sell_only: bool = False, core_only: bool = False) -> dict[str, object]:
     recommendations = _read_json(
         os.getenv("RECOMMENDATION_SNAPSHOT_PATH", "launch_guard_recommendations.json")
     )
@@ -225,8 +245,8 @@ def shadow_once(model: OpenAIProposalModel, book: CapitalBook, *, portfolio_sell
         os.getenv("AGENT_COPY_SIGNAL_PATH", "launch_guard_copy_signals.json")
     )
     accounts = {row.agent_id: row for row in book.accounts()}
-    candidate = _first_dict(recommendations.get("candidates"))
-    holding = _priced_sell_signal(portfolio.get("signals")) if portfolio_sell_only else _first_dict(portfolio.get("signals"))
+    candidate = _solana_opportunity(recommendations.get("candidates")) if core_only else _first_dict(recommendations.get("candidates"))
+    holding = _priced_sell_signal(portfolio.get("signals")) if portfolio_sell_only or core_only else _first_dict(portfolio.get("signals"))
     leader = _first_dict(copy_data.get("signals"))
     inputs = (
         ("hunter-v1", AgentRole.OPPORTUNITY_HUNTER, {"candidate": candidate}),
@@ -237,6 +257,12 @@ def shadow_once(model: OpenAIProposalModel, book: CapitalBook, *, portfolio_sell
         return {"mode": "shadow", "live_execution": False, "agents": [], "reason": "no priced Solana sell recommendation is available", "capital": book.public_status()}
     if portfolio_sell_only:
         inputs = (inputs[1],)
+    if core_only:
+        inputs = tuple(item for item in inputs[:2] if next(iter(item[2].values())))
+        if not inputs:
+            return {"mode": "shadow", "live_execution": False, "agents": [], "reason": "no eligible Solana opportunity or priced sell recommendation", "capital": book.public_status()}
+    if model is None:
+        raise ValueError("an agent model is required for available shadow inputs")
     coordinator = AgentCoordinator(
         model,
         RiskArbiter(
@@ -343,6 +369,9 @@ def main() -> None:
         elif args.shadow_portfolio_sell_once:
             model = OpenAIProposalModel() if _priced_sell_signal(_read_json(os.getenv("PORTFOLIO_SNAPSHOT_PATH", "launch_guard_portfolio.json")).get("signals")) else None
             result = shadow_once(model, book, portfolio_sell_only=True)
+        elif args.shadow_core_once:
+            model = OpenAIProposalModel()
+            result = shadow_once(model, book, core_only=True)
         elif args.live_test_preflight or args.live_test_execute:
             from .agent_live_test import run_live_canary
 
