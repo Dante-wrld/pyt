@@ -103,12 +103,12 @@ def build_parser() -> argparse.ArgumentParser:
     group.add_argument(
         "--live-test-preflight",
         action="store_true",
-        help="simulate the one-time $1 mainnet canary; never broadcast",
+        help="simulate the one-time $5 mainnet canary; never broadcast",
     )
     group.add_argument(
         "--live-test-execute",
         action="store_true",
-        help="rerun simulation and broadcast the one-time $1 mainnet canary",
+        help="rerun simulation and broadcast the one-time $5 mainnet canary",
     )
     parser.add_argument(
         "--confirm",
