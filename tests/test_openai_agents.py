@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from solana_launch_guard.agents import AgentRole
-from solana_launch_guard.agent_cli import build_parser
+from solana_launch_guard.agent_cli import build_parser, friendly_api_error
 from solana_launch_guard.openai_agents import (
     OpenAIProposalModel,
     ProposalOutput,
@@ -66,3 +66,10 @@ def test_agent_cli_requires_one_safe_command():
     assert build_parser().parse_args(["--test-api"]).test_api is True
     with pytest.raises(SystemExit):
         build_parser().parse_args([])
+
+
+def test_credit_error_is_explained_without_a_traceback_message():
+    error = RuntimeError("You have no credits remaining")
+    message = friendly_api_error(error)
+    assert "credits are exhausted" in message
+    assert "No trade was executed" in message
