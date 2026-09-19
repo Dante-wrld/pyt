@@ -2742,6 +2742,12 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--preflight-owned-auto-sell-decision",
+        choices=("TAKE_PARTIAL", "SELL"),
+        default="TAKE_PARTIAL",
+        help="simulate either the configured partial sale or the entire owned balance",
+    )
+    parser.add_argument(
         "--arm-auto-buy-mint",
         metavar="MINT",
         help="allow one Solana mint to receive one risk-gated automated buy",
@@ -2965,8 +2971,10 @@ async def preflight_auto_sell(
 
 
 async def preflight_owned_auto_sell(
-    settings: Settings, store: SQLiteStore, mint: str
+    settings: Settings, store: SQLiteStore, mint: str, decision: str = "TAKE_PARTIAL"
 ) -> dict[str, Any]:
+    if decision not in {"TAKE_PARTIAL", "SELL"}:
+        raise ValueError("unsupported owned-token preflight decision")
     if not settings.solana_wallet_address:
         raise ValueError(
             "owned-token sell preflight requires SOLANA_WALLET_ADDRESS"
@@ -2995,12 +3003,12 @@ async def preflight_owned_auto_sell(
     planner = PortfolioSignalExitPlanner(
         take_partial_fraction=settings.auto_sell_take_partial_fraction,
         protect_profit_fraction=settings.auto_sell_protect_profit_fraction,
-        exit_warning_fraction=settings.auto_sell_exit_warning_fraction,
+        exit_warning_fraction=1.0,
     )
     intent = planner.plan(
         mint=mint,
         symbol=symbol,
-        decision="TAKE PARTIAL",
+        decision="TAKE PARTIAL" if decision == "TAKE_PARTIAL" else "EXIT WARNING",
         reason="representative wallet-wide sell preflight",
         balance_raw=balance.raw_amount,
         decimals=balance.decimals,
@@ -3029,14 +3037,25 @@ async def preflight_owned_auto_sell(
     else:
         receipt = await seller.preflight(intent, rpc)
     prepared = receipt.prepared
+    minimum_sell_value = max(
+        settings.auto_sell_min_value_usd, settings.portfolio_min_sell_value_usd
+    )
+    minimum_sell_raw = math.ceil(minimum_sell_value * 1_000_000)
+    if prepared.minimum_output_raw < minimum_sell_raw:
+        raise ValueError(
+            f"sell simulation passed, but minimum output "
+            f"${prepared.minimum_output_raw / 1_000_000:.6f} is below "
+            f"the ${minimum_sell_value:.2f} sell floor; no transaction broadcast"
+        )
     return {
         "result": "PASSED",
         "broadcast": receipt.broadcast,
         "wallet": signer.public_key,
         "mint": mint,
         "symbol": symbol,
-        "representative_rule": "TAKE PARTIAL",
-        "configured_fraction": settings.auto_sell_take_partial_fraction,
+        "representative_rule": "TAKE PARTIAL" if decision == "TAKE_PARTIAL" else "SELL",
+        "configured_fraction": settings.auto_sell_take_partial_fraction if decision == "TAKE_PARTIAL" else 1.0,
+        "minimum_sell_value_usd": minimum_sell_value,
         "selected_fraction": prepared.input_amount_raw / balance.raw_amount,
         "adaptive_attempts": receipt.adaptive_attempts,
         "adaptive_rejections": list(receipt.adaptive_rejections),
@@ -3493,6 +3512,7 @@ def main() -> None:
                         settings,
                         store,
                         args.preflight_owned_auto_sell_mint,
+                        args.preflight_owned_auto_sell_decision,
                     )
                 )
             except (ConnectionError, RuntimeError) as exc:
