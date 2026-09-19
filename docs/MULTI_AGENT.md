@@ -56,3 +56,30 @@ To run all three roles against synthetic examples:
 ```
 
 The paper demo can approve a bounded hypothetical proposal in its output, but has no execution adapter and cannot submit it. Real market/trader/portfolio wiring remains a separate shadow-mode phase.
+
+
+## Three $30 shadow accounts (v0.25.0)
+
+Initialize the three isolated agent accounts once:
+
+```bash
+.venv/bin/launch-guard-agents --initialize-capital 30
+```
+
+This creates $30 each for `hunter-v1`, `portfolio-v1`, and `copy-v1` ($90 total virtual capital). Initialization is idempotent and refuses to overwrite an existing book with a different allocation.
+
+Each shadow buy is capped at $5 and each agent may have at most two open shadow positions, so at most $10 of each $30 account can be committed simultaneously. Accounts cannot borrow from one another. View balances with:
+
+```bash
+.venv/bin/launch-guard-agents --capital-status
+```
+
+After the regular Launch Guard monitor has written fresh recommendation and portfolio snapshots, request one real-data shadow decision from each agent:
+
+```bash
+.venv/bin/launch-guard-agents --shadow-once
+```
+
+The Opportunity Hunter reads the highest-ranked recommendation, the Portfolio Manager reads the highest-priority owned-position signal, and the Copy Trader reads `AGENT_COPY_SIGNAL_PATH` when a leader-data adapter supplies it. Missing or stale inputs fail closed through the arbiter. Approved BUY proposals create virtual positions only. Decisions are appended locally to `AGENT_DECISION_LOG_PATH`.
+
+This release does not connect agent approval to Jupiter, a signer, or live execution. The capital file explicitly records `live_execution: false`.
