@@ -89,3 +89,5 @@ This release does not connect agent approval to Jupiter, a signer, or live execu
 Version 0.26 adds a one-attempt, $1 USDC mainnet canary. It is disabled by default and does not make continuous agent execution live. Before any broadcast it requires a fresh BUY NOW/BUY ZONE recommendation, at least $50,000 liquidity, complete entry confirmations, a matching Keychain signer, sufficient USDC, no existing holding in the mint, live exit protection, price impact at or below 3%, slippage at or below 300 bps, and a successful RPC simulation.
 
 Keep `AGENT_LIVE_KILL_SWITCH=true` except during the supervised test. First run `launch-guard-agents --live-test-preflight`. Only after reviewing that output, run `launch-guard-agents --live-test-execute --confirm SPEND_1_USDC_ON_MAINNET`. A local journal makes the canary one-attempt-only and blocks blind retry after an uncertain outcome.
+
+A confirmed canary is written into the normal auto-buy execution ledger, saved as an owned holding with its exact cost basis, and automatically armed for the existing sell engine. Any uncertain execution is frozen for manual reconciliation and cannot be retried blindly.
