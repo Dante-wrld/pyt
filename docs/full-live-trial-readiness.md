@@ -36,9 +36,8 @@ on the Mac before an autonomous session can be called ready.
 
 ## Installation and non-broadcast check
 
-Apply the reviewed patch to a clean checkout of the same `main` revision;
-check the patch with `git apply --check` first. Run the repository's complete
-test suite with its installed dependencies.
+Update a clean checkout with `git pull --ff-only origin main`, then run the
+repository's complete test suite with its installed dependencies.
 
 The following command **only signs and simulates** a $5 USDC-to-WSOL BUY and
 a full SELL of the listed wallet-held mint; it does not start the clock:
