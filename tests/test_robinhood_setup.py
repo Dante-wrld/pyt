@@ -83,10 +83,28 @@ def test_contract_wallet_inspection_is_read_only_and_detects_7702():
         if method == 'eth_call':
             assert params[0]['to'].lower() == account.address.lower()
             assert params[0]['data'].startswith('0x1626ba7e')
-            return '0x1626ba7e'
+            from eth_abi import decode, encode
+            from eth_account.messages import encode_defunct
+            digest, signature = decode(['bytes32', 'bytes'], bytes.fromhex(params[0]['data'][10:]))
+            assert len(signature) == 65
+            assert Account.recover_message(encode_defunct(text='Launch Guard wallet compatibility check'), signature=signature) == account.address
+            return '0x' + encode(['bytes4'], [bytes.fromhex('1626ba7e')]).hex()
         raise AssertionError(method)
     result = inspect_wallet(account.address, rpc, account.key.hex())
     assert result['eip7702_delegation_target'] == '0x' + '34' * 20
     assert result['eip1271_supported'] is True
     assert result['broadcast'] is False
     assert all(method != 'eth_sendRawTransaction' for method, _ in seen)
+
+
+def test_inspection_preserves_delegation_when_signature_call_fails():
+    from solana_launch_guard.robinhood_setup import inspect_wallet
+    account = Account.create()
+    def rpc(method, params):
+        if method == 'eth_call': raise ValueError('provider rejected request')
+        return {'eth_chainId': hex(4663), 'eth_blockNumber': '0x10', 'eth_getCode': '0xef0100' + '34' * 20}[method]
+    result = inspect_wallet(account.address, rpc, account.key.hex())
+    assert result['wallet_type'] == 'EIP7702_DELEGATED_EOA'
+    assert result['eip1271_supported'] is None
+    assert result['signature_probe_status'] == 'RPC_OR_CALL_FAILED'
+    assert result['ready_for_direct_execution'] is False
