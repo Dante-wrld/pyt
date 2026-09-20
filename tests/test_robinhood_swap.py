@@ -33,7 +33,7 @@ def test_pool_key_checks_currency_hook_and_hash():
     with pytest.raises(s.TrialError,match='hash'):
         s.validate_pool(KEY,TOKEN,'0x'+'00'*32)
     hooked=(*KEY[:4],WALLET)
-    with pytest.raises(s.TrialError,match='Hooked'):
+    with pytest.raises(s.TrialError,match=WALLET):
         s.validate_pool(hooked,TOKEN,'0x'+keccak(encode([s.POOL_TYPE],[hooked])).hex())
 
 
