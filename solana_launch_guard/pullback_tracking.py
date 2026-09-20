@@ -44,7 +44,7 @@ class PullbackTracker:
             restored += int(book.restore(candidate))
         self.previous = {
             c.key: self._state(c) for c in book.candidates.values()
-            if c.entry_zone_low is not None
+            if c.entry_zone_low is not None and c.entry_zone_high is not None
         }
         return restored
 
@@ -56,6 +56,10 @@ class PullbackTracker:
             return "confirmation_pending"
         if candidate.decision == "AVOID":
             return "risk_blocked"
+        # Callers only reach here for candidates with both zone bounds set
+        # (see the filter in restore()).
+        assert candidate.entry_zone_low is not None
+        assert candidate.entry_zone_high is not None
         if candidate.current_price < candidate.entry_zone_low:
             return "fell_through_zone"
         if candidate.current_price <= candidate.entry_zone_high:

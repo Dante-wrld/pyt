@@ -854,7 +854,7 @@ class SolanaAutoSeller:
         # JupiterZ RFQ transactions require a market-maker signature that is
         # added only by /execute. Excluding that router keeps preflight fully
         # simulatable without ever calling the execution endpoint.
-        excluded = ("jupiterz",)
+        excluded: tuple[str, ...] = ("jupiterz",)
         for _ in range(3):
             prepared = await self.prepare(intent, exclude_routers=excluded)
             if (
