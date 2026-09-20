@@ -19,6 +19,7 @@ import certifi
 import websockets
 
 from .config import Settings
+from .cost_basis import recover_usdc_basis
 from .core import Launch, PaperBroker, RiskEngine, SQLiteStore
 from .execution import (
     USDC_MINT,
@@ -2783,6 +2784,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="read the one-time sell receipt, confirmed on-chain transaction, and current wallet balances",
     )
     parser.add_argument(
+        "--recover-owned-usdc-basis-mint",
+        metavar="MINT",
+        help="read public wallet history and save an exact USDC-funded cost basis only when unambiguous",
+    )
+    parser.add_argument(
         "--confirm-owned-sell-mint",
         metavar="MINT",
         help="repeat the exact mint to authorize its one-time live sale",
@@ -3287,6 +3293,43 @@ async def verify_owned_sell(
     return result
 
 
+async def recover_owned_usdc_basis(
+    settings: Settings, store: SQLiteStore, mint: str
+) -> dict[str, Any]:
+    if not settings.solana_wallet_address:
+        raise ValueError("SOLANA_WALLET_ADDRESS is required")
+    rpc = SolanaRpc(settings.solana_rpc_http_url)
+    recovered = await recover_usdc_basis(
+        rpc, wallet=settings.solana_wallet_address, mint=mint,
+    )
+    if recovered is None:
+        raise ValueError(
+            "no complete unambiguous USDC-funded basis was found in recent public "
+            "wallet history; no holding data changed"
+        )
+    if not recovered.matches_current_holding:
+        raise ValueError(
+            "recovered purchases do not match the current token quantity; no "
+            "holding data changed"
+        )
+    quote = await DexScreenerOracle().quote(mint)
+    symbol = quote.symbol if quote is not None else mint[:8]
+    store.save_owned_holding(OwnedHolding(
+        chain="solana", token_address=mint, symbol=symbol,
+        quantity=recovered.quantity, entry_price=recovered.entry_price_usd,
+        price_currency="USD", cost_amount=recovered.cost_usd,
+    ))
+    return {
+        "result": "SAVED", "source": "public_wallet_history_usdc_only",
+        "mint": mint, "symbol": symbol, "quantity": recovered.quantity,
+        "cost_usd": recovered.cost_usd,
+        "entry_price_usd": recovered.entry_price_usd,
+        "purchase_transaction_count": len(recovered.signatures),
+        "signatures": list(recovered.signatures),
+        "note": "SOL-funded swaps, transfers, partial sales, and incomplete history are rejected rather than estimated.",
+    }
+
+
 async def preflight_auto_buy(
     settings: Settings, store: SQLiteStore, mint: str
 ) -> dict[str, Any]:
@@ -3743,6 +3786,11 @@ def main() -> None:
         elif args.verify_owned_sell_mint:
             result = asyncio.run(verify_owned_sell(
                 settings, store, args.verify_owned_sell_mint,
+            ))
+            print(json.dumps(result, indent=2))
+        elif args.recover_owned_usdc_basis_mint:
+            result = asyncio.run(recover_owned_usdc_basis(
+                settings, store, args.recover_owned_usdc_basis_mint,
             ))
             print(json.dumps(result, indent=2))
         elif args.arm_auto_buy_mint:
