@@ -134,6 +134,7 @@ class LaunchGuard(
             pullback_zone_min_pct=settings.pullback_zone_min_pct,
             pullback_zone_max_pct=settings.pullback_zone_max_pct,
             pullback_started_pct=settings.pullback_started_pct,
+            pullback_reclaim_pct=settings.pullback_reclaim_pct,
             entry_confirmation_polls=settings.entry_confirmation_polls,
             entry_min_signal_score=settings.entry_min_signal_score,
             entry_min_liquidity_retention_pct=(

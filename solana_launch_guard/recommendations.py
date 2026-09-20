@@ -46,6 +46,7 @@ class RecommendationCandidate:
     decision_reason: str = "waiting for confirmation"
     entry_zone_low: float | None = None
     entry_zone_high: float | None = None
+    pullback_low_price: float | None = None
     peak_price: float = 0.0
     entry_confirmation_count: int = 0
     entry_confirmation_signal: str = ""
@@ -216,6 +217,7 @@ class RecommendationBook:
         pullback_zone_min_pct: float = 4.0,
         pullback_zone_max_pct: float = 6.0,
         pullback_started_pct: float = 2.0,
+        pullback_reclaim_pct: float = 2.0,
         entry_confirmation_polls: int = 3,
         entry_min_signal_score: int = 65,
         entry_min_liquidity_retention_pct: float = 80.0,
@@ -236,6 +238,7 @@ class RecommendationBook:
         self.pullback_zone_min_pct = pullback_zone_min_pct
         self.pullback_zone_max_pct = pullback_zone_max_pct
         self.pullback_started_pct = pullback_started_pct
+        self.pullback_reclaim_pct = pullback_reclaim_pct
         self.entry_confirmation_polls = entry_confirmation_polls
         self.entry_min_signal_score = entry_min_signal_score
         self.entry_min_liquidity_retention_pct = (
@@ -526,6 +529,10 @@ class RecommendationBook:
         zone_high = candidate.entry_zone_high
         if zone_low is not None and zone_high is not None:
             if candidate.current_price > zone_high:
+                # Not currently in a pullback episode; any previously tracked
+                # low belongs to a different dip and must not count toward a
+                # future reclaim.
+                candidate.pullback_low_price = None
                 if (
                     candidate.pullback_from_peak_pct
                     >= self.pullback_started_pct
@@ -543,16 +550,35 @@ class RecommendationBook:
                         "price remains above anchored entry zone",
                     )
                 return
+            # Require a genuine higher low, not just a single favorable poll:
+            # compare against the lowest price seen so far this pullback
+            # episode, then fold the current price into that tracked low.
+            tracked_low = candidate.pullback_low_price
+            reclaim_pct = (
+                (candidate.current_price / tracked_low - 1) * 100
+                if tracked_low
+                else 0.0
+            )
+            candidate.pullback_low_price = min(
+                tracked_low or candidate.current_price, candidate.current_price
+            )
             if zone_low <= candidate.current_price <= zone_high:
-                if (
-                    change is not None
+                blocked = self._entry_block_reason(candidate)
+                if blocked is not None:
+                    self._set_non_entry(
+                        candidate, "WATCH", f"entry blocked: {blocked}"
+                    )
+                elif (
+                    reclaim_pct >= self.pullback_reclaim_pct
+                    and change is not None
                     and change >= 0
                     and candidate.buy_sell_ratio >= self.buy_now_min_ratio
                 ):
                     self._propose_entry(
                         candidate,
                         "BUY ZONE",
-                        "price entered the zone with recovery confirmation",
+                        f"price reclaimed {reclaim_pct:.1f}% off the pullback "
+                        "low with recovery confirmation",
                     )
                 else:
                     self._set_non_entry(

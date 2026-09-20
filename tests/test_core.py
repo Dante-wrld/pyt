@@ -2436,10 +2436,30 @@ def test_pullback_zone_is_anchored_and_alerts_once() -> None:
     assert candidate.entry_zone_low == pytest.approx(initial.price_sol * 0.94)
     assert candidate.entry_zone_high == pytest.approx(initial.price_sol * 0.96)
 
+    touches_low = MarketQuote(
+        mint=initial.mint,
+        symbol=initial.symbol,
+        price_sol=initial.price_sol * 0.94,
+        liquidity_usd=initial.liquidity_usd,
+        market_cap_usd=initial.market_cap_usd,
+        pair_address=initial.pair_address,
+        pair_created_at_ms=initial.pair_created_at_ms,
+        buys_m5=25,
+        sells_m5=25,
+        volume_m5_usd=16_000,
+        price_change_m5_pct=-3,
+    )
+    book.update(touches_low, now=3)
+
+    # A single touch of the zone is not itself a BUY - Launch Guard needs to
+    # see price actually bounce off a tracked low before confirming.
+    assert candidate.decision == "WATCH"
+    assert candidate.pullback_low_price == pytest.approx(initial.price_sol * 0.94)
+
     pullback = MarketQuote(
         mint=initial.mint,
         symbol=initial.symbol,
-        price_sol=initial.price_sol * 0.95,
+        price_sol=initial.price_sol * 0.96,
         liquidity_usd=initial.liquidity_usd,
         market_cap_usd=initial.market_cap_usd,
         pair_address=initial.pair_address,
@@ -2468,6 +2488,121 @@ def test_pullback_zone_is_anchored_and_alerts_once() -> None:
     )
     assert "BUY ZONE ALERT" in output
     assert "decision=BUY ZONE" in output
+
+
+def test_pullback_zone_without_a_bounce_never_confirms() -> None:
+    """A price that drifts sideways/down inside the zone must not BUY ZONE,
+    even with a superficially positive single-poll reading, until it has
+    actually bounced off a tracked low."""
+    initial = market_quote(
+        liquidity=50_000,
+        market_cap=100_000,
+        buys=60,
+        sells=20,
+        volume=15_000,
+        change=15,
+    )
+    book = RecommendationBook(
+        pool_size=10, ttl_seconds=60, entry_confirmation_polls=1
+    )
+    candidate = book.add(initial, CoinIntelligence().score(initial), now=0)
+    assert candidate is not None
+
+    def quote_at(price_multiplier: float, change_pct: float) -> MarketQuote:
+        return MarketQuote(
+            mint=initial.mint,
+            symbol=initial.symbol,
+            price_sol=initial.price_sol * price_multiplier,
+            liquidity_usd=initial.liquidity_usd,
+            market_cap_usd=initial.market_cap_usd,
+            pair_address=initial.pair_address,
+            pair_created_at_ms=initial.pair_created_at_ms,
+            buys_m5=40,
+            sells_m5=20,
+            volume_m5_usd=18_000,
+            price_change_m5_pct=change_pct,
+        )
+
+    # First touch of the zone: nothing to bounce off yet.
+    book.update(quote_at(0.95, 1), now=3)
+    assert candidate.decision == "WATCH"
+    assert candidate.pullback_low_price == pytest.approx(
+        initial.price_sol * 0.95
+    )
+
+    # Drifts to a new, lower low inside the zone - still no bounce.
+    book.update(quote_at(0.94, 1), now=6)
+    assert candidate.decision == "WATCH"
+    assert candidate.pullback_low_price == pytest.approx(
+        initial.price_sol * 0.94
+    )
+
+    # Ticks back up, but only ~1.1% above the *new* (lower) tracked low -
+    # not enough of a bounce to confirm yet.
+    book.update(quote_at(0.95, 1), now=9)
+    assert candidate.decision == "WATCH"
+    assert candidate.pullback_low_price == pytest.approx(
+        initial.price_sol * 0.94
+    )
+
+    # A real bounce (~2.1%) off the tracked low finally confirms.
+    book.update(quote_at(0.96, 1), now=12)
+    assert candidate.decision == "BUY ZONE"
+
+
+def test_pullback_low_resets_after_price_leaves_the_zone_above() -> None:
+    """A stale low from an earlier, unrelated dip must not count toward a
+    later pullback's reclaim once price has re-extended above the zone."""
+    initial = market_quote(
+        liquidity=50_000,
+        market_cap=100_000,
+        buys=60,
+        sells=20,
+        volume=15_000,
+        change=15,
+    )
+    book = RecommendationBook(
+        pool_size=10, ttl_seconds=60, entry_confirmation_polls=1
+    )
+    candidate = book.add(initial, CoinIntelligence().score(initial), now=0)
+    assert candidate is not None
+
+    def quote_at(price_multiplier: float, change_pct: float) -> MarketQuote:
+        return MarketQuote(
+            mint=initial.mint,
+            symbol=initial.symbol,
+            price_sol=initial.price_sol * price_multiplier,
+            liquidity_usd=initial.liquidity_usd,
+            market_cap_usd=initial.market_cap_usd,
+            pair_address=initial.pair_address,
+            pair_created_at_ms=initial.pair_created_at_ms,
+            buys_m5=40,
+            sells_m5=20,
+            volume_m5_usd=18_000,
+            price_change_m5_pct=change_pct,
+        )
+
+    # Touches a very deep low inside the zone.
+    book.update(quote_at(0.90, -5), now=3)
+    assert candidate.pullback_low_price == pytest.approx(
+        initial.price_sol * 0.90
+    )
+
+    # Price fully recovers back above the zone - the pullback episode ends.
+    book.update(quote_at(1.0, 5), now=6)
+    assert candidate.decision in {"WAIT FOR PULLBACK", "PULLBACK STARTED"}
+    assert candidate.pullback_low_price is None
+
+    # A fresh, shallow dip back into the zone should be judged on its own
+    # low, not the earlier 0.90x trough from the unrelated prior dip - a
+    # bounce off *this* low is still required before BUY ZONE fires.
+    book.update(quote_at(0.94, 1), now=9)
+    assert candidate.decision == "WATCH"
+    assert candidate.pullback_low_price == pytest.approx(
+        initial.price_sol * 0.94
+    )
+    book.update(quote_at(0.96, 1), now=12)
+    assert candidate.decision == "BUY ZONE"
 
 
 def test_pullback_started_is_detected_and_alerted_once() -> None:
@@ -3521,10 +3656,25 @@ def test_phone_notifications_deduplicate_and_respect_cooldown(
     assert len(client.messages) == 1
     assert client.messages[0]["priority"] == 0
 
+    touches_low = MarketQuote(
+        mint=initial.mint,
+        symbol=initial.symbol,
+        price_sol=initial.price_sol * 0.94,
+        liquidity_usd=initial.liquidity_usd,
+        market_cap_usd=initial.market_cap_usd,
+        pair_address=initial.pair_address,
+        pair_created_at_ms=initial.pair_created_at_ms,
+        buys_m5=25,
+        sells_m5=25,
+        volume_m5_usd=16_000,
+        price_change_m5_pct=-3,
+    )
+    book.update(touches_low, now=3)
+
     pullback = MarketQuote(
         mint=initial.mint,
         symbol=initial.symbol,
-        price_sol=initial.price_sol * 0.95,
+        price_sol=initial.price_sol * 0.96,
         liquidity_usd=initial.liquidity_usd,
         market_cap_usd=initial.market_cap_usd,
         pair_address=initial.pair_address,
