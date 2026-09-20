@@ -40,7 +40,15 @@ def decide(raw, token, usd):
 
 
 def preflight(token, usd):
-    wallet = address(os.getenv('ROBINHOOD_WALLET_ADDRESS') or os.getenv('EVM_WALLET_ADDRESS') or '')
+    wallet_source = ('ROBINHOOD_WALLET_ADDRESS' if os.getenv('ROBINHOOD_WALLET_ADDRESS')
+                     else 'EVM_WALLET_ADDRESS')
+    wallet_raw = os.getenv(wallet_source)
+    if not wallet_raw:
+        raise swap.TrialError('Set ROBINHOOD_WALLET_ADDRESS to your public Robinhood wallet address in .env')
+    try:
+        wallet = address(wallet_raw)
+    except ValueError:
+        raise swap.TrialError(f'{wallet_source} is not a valid nonzero public EVM address') from None
     rpc = swap.SwapRpc(os.getenv('ROBINHOOD_RPC_URL') or swap.DEFAULT_RPC)
     head = swap.check_network(rpc, wallet)
     market = swap.discover(token)
@@ -74,7 +82,10 @@ def preflight(token, usd):
 
 
 def run(token, usd, execute=False, model=None):
-    token = address(token)
+    try:
+        token = address(token)
+    except ValueError:
+        raise swap.TrialError('--token must be the real public Robinhood token contract address (0x plus 40 hex characters)') from None
     usd = swap.finite_positive(usd)
     if not Decimal('2') <= usd <= Decimal('5'):
         raise swap.TrialError('Robinhood agent sell is limited to $2-$5')
