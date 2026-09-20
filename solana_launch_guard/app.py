@@ -1272,10 +1272,18 @@ class LaunchGuard:
     ) -> None:
         if not self.settings.auto_sell_enabled:
             return
+        trial_extra = False
         if os.getenv("AGENT_LIVE_CANARY_ONLY", "false").strip().lower() in {"true", "1", "yes", "on"}:
             from .agent_live_test import canary_exit_allowed
             if not canary_exit_allowed(signal.token_address):
-                return
+                from .agent_trial_sell import extra_exit_eligible
+                trial_extra = extra_exit_eligible(
+                    signal, balance,
+                    minimum_usd=max(self.settings.auto_sell_min_value_usd,
+                                    self.settings.portfolio_min_sell_value_usd),
+                )
+                if not trial_extra:
+                    return
         if signal.token_address in self.settings.auto_sell_excluded_mints:
             self.store.clear_auto_sell_signal_confirmation(
                 signal.token_address
@@ -1299,6 +1307,8 @@ class LaunchGuard:
         source = "portfolio signal"
         cycle = self.store.auto_sell_cycle(signal.token_address)
         if (
+            not trial_extra
+            and
             policy is not None
             and bool(policy["armed"])
             and holding is not None
@@ -1368,6 +1378,9 @@ class LaunchGuard:
             )
         if intent is None:
             return
+        if trial_extra and intent.amount_raw != balance.raw_amount:
+            LOGGER.info("EXTRA TRIAL SELL SKIPPED %s: full exit required", intent.symbol)
+            return
         minimum_sell_value = max(
             self.settings.auto_sell_min_value_usd,
             self.settings.portfolio_min_sell_value_usd,
@@ -1395,6 +1408,7 @@ class LaunchGuard:
         if (
             source == "portfolio signal"
             and self.settings.auto_sell_adaptive_chunks
+            and not trial_extra
         ):
             batch_key = intent.event_key
             batch = self.store.load_or_create_auto_sell_batch(
@@ -1443,6 +1457,10 @@ class LaunchGuard:
             else:
                 simulation = await self.auto_seller.preflight(intent, rpc)
             prepared = simulation.prepared
+            if trial_extra and (prepared.expected_output_raw > 5_000_000
+                                or prepared.minimum_output_raw < 2_000_000):
+                LOGGER.info("EXTRA TRIAL SELL SKIPPED %s: quote outside $2-$5", intent.symbol)
+                return
             if prepared.minimum_output_raw < math.ceil(minimum_sell_value * 1_000_000):
                 LOGGER.info("AUTO-SELL SKIPPED %s: minimum quoted output below $%.2f",
                             intent.symbol, minimum_sell_value)
@@ -1470,6 +1488,14 @@ class LaunchGuard:
                 exc,
             )
             return
+        if trial_extra:
+            from .agent_live_test import CanaryJournal
+            journal = CanaryJournal(os.getenv("AGENT_LIVE_EXTRA_SELL_PATH", "launch_guard_live_extra_sell.json"))
+            try:
+                journal.claim({"status": "PREPARED", "mint": intent.mint,
+                               "at": time.time(), "maximum_proceeds_usd": 5})
+            except ValueError:
+                return
         claimed = self.store.begin_auto_sell_execution(
             event_key=intent.event_key,
             chain="solana",
