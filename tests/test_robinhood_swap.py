@@ -32,8 +32,8 @@ def test_pool_key_checks_currency_hook_and_hash():
     s.validate_pool(KEY,TOKEN,POOL)
     with pytest.raises(s.TrialError,match='hash'):
         s.validate_pool(KEY,TOKEN,'0x'+'00'*32)
-    hooked=(*KEY[:4],WALLET)
-    with pytest.raises(s.TrialError,match=WALLET):
+    hooked=(*KEY[:4],'0x'+'00'*18+'0084')
+    with pytest.raises(s.TrialError,match='return swap deltas'):
         s.validate_pool(hooked,TOKEN,'0x'+keccak(encode([s.POOL_TYPE],[hooked])).hex())
 
 
@@ -357,3 +357,18 @@ def test_pool_log_scan_reduces_provider_413_range(monkeypatch):
     assert s.pool_key(rpc,TOKEN,{'created':1000,'pool_id':POOL},200)==KEY
     assert seen[:3]==[(100,160),(100,149),(100,124)]
     assert any(first==150 for first,_ in seen)
+
+
+def test_static_hook_without_return_delta_is_permitted_for_simulation():
+    hook='0x63b754e0684c240f7ea4c760ac3dd7b029804a80'
+    key=(s.ZERO,TOKEN,3000,60,hook)
+    pool='0x'+keccak(encode([s.POOL_TYPE],[key])).hex()
+    assert s.validate_pool(key,TOKEN,pool)== 'SIMULATED_HOOK:beforeSwap'
+
+
+def test_hook_return_delta_stays_blocked():
+    hook='0x'+'00'*18+'0084'  # beforeSwap plus beforeSwapReturnsDelta
+    key=(s.ZERO,TOKEN,3000,60,hook)
+    pool='0x'+keccak(encode([s.POOL_TYPE],[key])).hex()
+    with pytest.raises(s.TrialError,match='return swap deltas'):
+        s.validate_pool(key,TOKEN,pool)
