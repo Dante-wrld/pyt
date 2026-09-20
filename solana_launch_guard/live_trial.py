@@ -167,9 +167,40 @@ async def _guarded_exit(*, ledger: LiveTrialLedger, agent: str, mint: str,
         return None
 
 
+EXIT_STUCK_ALERT_STREAK = 3
+
+
+async def _track_exit_block_streak(
+    settings: Settings, exit_block_streaks: dict[str, int], *,
+    owner: str, mint: str, blocked: bool,
+) -> None:
+    """Alert once a mint has failed to exit for several consecutive cycles.
+
+    A single blocked exit is routine (a stale quote, a changed signal) and
+    just retries next cycle without stopping the trial. But retrying
+    silently forever would mean a position that's genuinely stuck could sit
+    unexited for hours with nothing on the operator's phone - unlike the
+    old behavior, which always halted (and always notified) on the first
+    block. This keeps the "don't halt" fix without losing that visibility.
+    """
+    if not blocked:
+        exit_block_streaks.pop(mint, None)
+        return
+    streak = exit_block_streaks.get(mint, 0) + 1
+    exit_block_streaks[mint] = streak
+    if streak == EXIT_STUCK_ALERT_STREAK:
+        await _notify(
+            settings, title="Launch Guard EXIT STUCK",
+            message=f"{owner}: {mint} has failed to exit for "
+                    f"{streak} consecutive cycles; still retrying "
+                    "automatically, not halted.",
+        )
+
+
 async def cycle(*, ledger: LiveTrialLedger, settings: Settings, rpc: SolanaRpc,
                 model, store: SQLiteStore,
-                oracle: DexScreenerOracle) -> None:
+                oracle: DexScreenerOracle,
+                exit_block_streaks: dict[str, int]) -> None:
     ledger.assert_active()
     if ledger.unresolved():
         raise TrialHalted("unresolved order; stop for chain reconciliation")
@@ -224,6 +255,10 @@ async def cycle(*, ledger: LiveTrialLedger, settings: Settings, rpc: SolanaRpc,
                 max_price_impact_pct=min(5, settings.auto_sell_max_price_impact_pct),
                 max_slippage_bps=min(500, settings.auto_sell_max_slippage_bps),
                 current_exit_allowed=lambda mint=mint, signal=signal: _eligible_exit(_read_portfolio(), mint, signal),
+            )
+            await _track_exit_block_streak(
+                settings, exit_block_streaks, owner=owner, mint=mint,
+                blocked=result is None,
             )
             if result is None:
                 continue
@@ -290,6 +325,10 @@ async def cycle(*, ledger: LiveTrialLedger, settings: Settings, rpc: SolanaRpc,
             max_price_impact_pct=min(5, settings.auto_sell_max_price_impact_pct),
             max_slippage_bps=min(500, settings.auto_sell_max_slippage_bps),
         )
+        await _track_exit_block_streak(
+            settings, exit_block_streaks, owner=position["agent"],
+            mint=position["mint"], blocked=result is None,
+        )
         if result is None:
             continue
         await _notify(settings, title=f"Launch Guard {review['state']}",
@@ -343,13 +382,15 @@ async def supervise(*, interval_seconds: int = 30) -> dict:
         rpc = SolanaRpc(settings.solana_rpc_http_url)
         oracle = DexScreenerOracle()
         consecutive_cycle_failures = 0
+        exit_block_streaks: dict[str, int] = {}
         while ledger.status()["status"] == "ACTIVE":
             require_exclusive_trial_flags()
             if monitor.poll() is not None:
                 raise TrialHalted("monitor stopped; trial halted")
             try:
                 await cycle(ledger=ledger, settings=settings, rpc=rpc,
-                            model=model, store=store, oracle=oracle)
+                            model=model, store=store, oracle=oracle,
+                            exit_block_streaks=exit_block_streaks)
                 consecutive_cycle_failures = 0
             except TrialHalted:
                 raise

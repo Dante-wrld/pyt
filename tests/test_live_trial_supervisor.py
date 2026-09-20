@@ -4,7 +4,14 @@ from types import SimpleNamespace
 
 import pytest
 
-from solana_launch_guard.live_trial import BoundedTrialModel, _guarded_exit, _sell_choice, require_exclusive_trial_flags
+from solana_launch_guard.live_trial import (
+    EXIT_STUCK_ALERT_STREAK,
+    BoundedTrialModel,
+    _guarded_exit,
+    _sell_choice,
+    _track_exit_block_streak,
+    require_exclusive_trial_flags,
+)
 from solana_launch_guard.live_trial_ledger import LiveTrialLedger, TrialHalted
 from solana_launch_guard.agents import AgentRole
 
@@ -117,6 +124,43 @@ def test_stale_quote_at_arbitration_blocks_one_sell_without_stopping_trial(tmp_p
     assert decisions[1]["state"] == "EXIT_BLOCKED"
     assert "market quote is stale" in decisions[1]["reason"]
     book.close()
+
+
+def test_exit_stuck_alert_fires_once_after_consecutive_blocks(monkeypatch):
+    notified = []
+
+    async def fake_notify(settings, *, title, message):
+        notified.append((title, message))
+
+    monkeypatch.setattr("solana_launch_guard.live_trial._notify", fake_notify)
+    streaks: dict[str, int] = {}
+    mint = "A" * 44
+
+    for _ in range(EXIT_STUCK_ALERT_STREAK - 1):
+        asyncio.run(_track_exit_block_streak(
+            None, streaks, owner="portfolio-v1", mint=mint, blocked=True,
+        ))
+    assert notified == []
+    assert streaks[mint] == EXIT_STUCK_ALERT_STREAK - 1
+
+    asyncio.run(_track_exit_block_streak(
+        None, streaks, owner="portfolio-v1", mint=mint, blocked=True,
+    ))
+    assert len(notified) == 1
+    assert notified[0][0] == "Launch Guard EXIT STUCK"
+    assert mint in notified[0][1]
+
+    # Further consecutive blocks don't spam another alert.
+    asyncio.run(_track_exit_block_streak(
+        None, streaks, owner="portfolio-v1", mint=mint, blocked=True,
+    ))
+    assert len(notified) == 1
+
+    # A successful exit resets the streak for that mint.
+    asyncio.run(_track_exit_block_streak(
+        None, streaks, owner="portfolio-v1", mint=mint, blocked=False,
+    ))
+    assert mint not in streaks
 
 
 def test_expired_exit_never_suppresses_an_unresolved_order(tmp_path, monkeypatch):
