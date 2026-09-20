@@ -391,3 +391,13 @@ def test_pool_key_reconciles_native_market_label_to_verified_weth(monkeypatch):
     market={'created':1000,'pool_id':pool,'native_currency':s.ZERO}
     assert s.pool_key(rpc,TOKEN,market,100)==key
     assert market['native_currency']==s.WETH
+
+
+def test_market_requests_use_curl_compatible_json_headers(monkeypatch):
+    import io
+    seen=[]
+    monkeypatch.setattr(s,'urlopen',lambda request,**kw:(seen.append(request.headers) or io.BytesIO(b'[]')))
+    assert s._market_pairs(TOKEN)==[]
+    assert seen[0]['User-agent']=='curl/8.0'
+    assert seen[0]['Accept']=='application/json'
+    assert seen[0]['Accept-encoding']=='identity'
