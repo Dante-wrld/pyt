@@ -185,6 +185,15 @@ def pool_key(rpc, token, market, head):
     raise TrialError('Pool Initialize event not found; no fee/hook parameters guessed')
 
 
+def refresh_market(token, key):
+    """Refresh prices while preserving a verified pool's currency identity."""
+    market = discover(token)
+    if key[0] in NATIVE_CURRENCIES and key[1] == token:
+        market['native_currency'] = key[0]
+    validate_pool(key, token, market['pool_id'], market.get('native_currency', ZERO))
+    return market
+
+
 def validate_pool(key, token, pool_id, native=ZERO):
     if '0x' + keccak(encode([POOL_TYPE], [key])).hex() != pool_id:
         raise TrialError('Pool key hash mismatch')
@@ -248,6 +257,12 @@ def swap_data(key, buy, amount, minimum, deadline, permit=None):
         actions = encode(['bytes','bytes[]'], [bytes.fromhex('060c0e'), [swap,
             encode(['address','uint256'], [incoming, amount]),
             encode(['address','address','uint256'], [outgoing, '0x'+'00'*19+'02', minimum])]])
+    elif wrapped and buy:
+        # WRAP_ETH credited the router, so pay the pool's actual open debt from
+        # the router (payerIsUser=false), then sweep any remaining WETH home.
+        actions = encode(['bytes','bytes[]'], [bytes.fromhex('060b0f'), [swap,
+            encode(['address','uint256','bool'], [incoming, 0, False]),
+            encode(['address','uint256'], [outgoing, minimum])]])
     else:
         actions = encode(['bytes','bytes[]'], [bytes.fromhex('060c0f'), [swap,
             encode(['address','uint256'], [incoming, amount]),
@@ -454,8 +469,7 @@ def main():
         head=check_network(rpc,wallet)
         market=discover(token)
         key=pool_key(rpc,token,market,head)
-        market=discover(token)  # Log discovery can take time: refresh sizing before quote.
-        validate_pool(key,token,market['pool_id'])
+        market=refresh_market(token,key)  # Refresh sizing without forgetting the verified currency.
         secret=None
         if args.execute or args.side=='sell':
             secret=keychain().get_password(SERVICE,wallet)
@@ -485,8 +499,7 @@ def main():
         if approval:
             send(rpc,approval,secret,market['native_usd'],journal,'EXACT_APPROVAL')
             # Keep amount fixed after approval; a changed market must never enlarge it.
-            market=discover(token)
-            validate_pool(key,token,market['pool_id'])
+            market=refresh_market(token,key)
             replacement=plan(rpc,wallet,token,args.side,usd,key,market,secret,fixed_amount=planned['amount'])
             if replacement['approval_required']:
                 raise TrialError('Mined approval did not establish the required allowance')
