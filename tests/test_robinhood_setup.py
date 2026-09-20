@@ -70,6 +70,22 @@ def test_rpc_errors_are_actionable_and_redacted(monkeypatch, error, expected):
     assert 'secret' not in str(caught.value)
 
 
+def test_rpc_error_reports_only_validated_revert_selector(monkeypatch):
+    import io
+    import json
+    payload={'jsonrpc':'2.0','id':1,'error':{
+        'code':3,'message':'sensitive-provider-message',
+        'data':'0x08c379a0' + '00'*32,
+    }}
+    monkeypatch.setattr('solana_launch_guard.robinhood_setup.urlopen',
+        lambda *args,**kwargs:io.BytesIO(json.dumps(payload).encode()))
+    with pytest.raises(ValueError) as caught:
+        ReadOnlyRpc('https://provider.invalid/private-token')('eth_call', [])
+    message=str(caught.value)
+    assert 'code 3' in message and 'revert selector 0x08c379a0' in message
+    assert 'sensitive-provider-message' not in message and 'private-token' not in message
+
+
 def test_contract_wallet_inspection_is_read_only_and_detects_7702():
     from solana_launch_guard.robinhood_setup import inspect_wallet
     account = Account.create()
