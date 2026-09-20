@@ -184,6 +184,72 @@ def test_portfolio_owned_exit_can_exceed_five_dollars_without_bypassing_guards(t
     book.close()
 
 
+def test_a_different_trial_session_can_still_sell_a_mint_the_last_session_claimed(tmp_path, monkeypatch):
+    """A stopped-and-restarted trial (a fresh ledger file) must not inherit
+    a stale claim on the shared main execution database from a different
+    trial session that happened to sell the same mint."""
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+
+    class Rpc:
+        async def token_balance(self, owner, mint):
+            return SimpleNamespace(raw_amount=100_000_000, decimals=6)
+        async def get_transaction(self, signature):
+            def row(index, mint, amount):
+                return {"accountIndex": index, "mint": mint, "owner": "synthetic-owner",
+                        "uiTokenAmount": {"amount": str(amount)}}
+            return {"meta": {"err": None,
+                    "preTokenBalances": [row(0, MINT, 100_000_000)],
+                    "postTokenBalances": [row(1, USDC_MINT, 10_000_000)]}}
+
+    class Seller:
+        max_price_impact_pct = 3
+        max_slippage_bps = 300
+        async def preflight(self, plan, rpc):
+            return SimpleNamespace(prepared=SimpleNamespace(input_amount_raw=plan.amount_raw,
+                minimum_output_raw=9_000_000, expected_output_raw=10_000_000,
+                quoted_price_impact_pct=-1.0, quoted_slippage_bps=100))
+        async def execute(self, prepared):
+            return SimpleNamespace(signature="sell-signature", input_amount_raw=100_000_000,
+                                   output_amount_raw=10_000_000)
+
+    class SharedMainStore:
+        """Mimics the real SQLiteStore's one-shot claim (INSERT OR IGNORE on
+        event_key), shared across trial sessions like the real main
+        database actually is - only one LiveTrialLedger per test in the
+        other tests here, so nothing else exercises that sharing."""
+        def __init__(self):
+            self.claimed: set[str] = set()
+
+        def begin_auto_sell_execution(self, *, event_key, **kwargs):
+            if event_key in self.claimed:
+                return False
+            self.claimed.add(event_key)
+            return True
+
+        def complete_auto_sell_execution(self, **kwargs):
+            pass
+
+    shared_store = SharedMainStore()
+    kwargs = dict(
+        agent="portfolio-v1", mint=MINT, symbol="TEST", decision="SELL",
+        position_value_usd=12, quote_age_seconds=2, liquidity_usd=60_000,
+        fraction=1, rpc=Rpc(), seller=Seller(), store=shared_store,
+        wallet="synthetic-owner", current_exit_allowed=lambda: True,
+    )
+
+    first = LiveTrialLedger(tmp_path / "session_one.sqlite")
+    first.start()
+    first_result = asyncio.run(execute_live_exit(ledger=first, **kwargs))
+    assert first_result["proceeds_usdc_raw"] == 10_000_000
+    first.close()
+
+    second = LiveTrialLedger(tmp_path / "session_two.sqlite")
+    second.start()
+    second_result = asyncio.run(execute_live_exit(ledger=second, **kwargs))
+    assert second_result["proceeds_usdc_raw"] == 10_000_000
+    second.close()
+
+
 def test_signal_expiring_during_simulation_never_reserves_or_broadcasts(tmp_path, monkeypatch):
     monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
     book = LiveTrialLedger(tmp_path / "trial.sqlite")

@@ -196,7 +196,13 @@ async def execute_hunter_entry(
     decimals = await rpc.mint_decimals(decision.mint)
     if not 0 <= decimals <= 18:
         raise TrialHalted("unsupported token decimals")
-    intent_key = f"live-trial:hunter:{decision.mint}"
+    # Scoped to this ledger's own session (its filename), not just the mint:
+    # the main execution database's claim on this key is a one-shot,
+    # permanent lock (INSERT OR IGNORE on a PRIMARY KEY), so an unscoped key
+    # would mean a stopped-and-restarted trial inherits a stale claim from a
+    # session that never even used this ledger, and can never retry that
+    # mint again.
+    intent_key = f"live-trial:{ledger.path.stem}:hunter:{decision.mint}"
     intent = BuyIntent(mint=decision.mint,
                        symbol=str(decision.candidate.get("symbol") or decision.mint[:8])[:40],
                        event_key=intent_key, amount_usdc_raw=amount_raw,
@@ -335,9 +341,18 @@ async def execute_live_exit(
     )
     if plan is None:
         raise TrialHalted("no positive token amount can be sold")
-    # The signal identity must be stable across the loop and after restart.
-    # Repeated model calls for the same mint and stage cannot execute twice.
-    key = f"live-trial:{agent}:sell:{mint}:{decision}" + (f":{stage_key}" if stage_key else "")
+    # The signal identity must be stable across the loop and after a restart
+    # of *this* ledger, so repeated model calls for the same mint and stage
+    # cannot execute twice - but it also must not collide with a different
+    # trial session: the main execution database's claim on this key is a
+    # one-shot, permanent lock (INSERT OR IGNORE on a PRIMARY KEY), so an
+    # unscoped key would mean a stopped-and-restarted trial (a fresh ledger
+    # file) inherits a stale claim from a session that never touched this
+    # ledger, and can never retry that mint again. ledger.path.stem scopes
+    # it to this session while staying identical across a restart of the
+    # same ledger file.
+    key = (f"live-trial:{ledger.path.stem}:{agent}:sell:{mint}:{decision}"
+           + (f":{stage_key}" if stage_key else ""))
     existing = ledger.db.execute("SELECT state FROM orders WHERE intent=?", (key,)).fetchone()
     if existing:
         if existing[0] == "CONFIRMED":
