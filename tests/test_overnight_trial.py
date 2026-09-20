@@ -56,6 +56,17 @@ class OvernightTrialTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "at most 8 hours"):
             asyncio.run(watch(hours=9))
 
+    def test_existing_claim_does_not_start_monitor(self):
+        with tempfile.TemporaryDirectory() as folder:
+            journal = Path(folder) / "canary.json"
+            (Path(folder) / "canary.json.claim").write_text("")
+            with patch.dict(os.environ, {"AGENT_LIVE_CANARY_PATH": str(journal), "AUTO_BUY_LIVE": "false"}), \
+                    patch("solana_launch_guard.overnight_trial.validate_live_environment"), \
+                    patch("solana_launch_guard.overnight_trial.subprocess.Popen") as start:
+                with self.assertRaisesRegex(ValueError, "already been attempted"):
+                    asyncio.run(watch())
+                start.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
