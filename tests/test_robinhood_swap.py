@@ -133,7 +133,8 @@ def test_pool_log_scan_is_bounded_and_returns_verified_key(monkeypatch):
 
 
 @pytest.mark.parametrize('execute',[False,True])
-def test_buy_trial_end_to_end_mocked_chain(monkeypatch,tmp_path,capsys,execute):
+@pytest.mark.parametrize('weth',[False,True])
+def test_buy_trial_end_to_end_mocked_chain(monkeypatch,tmp_path,capsys,execute,weth):
     from types import SimpleNamespace
     monkeypatch.chdir(tmp_path)
     account=Account.create()
@@ -144,8 +145,11 @@ def test_buy_trial_end_to_end_mocked_chain(monkeypatch,tmp_path,capsys,execute):
     monkeypatch.setattr(s,'_load_dotenv',lambda:None)
     monkeypatch.setattr(s,'keychain',lambda:SimpleNamespace(get_password=lambda *a:account.key.hex()))
     monkeypatch.setattr(s,'check_network',lambda *a:123)
-    monkeypatch.setattr(s,'pool_key',lambda *a:KEY)
-    monkeypatch.setattr(s,'discover',lambda *a:{'pool_id':POOL,'created':1,'token_usd':Decimal(1),'native_usd':Decimal(2000),'observed_at':time.time()})
+    key=(s.WETH,TOKEN,3000,60,s.ZERO) if weth else KEY
+    pool='0x'+keccak(encode([s.POOL_TYPE],[key])).hex()
+    monkeypatch.setattr(s,'pool_key',lambda *a:key)
+    # The feed keeps labelling the pair as native ETH on every refresh.
+    monkeypatch.setattr(s,'discover',lambda *a:{'pool_id':pool,'native_currency':s.ZERO,'created':1,'token_usd':Decimal(1),'native_usd':Decimal(2000),'observed_at':time.time()})
     calls=[]
     state={'hash':None}
     def rpc(method,params):
@@ -171,7 +175,14 @@ def test_buy_trial_end_to_end_mocked_chain(monkeypatch,tmp_path,capsys,execute):
                 _,buy,amount,_=decode([f'({s.POOL_TYPE},bool,uint128,bytes)'],bytes.fromhex(data[10:]))[0]
                 result=3000000 if buy else 1500000000000000
                 return '0x'+encode(['uint256','uint256'],[result,100000]).hex()
-            if params[0]['to']==s.ROUTER:return '0x'
+            if params[0]['to']==s.ROUTER:
+                commands,inputs,_=decode(['bytes','bytes[]','uint256'],bytes.fromhex(data[10:]))
+                if weth:
+                    assert commands==b'\x0b\x10\x04'
+                    actions,items=decode(['bytes','bytes[]'],inputs[1])
+                    assert actions==bytes.fromhex('060b0f')
+                    assert decode(['address','uint256','bool'],items[1])==(s.WETH,0,False)
+                return '0x'
         raise AssertionError((method,params))
     monkeypatch.setattr(s,'SwapRpc',lambda *a:rpc)
     monkeypatch.setattr(s,'BroadcastRpc',lambda *a:rpc)
@@ -334,6 +345,10 @@ def test_discovery_accepts_weth_and_buy_wraps_before_v4_swap(monkeypatch):
     commands,inputs,_=decode(['bytes','bytes[]','uint256'],bytes.fromhex(s.swap_data(key,True,1000,900,999)[10:]))
     assert commands==b'\x0b\x10\x04'
     assert decode(['address','uint256'],inputs[0])==('0x'+'00'*19+'02',1000)
+    actions,params=decode(['bytes','bytes[]'],inputs[1])
+    assert actions==bytes.fromhex('060b0f')
+    assert decode(['address','uint256','bool'],params[1])==(s.WETH,0,False)
+    assert decode(['address','address','uint256'],inputs[2])==(s.WETH,'0x'+'00'*19+'01',0)
 
 
 def test_weth_sell_unwraps_to_wallet_after_v4_swap():
@@ -391,6 +406,23 @@ def test_pool_key_reconciles_native_market_label_to_verified_weth(monkeypatch):
     market={'created':1000,'pool_id':pool,'native_currency':s.ZERO}
     assert s.pool_key(rpc,TOKEN,market,100)==key
     assert market['native_currency']==s.WETH
+
+
+def test_refresh_keeps_onchain_weth_through_repeated_market_reads(monkeypatch):
+    key=(s.WETH,TOKEN,3000,60,s.ZERO)
+    pool='0x'+keccak(encode([s.POOL_TYPE],[key])).hex()
+    reads=[]
+    def discover(_):
+        market={'pool_id':pool,'native_currency':s.ZERO}
+        reads.append(market)
+        return market
+    monkeypatch.setattr(s,'discover',discover)
+    assert s.refresh_market(TOKEN,key)['native_currency']==s.WETH
+    assert s.refresh_market(TOKEN,key)['native_currency']==s.WETH
+    assert len(reads)==2
+    monkeypatch.setattr(s,'discover',lambda _: {'pool_id':'0x'+'ab'*32,'native_currency':s.ZERO})
+    with pytest.raises(s.TrialError,match='hash mismatch'):
+        s.refresh_market(TOKEN,key)
 
 
 def test_market_requests_use_curl_compatible_json_headers(monkeypatch):

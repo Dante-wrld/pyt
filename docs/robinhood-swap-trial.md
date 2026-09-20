@@ -54,9 +54,9 @@ repeatedly without consuming the execution attempt.
 - Robinhood chain ID 4663; EOA or EIP-7702 delegated EOA with matching local key.
 - Fixed Uniswap UniversalRouter 2.1.2 address and PoolManager; runtime length and
   router/quoter PoolManager checks, not a full bytecode equivalence proof.
-- Native ETH/token v4 pools, sorted currencies, no hooks, static fee up to 1%.
+- Verified native ETH/token or official WETH/token v4 pools with sorted currencies. Known WETH pools wrap ETH for buys and unwrap WETH for sells. Only static-fee hooks without swap return-delta permissions can proceed to exact simulation.
 - PoolKey recovered from a bounded scan of actual PoolManager Initialize logs;
-  hash must equal the discovered pool ID. No guessed fees or hook addresses.
+  hash must equal the discovered pool ID. When refreshed market data calls the official WETH address native ETH, the verified on-chain PoolKey remains authoritative for execution. No guessed fees, pool keys, or hook addresses.
 - At least $50,000 reported pool liquidity; public discovery data refreshed
   before sizing. Market-data availability/accuracy is not guaranteed.
 - Quote within 3% of market valuation; 1% minimum-output slippage limit;
@@ -87,6 +87,7 @@ v4-periphery is `545a5d2a87228167edde48f3b9eda122d1e3c4d6`.
 - [Deployed Robinhood addresses](https://github.com/Uniswap/universal-router/blob/64027f3372aa235734207c4e05667204f6f927e1/deploy-addresses/robinhood.json)
 - [Exact router interface](https://github.com/Uniswap/v4-periphery/blob/545a5d2a87228167edde48f3b9eda122d1e3c4d6/src/interfaces/IV4Router.sol)
 - [Official v4 deployments](https://developers.uniswap.org/docs/protocols/v4/deployments)
+- [Pinned v4 settlement actions](https://github.com/Uniswap/v4-periphery/blob/545a5d2a87228167edde48f3b9eda122d1e3c4d6/src/libraries/Actions.sol)
 
 Validation in development uses mocked RPC and locally generated test keys. A
 real wallet simulation and a successful on-chain trade still require the user's
