@@ -60,6 +60,20 @@ class SolanaRpc:
             await asyncio.sleep(delay)
         return None
 
+    async def signatures_for_address(
+        self, address: str, *, limit: int = 100
+    ) -> list[dict[str, Any]]:
+        if not address or not 1 <= limit <= 1_000:
+            raise ValueError("address history requires a valid limit")
+        result = await asyncio.to_thread(
+            self._request,
+            "getSignaturesForAddress",
+            [address, {"limit": limit, "commitment": "confirmed"}],
+        )
+        if not isinstance(result, list):
+            raise ConnectionError("Solana signature history is unavailable")
+        return [item for item in result if isinstance(item, dict)]
+
     async def token_holdings(self, owner: str) -> tuple[SolanaTokenHolding, ...]:
         responses = await asyncio.gather(
             *(
