@@ -45,7 +45,7 @@ def test_session_one_sale_and_verification_then_no_repeat(tmp_path, monkeypatch)
     async def verify(*args):
         calls.append('verify');return {'transaction_confirmed':True}
     monkeypatch.setattr('solana_launch_guard.agent_live_sell.replace', lambda settings, **kw: settings)
-    monkeypatch.setitem(sys.modules,'solana_launch_guard.config',SimpleNamespace(Settings=SimpleNamespace(from_env=lambda:SimpleNamespace(solana_wallet_address='test',jupiter_api_key='test',database_path='test'))))
+    monkeypatch.setitem(sys.modules,'solana_launch_guard.config',SimpleNamespace(Settings=SimpleNamespace(from_env=lambda:SimpleNamespace(solana_wallet_address='test',jupiter_api_key='test',database_path='test',auto_sell_max_price_impact_pct=3,auto_sell_max_slippage_bps=300,portfolio_min_sell_value_usd=2))))
     monkeypatch.setitem(sys.modules,'solana_launch_guard.core',SimpleNamespace(SQLiteStore=Store))
     monkeypatch.setitem(sys.modules,'solana_launch_guard.execution',SimpleNamespace(KeyringSolanaSigner=lambda **kw:SimpleNamespace(public_key='test')))
     monkeypatch.setitem(sys.modules,'solana_launch_guard.openai_agents',SimpleNamespace(OpenAIProposalModel=Model))
