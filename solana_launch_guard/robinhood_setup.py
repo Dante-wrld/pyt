@@ -79,6 +79,20 @@ def verify_key(wallet: str, backend) -> str:
         secret = None
 
 
+def _revert_selector(error) -> str | None:
+    """Return only four validated on-chain revert bytes; never return RPC text."""
+    value = error
+    for _ in range(3):
+        if isinstance(value, str):
+            if len(value) > 4096:
+                return None
+            return value[:10].lower() if re.fullmatch(r"0x[0-9a-fA-F]{8}(?:[0-9a-fA-F]{2})*", value) else None
+        if not isinstance(value, dict):
+            return None
+        value = value.get("data", value.get("originalError"))
+    return None
+
+
 class ReadOnlyRpc:
     METHODS = {"eth_chainId", "eth_blockNumber", "eth_getBalance", "eth_getCode", "eth_call"}
     def __init__(self, url: str):
@@ -117,6 +131,9 @@ class ReadOnlyRpc:
             error = result["error"]
             code = error.get("code") if isinstance(error, dict) else None
             suffix = f" (code {code})" if type(code) is int else ""
+            selector = _revert_selector(error)
+            if selector:
+                suffix += f" (revert selector {selector})"
             raise ValueError(f"Robinhood RPC {method}: provider rejected request{suffix}")
         if "result" not in result:
             raise ValueError(f"Robinhood RPC {method}: missing result")

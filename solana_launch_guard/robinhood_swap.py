@@ -68,7 +68,12 @@ def calldata(signature, types=(), values=()):
 
 
 def call(rpc, to, signature, types=(), values=(), returns=('uint256',), block='latest'):
-    raw = rpc('eth_call', [{'to': to, 'data': calldata(signature, types, values)}, block])
+    try:
+        raw = rpc('eth_call', [{'to': to, 'data': calldata(signature, types, values)}, block])
+    except TrialError as exc:
+        # The RPC wrapper already redacts provider responses and URLs. Keep the
+        # contract and ABI method so the failed step is identifiable locally.
+        raise TrialError(f'{signature} on {to} failed: {exc}') from None
     return decode(returns, bytes.fromhex(raw[2:]))
 
 
@@ -237,10 +242,14 @@ def check_network(rpc, wallet):
 
 
 def quote(rpc, key, buy, amount):
-    result = call(rpc, QUOTER,
-        'quoteExactInputSingle(((address,address,uint24,int24,address),bool,uint128,bytes))',
-        [f'({POOL_TYPE},bool,uint128,bytes)'], [(key, buy, amount, b'')],
-        returns=('uint256','uint256'))[0]
+    try:
+        result = call(rpc, QUOTER,
+            'quoteExactInputSingle(((address,address,uint24,int24,address),bool,uint128,bytes))',
+            [f'({POOL_TYPE},bool,uint128,bytes)'], [(key, buy, amount, b'')],
+            returns=('uint256','uint256'))[0]
+    except TrialError as exc:
+        direction = 'BUY' if buy else 'SELL'
+        raise TrialError(f'Pool {direction} quote failed (hook {key[4]}): {exc}') from None
     if not 0 < result < 2**128:
         raise TrialError('Invalid swap quote')
     return result
@@ -375,8 +384,15 @@ def claim(payload):
 def estimate(rpc, tx, native_usd, spent=0):
     if int(rpc('eth_getBalance', [tx['from'], 'pending']), 16) <= int(tx['value'], 16):
         raise TrialError('Insufficient native ETH for trade plus gas on Robinhood Chain')
-    rpc('eth_call', [tx, 'pending'])
-    gas = (int(rpc('eth_estimateGas', [tx]),16) * 130 + 99) // 100
+    step = 'router swap' if tx['to'].lower() == ROUTER else 'token approval'
+    try:
+        rpc('eth_call', [tx, 'pending'])
+    except TrialError as exc:
+        raise TrialError(f'{step} simulation failed: {exc}') from None
+    try:
+        gas = (int(rpc('eth_estimateGas', [tx]),16) * 130 + 99) // 100
+    except TrialError as exc:
+        raise TrialError(f'{step} gas estimate failed: {exc}') from None
     price = int(rpc('eth_gasPrice', []),16) * 120 // 100
     if gas <= 0 or price <= 0 or gas > 1500000:
         raise TrialError('Invalid or excessive gas estimate')
