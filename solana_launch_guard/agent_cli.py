@@ -384,7 +384,7 @@ def shadow_once(model: OpenAIProposalModel | None, book: CapitalBook, *, portfol
         if _snapshot_is_fresh(portfolio) and isinstance(loss_sale_reviews_raw, list)
         else []
     )
-    inputs = (
+    inputs: tuple[tuple[str, AgentRole, dict[str, object]], ...] = (
         ("hunter-v1", AgentRole.OPPORTUNITY_HUNTER, {
             "candidate": candidate,
             "watched_candidates": [item for item in observed
@@ -425,13 +425,13 @@ def shadow_once(model: OpenAIProposalModel | None, book: CapitalBook, *, portfol
     for agent_id, role, context in inputs:
         account = {row.agent_id: row for row in book.accounts()}[agent_id]
         source = next((value for value in context.values() if isinstance(value, dict) and value), {})
-        liquidity = float(source.get("liquidity_usd") or 0) if source else 0
+        liquidity = float(str(source.get("liquidity_usd") or 0)) if source else 0
         generated = {
             AgentRole.OPPORTUNITY_HUNTER: recommendations.get("generated_at"),
             AgentRole.PORTFOLIO_MANAGER: portfolio.get("generated_at"),
             AgentRole.COPY_TRADER: copy_data.get("generated_at"),
         }[role]
-        quote_age = max(0, time.time() - float(generated or time.time()))
+        quote_age = max(0, time.time() - float(str(generated or time.time())))
         proposal, arbitration = coordinator.ask(
             AgentRecord(agent_id, role),
             {
@@ -468,8 +468,15 @@ def shadow_once(model: OpenAIProposalModel | None, book: CapitalBook, *, portfol
         )
         entry_review = candidate_reviews.get(proposal.mint) if role is AgentRole.OPPORTUNITY_HUNTER else None
         if role is AgentRole.OPPORTUNITY_HUNTER and proposal.action is TradeAction.BUY:
-            selected = next((item for item in context.get("watched_candidates", [])
-                             if item.get("mint") == proposal.mint), None)
+            watched_candidates = context.get("watched_candidates")
+            selected = next(
+                (
+                    item
+                    for item in (watched_candidates if isinstance(watched_candidates, list) else [])
+                    if isinstance(item, dict) and item.get("mint") == proposal.mint
+                ),
+                None,
+            )
             if selected is None:
                 arbitration = Arbitration(False, 0, ("buy mint lacks a fresh watched quote",))
             else:
@@ -583,7 +590,7 @@ def main() -> None:
             else:
                 result = {"status": "NOT_STARTED", "agents": {}}
         elif args.shadow_once:
-            model = OpenAIProposalModel()
+            model: OpenAIProposalModel | None = OpenAIProposalModel()
             result = shadow_once(model, book)
         elif args.shadow_portfolio_sell_once:
             model = OpenAIProposalModel() if _priced_sell_signal(_read_json(os.getenv("PORTFOLIO_SNAPSHOT_PATH", "launch_guard_portfolio.json")).get("signals")) else None
