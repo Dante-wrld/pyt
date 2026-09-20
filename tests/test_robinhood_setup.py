@@ -86,6 +86,31 @@ def test_rpc_error_reports_only_validated_revert_selector(monkeypatch):
     assert 'sensitive-provider-message' not in message and 'private-token' not in message
 
 
+def test_rpc_reports_only_nested_uniswap_quoter_revert_selector(monkeypatch):
+    import io
+    import json
+    from eth_abi import encode
+    # The nested payload is deliberately treated as untrusted and never printed.
+    nested = bytes.fromhex('deadbeef') + b'private-details'
+    wrapped = '0x6190b2b0' + encode(['bytes'], [nested]).hex()
+    payload = {'id': 1, 'error': {'code': 3, 'message': 'provider-secret', 'data': wrapped}}
+    monkeypatch.setattr('solana_launch_guard.robinhood_setup.urlopen',
+        lambda *args, **kwargs: io.BytesIO(json.dumps(payload).encode()))
+    with pytest.raises(ValueError) as caught:
+        ReadOnlyRpc('https://provider.invalid/private-token')('eth_call', [])
+    message = str(caught.value)
+    assert 'revert selector 0x6190b2b0' in message
+    assert 'wrapped revert selector 0xdeadbeef' in message
+    assert 'private-details' not in message and 'provider-secret' not in message
+    assert 'private-token' not in message
+
+
+def test_malformed_nested_quoter_error_does_not_guess_selector():
+    from solana_launch_guard.robinhood_setup import _revert_selectors
+    invalid = '0x6190b2b0' + ('00' * 32) + ('ff' * 32) + 'deadbeef'
+    assert _revert_selectors({'data': invalid}) == ('0x6190b2b0', None)
+
+
 def test_contract_wallet_inspection_is_read_only_and_detects_7702():
     from solana_launch_guard.robinhood_setup import inspect_wallet
     account = Account.create()
