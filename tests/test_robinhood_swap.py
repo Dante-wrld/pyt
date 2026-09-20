@@ -211,6 +211,31 @@ def test_no_native_gas_fails_before_simulation():
     assert calls==['eth_getBalance']
 
 
+def test_failed_quote_names_pool_hook_without_claiming_or_broadcasting():
+    hook='0x63b754e0684c240f7ea4c760ac3dd7b029804a80'
+    key=(s.WETH,TOKEN,3000,60,hook)
+    def rpc(method,params):
+        assert method=='eth_call'
+        assert params[0]['to']==s.QUOTER
+        raise s.TrialError('Robinhood RPC eth_call: provider rejected request (code 3)')
+    with pytest.raises(s.TrialError,match='Pool BUY quote failed') as error:
+        s.quote(rpc,key,True,100)
+    assert hook in str(error.value)
+    assert 'code 3' in str(error.value)
+
+
+def test_failed_router_simulation_names_stage_without_sending():
+    seen=[]
+    def rpc(method,params):
+        seen.append(method)
+        if method=='eth_getBalance':return hex(10**18)
+        if method=='eth_call':raise s.TrialError('Robinhood RPC eth_call: provider rejected request (code 3)')
+        raise AssertionError(method)
+    with pytest.raises(s.TrialError,match='router swap simulation failed'):
+        s.estimate(rpc,{'from':WALLET,'to':s.ROUTER,'value':'0x0','data':'0x'},Decimal(2000))
+    assert seen==['eth_getBalance','eth_call']
+
+
 def test_sell_approval_and_swap_use_two_bounded_transactions(monkeypatch,tmp_path,capsys):
     from types import SimpleNamespace
     monkeypatch.chdir(tmp_path)
