@@ -37,7 +37,7 @@ class ShadowRecoveryPolicy:
     half_profit_multiple: float = 3.0
     second_stage_fraction: float = 0.5
     min_sell_usd: float = 2.0
-    stagnation_window_seconds: float = 900.0
+    stagnation_window_seconds: float = 300.0
     stagnation_min_gain_pct: float = 3.0
 
     @classmethod
@@ -57,7 +57,7 @@ class ShadowRecoveryPolicy:
             liquidity_drop_pct=get("LIQUIDITY_DROP_PCT", 30),
             principal_multiple=get("AUTO_SELL_PRINCIPAL_MULTIPLE", 2),
             half_profit_multiple=get("AUTO_SELL_HALF_PROFIT_MULTIPLE", 3),
-            stagnation_window_seconds=get("STAGNATION_WINDOW_SECONDS", 900),
+            stagnation_window_seconds=get("STAGNATION_WINDOW_SECONDS", 300),
             stagnation_min_gain_pct=get("STAGNATION_MIN_GAIN_PCT", 3),
             second_stage_fraction=get("AUTO_SELL_SECOND_STAGE_FRACTION", 0.5),
             min_sell_usd=get("PORTFOLIO_MIN_SELL_VALUE_USD", 2),
