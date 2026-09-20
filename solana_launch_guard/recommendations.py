@@ -529,6 +529,31 @@ class RecommendationBook:
         zone_high = candidate.entry_zone_high
         if zone_low is not None and zone_high is not None:
             if candidate.current_price > zone_high:
+                # A token that keeps making new highs needs its zone to
+                # follow: re-anchor once price has run far enough past the
+                # existing zone to represent a fresh overextension. Without
+                # this, a real winner's zone stays frozen at its first pump
+                # and it can never again earn a confirmed-pullback entry
+                # unless it collapses all the way back to that stale level.
+                if candidate.current_price >= zone_high * (
+                    1 + self.pullback_trigger_pct / 100
+                ):
+                    candidate.entry_zone_low = candidate.current_price * (
+                        1 - self.pullback_zone_max_pct / 100
+                    )
+                    candidate.entry_zone_high = candidate.current_price * (
+                        1 - self.pullback_zone_min_pct / 100
+                    )
+                    candidate.peak_price = max(
+                        candidate.peak_price, candidate.current_price
+                    )
+                    candidate.pullback_low_price = None
+                    self._set_non_entry(
+                        candidate,
+                        "WAIT FOR PULLBACK",
+                        "new peak reached; entry zone re-anchored",
+                    )
+                    return
                 # Not currently in a pullback episode; any previously tracked
                 # low belongs to a different dip and must not count toward a
                 # future reclaim.

@@ -2657,6 +2657,59 @@ def test_pullback_started_is_detected_and_alerted_once() -> None:
     assert "decision=PULLBACK STARTED" in output
 
 
+def test_stale_entry_zone_re_anchors_to_a_new_peak() -> None:
+    """A token that keeps making new highs must not stay permanently locked
+    out of a confirmed-pullback entry by a zone anchored to its first, long
+    since obsolete overextension.
+    """
+    initial = market_quote(
+        liquidity=50_000,
+        market_cap=100_000,
+        buys=60,
+        sells=20,
+        volume=15_000,
+        change=15,
+    )
+    book = RecommendationBook(
+        pool_size=10, ttl_seconds=60, entry_confirmation_polls=1
+    )
+    candidate = book.add(initial, CoinIntelligence().score(initial), now=0)
+    assert candidate is not None
+    stale_zone_high = candidate.entry_zone_high
+
+    def quote_at(price_multiplier: float, change_pct: float) -> MarketQuote:
+        return MarketQuote(
+            mint=initial.mint,
+            symbol=initial.symbol,
+            price_sol=initial.price_sol * price_multiplier,
+            liquidity_usd=initial.liquidity_usd,
+            market_cap_usd=initial.market_cap_usd,
+            pair_address=initial.pair_address,
+            pair_created_at_ms=initial.pair_created_at_ms,
+            buys_m5=40,
+            sells_m5=20,
+            volume_m5_usd=18_000,
+            price_change_m5_pct=change_pct,
+        )
+
+    # Runs far past the old zone to a fresh new high - the stale zone must
+    # not stay frozen 15x below current price.
+    book.update(quote_at(15.0, 20), now=3)
+    assert candidate.decision == "WAIT FOR PULLBACK"
+    assert candidate.entry_zone_high > stale_zone_high
+    assert candidate.entry_zone_low == pytest.approx(
+        initial.price_sol * 15.0 * 0.94
+    )
+    assert candidate.pullback_low_price is None
+
+    # A genuine pullback into the *new* zone, followed by a reclaim off its
+    # own tracked low, should still be able to fire BUY ZONE.
+    book.update(quote_at(15.0 * 0.94, -3), now=6)
+    assert candidate.decision == "WATCH"
+    book.update(quote_at(15.0 * 0.96, 1), now=9)
+    assert candidate.decision == "BUY ZONE"
+
+
 def test_entry_requires_three_consecutive_confirmations() -> None:
     quote = market_quote(
         liquidity=50_000,
