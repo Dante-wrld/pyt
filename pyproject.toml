@@ -23,6 +23,8 @@ robinhood = ["eth-account>=0.13,<0.14"]
 dev = [
   "pytest>=8,<10",
   "eth-account>=0.13,<0.14",
+  "mypy>=1.11,<2",
+  "ruff>=0.6,<1",
 ]
 
 [project.scripts]
@@ -51,3 +53,19 @@ exclude = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 88
+src = ["solana_launch_guard", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.11"
+files = ["solana_launch_guard"]
+ignore_missing_imports = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+check_untyped_defs = true
