@@ -1,5 +1,7 @@
 """Pure trial gates: importing this module cannot broadcast."""
 import asyncio
+from types import SimpleNamespace
+
 import pytest
 
 from solana_launch_guard.live_trial import BoundedTrialModel, _guarded_exit, _sell_choice, require_exclusive_trial_flags
@@ -86,6 +88,34 @@ def test_expired_exit_blocks_one_sell_without_stopping_trial(tmp_path, monkeypat
     assert book.status()["status"] == "ACTIVE"
     assert not book.unresolved()
     assert book.status()["recent_decisions"][0]["state"] == "EXIT_BLOCKED"
+    book.close()
+
+
+def test_stale_quote_at_arbitration_blocks_one_sell_without_stopping_trial(tmp_path, monkeypatch):
+    """A rejection from the live arbiter's own deterministic checks (e.g. the
+    quote aged past the bound during the model round trip) must skip just
+    this mint and let the trial keep running, not halt the whole session -
+    the same market condition can clear on a later cycle."""
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    book = LiveTrialLedger(tmp_path / "trial.sqlite")
+    book.start()
+    seller = SimpleNamespace(max_price_impact_pct=3, max_slippage_bps=300)
+    result = asyncio.run(_guarded_exit(
+        ledger=book, agent="portfolio-v1", mint="A" * 44,
+        requested_usd=12, current_exit_allowed=lambda: True,
+        decision="SELL", fraction=1, position_value_usd=12,
+        quote_age_seconds=999, liquidity_usd=60_000,
+        rpc=None, seller=seller, store=None, wallet="synthetic-owner",
+        symbol="TEST",
+    ))
+    assert result is None
+    assert book.status()["status"] == "ACTIVE"
+    assert not book.unresolved()
+    decisions = book.status()["recent_decisions"]
+    assert decisions[0]["state"] == "EXIT_BLOCKED"
+    assert "EXIT BLOCKED" in decisions[0]["reason"]
+    assert decisions[1]["state"] == "EXIT_BLOCKED"
+    assert "market quote is stale" in decisions[1]["reason"]
     book.close()
 
 

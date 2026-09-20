@@ -308,7 +308,16 @@ async def execute_live_exit(
     )
     if not approval.approved:
         ledger.log(agent=agent, mint=mint, state="EXIT_BLOCKED", reason="; ".join(approval.reasons))
-        raise TrialHalted("live exit failed deterministic risk checks")
+        # Market-condition-dependent (quote age, price impact, position
+        # value) - these can pass on a later cycle once fresh data is in, so
+        # this is deliberately an "EXIT BLOCKED"-prefixed halt: _guarded_exit
+        # only halts the whole trial for messages that *don't* start with
+        # that prefix, so this one skips just this mint and retries next
+        # cycle instead of stopping everything else the trial could do.
+        raise TrialHalted(
+            f"EXIT BLOCKED: failed deterministic risk checks "
+            f"({'; '.join(approval.reasons)})"
+        )
     ledger.log(agent=agent, mint=mint, state="APPROVED",
                reason=f"{decision}: guarded owned-position exit of {approval.approved_usd:.2f} USD")
     balance = await rpc.token_balance(wallet, mint)
