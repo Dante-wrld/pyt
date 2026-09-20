@@ -28,3 +28,10 @@ launch_guard_live_sell_*.json*
 launch_guard_live_canary.json.*
 
 launch_guard_robinhood_trial.*
+
+launch_guard_live_trial*.sqlite*
+launch_guard_live_trial*report.json
+
+.env.backup*
+.env.save
+env[0-9]*
