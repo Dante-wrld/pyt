@@ -3444,6 +3444,7 @@ def test_owned_holding_persists_and_dashboard_is_read_only(
             "token_address": "MintOwned111",
             "peak_price": 0.02,
             "baseline_liquidity_usd": 50_000.0,
+            "below_sell_minimum": 0,
         }
     ]
     store.close()
