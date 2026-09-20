@@ -39,6 +39,10 @@ POOL_TYPE = '(address,address,uint24,int24,address)'
 INIT_TOPIC = '0x' + keccak(text='Initialize(bytes32,address,address,uint24,int24,address,uint160,int24)').hex()
 TRANSFER = '0x' + keccak(text='Transfer(address,address,uint256)').hex()
 JOURNAL = Path('launch_guard_robinhood_trial.json')
+BEFORE_SWAP_FLAG = 1 << 7
+AFTER_SWAP_FLAG = 1 << 6
+BEFORE_SWAP_RETURNS_DELTA_FLAG = 1 << 3
+AFTER_SWAP_RETURNS_DELTA_FLAG = 1 << 2
 
 
 class SwapRpc(ReadOnlyRpc):
@@ -180,10 +184,20 @@ def validate_pool(key, token, pool_id, native=ZERO):
         raise TrialError('Pool key hash mismatch')
     if key[0] != native or key[1] != token or native not in NATIVE_CURRENCIES:
         raise TrialError('Pool currencies do not match the discovered ETH/WETH pair')
-    if key[4] != ZERO:
-        raise TrialError(f'Hooked pool {key[4]} (fee {key[2]}, tick spacing {key[3]}) requires a separate adapter review; trial blocked')
     if not 0 < key[2] <= 10000 or not 0 < key[3] <= 32767:
         raise TrialError('Unsupported pool fee or tick spacing')
+    if key[4] == ZERO:
+        return 'NO_HOOK'
+    flags = int(key[4], 16) & ((1 << 14) - 1)
+    if flags & (BEFORE_SWAP_RETURNS_DELTA_FLAG | AFTER_SWAP_RETURNS_DELTA_FLAG):
+        raise TrialError(f'Hooked pool {key[4]} can return swap deltas; trial blocked')
+    # A static-fee hook without swap return deltas cannot alter token settlement
+    # through v4's hook-delta mechanism. Its actual callback remains checked by
+    # the exact eth_call simulation with empty hookData before any signature.
+    active = []
+    if flags & BEFORE_SWAP_FLAG: active.append('beforeSwap')
+    if flags & AFTER_SWAP_FLAG: active.append('afterSwap')
+    return 'SIMULATED_HOOK:' + (','.join(active) or 'liquidity-only')
 
 
 def check_network(rpc, wallet):
