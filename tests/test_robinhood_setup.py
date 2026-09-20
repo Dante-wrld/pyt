@@ -68,3 +68,25 @@ def test_rpc_errors_are_actionable_and_redacted(monkeypatch, error, expected):
     with pytest.raises(ValueError, match=expected) as caught:
         ReadOnlyRpc('https://example.com/secret')('eth_chainId', [])
     assert 'secret' not in str(caught.value)
+
+
+def test_contract_wallet_inspection_is_read_only_and_detects_7702():
+    from solana_launch_guard.robinhood_setup import inspect_wallet
+    account = Account.create()
+    delegated = '0xef0100' + '34' * 20
+    seen = []
+    def rpc(method, params):
+        seen.append((method, params))
+        if method == 'eth_chainId': return hex(4663)
+        if method == 'eth_blockNumber': return '0x10'
+        if method == 'eth_getCode': return delegated
+        if method == 'eth_call':
+            assert params[0]['to'].lower() == account.address.lower()
+            assert params[0]['data'].startswith('0x1626ba7e')
+            return '0x1626ba7e'
+        raise AssertionError(method)
+    result = inspect_wallet(account.address, rpc, account.key.hex())
+    assert result['eip7702_delegation_target'] == '0x' + '34' * 20
+    assert result['eip1271_supported'] is True
+    assert result['broadcast'] is False
+    assert all(method != 'eth_sendRawTransaction' for method, _ in seen)
