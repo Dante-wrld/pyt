@@ -72,6 +72,9 @@ class WalletCopyMixin(LaunchGuardState):
             )
             return
 
+        # The `quote is None` branch above already returned, so this is the
+        # only remaining path and quote must be set.
+        assert quote is not None
         launch = Launch(
             mint=trade.mint,
             name=symbol,

@@ -215,13 +215,13 @@ class MultichainMixin(LaunchGuardState):
 
         hyperliquid = self.settings.hyperliquid_address
         if hyperliquid:
-            watcher = HyperCoreWatcher(
+            hypercore_watcher = HyperCoreWatcher(
                 wallet=hyperliquid,
                 fill_callback=self.handle_hypercore_fill,
                 state_callback=self.handle_hypercore_state,
                 poll_seconds=self.settings.evm_wallet_poll_seconds,
             )
-            tasks.append(asyncio.create_task(watcher.run_forever()))
+            tasks.append(asyncio.create_task(hypercore_watcher.run_forever()))
         else:
             LOGGER.warning(
                 "No HYPERLIQUID_ADDRESS configured; HyperCore monitoring inactive"

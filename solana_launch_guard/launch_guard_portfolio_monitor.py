@@ -382,9 +382,9 @@ class PortfolioMonitorMixin(LaunchGuardState):
                                     signal.decision,
                                 )
 
-                    balance = balances_by_mint.get(signal.token_address)
-                    if balance is not None:
-                        await self._maybe_auto_sell(signal, balance)
+                    owned_balance = balances_by_mint.get(signal.token_address)
+                    if owned_balance is not None:
+                        await self._maybe_auto_sell(signal, owned_balance)
 
                 write_portfolio_snapshot(
                     self.settings.portfolio_snapshot_path,
