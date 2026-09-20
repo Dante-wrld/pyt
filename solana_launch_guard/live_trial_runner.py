@@ -65,10 +65,19 @@ def _fresh_candidates(snapshot: dict, *, now: float) -> list[dict]:
 def _live_arbiter() -> RiskArbiter:
     # Live is enabled only for this explicitly constructed trial arbiter; the
     # ordinary shadow arbiter remains paper/shadow-only.
+    #
+    # max_quote_age_seconds is checked after cycle() has already awaited a
+    # full model.propose() round trip to get an exit/entry proposal, so the
+    # elapsed time it measures always includes that call's latency, not just
+    # market-data staleness. 15s left too little headroom for a normal LLM
+    # response and caused a live exit to fail this check - and, unlike the
+    # softer freshness gate checked just before it, that halts the whole
+    # trial rather than just skipping the one exit. 30s keeps this a real,
+    # tight bound while giving the round trip room to complete.
     return RiskArbiter(RiskPolicy(
         allowed_modes=("live",), max_order_usd=5, max_position_pct=100,
         max_open_positions=2, min_liquidity_usd=50_000,
-        max_price_impact_pct=3, max_quote_age_seconds=15,
+        max_price_impact_pct=3, max_quote_age_seconds=30,
     ))
 
 
