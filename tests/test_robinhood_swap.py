@@ -342,3 +342,18 @@ def test_weth_sell_unwraps_to_wallet_after_v4_swap():
     assert commands==b'\x0a\x10\x0c'
     assert inputs[0]==b'permit'
     assert decode(['address','uint256'],inputs[2])==('0x'+'00'*19+'01',900)
+
+
+def test_pool_log_scan_reduces_provider_413_range(monkeypatch):
+    monkeypatch.setattr(s,'block_at',lambda rpc,ts,head:100 if ts==880 else 160)
+    seen=[]
+    def rpc(method,params):
+        query=params[0]; first=int(query['fromBlock'],16); last=int(query['toBlock'],16)
+        seen.append((first,last))
+        if last-first+1>25: raise s.TrialError('Robinhood RPC eth_getLogs: HTTP 413; check provider access or rate limits')
+        if first != 150:return []
+        return [{'address':s.MANAGER,'topics':[s.INIT_TOPIC,POOL,'0x'+s.ZERO[2:].zfill(64),'0x'+TOKEN[2:].zfill(64)],
+                 'data':'0x'+encode(['uint24','int24','address','uint160','int24'],[3000,60,s.ZERO,1,0]).hex()}]
+    assert s.pool_key(rpc,TOKEN,{'created':1000,'pool_id':POOL},200)==KEY
+    assert seen[:3]==[(100,160),(100,149),(100,124)]
+    assert any(first==150 for first,_ in seen)
