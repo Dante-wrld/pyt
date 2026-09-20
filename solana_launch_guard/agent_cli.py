@@ -83,6 +83,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     group.add_argument("--shadow-performance", action="store_true", help="show persisted hunter shadow-trade performance")
     group.add_argument(
+        "--live-trial-status", action="store_true",
+        help="inspect the separate, persistent live-trial budget without initiating trades",
+    )
+    group.add_argument(
+        "--live-trial-stop", action="store_true",
+        help="write a durable operator stop and halt the current live trial",
+    )
+    group.add_argument(
+        "--live-trial-report", action="store_true",
+        help="show a persisted report of confirmed live-trial fills",
+    )
+    group.add_argument(
         "--shadow-once",
         action="store_true",
         help="make one decision per agent from current read-only snapshots",
@@ -549,6 +561,20 @@ def main() -> None:
             result = book.public_status()
         elif args.shadow_performance:
             result = book.performance()
+        elif args.live_trial_status or args.live_trial_stop or args.live_trial_report:
+            from .live_trial_ledger import LiveTrialLedger
+
+            path = Path(os.getenv("AGENT_LIVE_TRIAL_LEDGER_PATH", "launch_guard_live_trial.sqlite"))
+            if args.live_trial_stop or path.exists():
+                ledger = LiveTrialLedger(path)
+                try:
+                    if args.live_trial_stop:
+                        ledger.stop()
+                    result = ledger.report() if args.live_trial_report else ledger.status()
+                finally:
+                    ledger.close()
+            else:
+                result = {"status": "NOT_STARTED", "agents": {}}
         elif args.shadow_once:
             model = OpenAIProposalModel()
             result = shadow_once(model, book)

@@ -104,3 +104,31 @@ def test_requoted_sell_still_enforces_price_impact(monkeypatch):
     with pytest.raises(execution.QuoteGuardError, match="price impact"):
         asyncio.run(seller.preflight(intent, Simulator()))
     assert calls == [("jupiterz",), ("jupiterz", "okx")]
+
+
+def test_sponsored_metis_preflight_reports_gas_blocker_without_requote(monkeypatch):
+    wallet, sponsor = Keypair(), Keypair()
+    signer = make_signer(monkeypatch, wallet)
+    calls = []
+
+    class Client:
+        async def order(self, **kwargs):
+            calls.append(kwargs["exclude_routers"])
+            return {
+                "inputMint": "synthetic-mint", "outputMint": execution.USDC_MINT,
+                "inAmount": "10", "outAmount": "4000000",
+                "otherAmountThreshold": "3900000", "transaction": transaction(wallet, sponsor),
+                "requestId": "synthetic", "router": "metis", "gasless": True,
+                "signatureFeePayer": str(sponsor.pubkey()),
+                "priceImpact": "-1.0", "slippageBps": 250,
+            }
+
+    class Simulator:
+        async def simulate_transaction(self, _):
+            pytest.fail("sponsored transaction must not reach simulation")
+
+    intent = execution.SellIntent("synthetic-mint", "TEST", 0, "test", 10, 10, 6, 1, 1, None, "test")
+    seller = execution.SolanaAutoSeller(client=Client(), signer=signer)
+    with pytest.raises(execution.AdditionalSignerError, match="wallet's SOL balance"):
+        asyncio.run(seller.preflight(intent, Simulator()))
+    assert calls == [("jupiterz",)]

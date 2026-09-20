@@ -128,6 +128,23 @@ class RiskArbiter:
         approved = min(amount_usd, self.policy.max_order_usd)
         return Arbitration(True, round(approved, 8), ("passed deterministic shadow exit checks",))
 
+    def evaluate_live_exit(self, amount_usd: float, state: RiskSnapshot) -> Arbitration:
+        """Assess an owned position exit without applying the new-buy dollar cap."""
+        reasons = []
+        if state.mode != "live" or "live" not in self.policy.allowed_modes:
+            reasons.append("live exit is not enabled by this arbiter")
+        if state.kill_switch or state.mint_blocked:
+            reasons.append("kill switch or mint block is active")
+        if not math.isfinite(state.quote_age_seconds) or not 0 <= state.quote_age_seconds <= self.policy.max_quote_age_seconds:
+            reasons.append("market quote is stale")
+        if not math.isfinite(state.quoted_price_impact_pct) or abs(state.quoted_price_impact_pct) > self.policy.max_price_impact_pct:
+            reasons.append("quoted price impact exceeds policy limit")
+        if not math.isfinite(amount_usd) or amount_usd < 2 or amount_usd > state.current_position_usd:
+            reasons.append("requested exit is below $2 or exceeds owned position")
+        if reasons:
+            return Arbitration(False, 0, tuple(reasons))
+        return Arbitration(True, round(amount_usd, 8), ("passed deterministic live exit checks",))
+
     def evaluate(self, proposal: TradeProposal, state: RiskSnapshot) -> Arbitration:
         proposal.validate()
         reasons: list[str] = []

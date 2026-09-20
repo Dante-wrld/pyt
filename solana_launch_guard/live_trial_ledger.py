@@ -1,0 +1,456 @@
+"""Durable, fail-closed capital and order reservations for a future live trial.
+
+This module never signs, simulates, or broadcasts a transaction. Starting the
+clock must be an explicit action after wallet and sell-path preflight.
+"""
+from __future__ import annotations
+
+import math
+import os
+import sqlite3
+import time
+from pathlib import Path
+
+
+BUY_AGENTS = ("hunter-v1", "copy-v1")
+BUY_CAP_CENTS = 500
+AGENT_BUDGET_CENTS = 3000
+TRIAL_SECONDS = 8 * 3600
+
+
+class TrialHalted(ValueError):
+    """A trial guard blocks further orders."""
+
+
+class LiveTrialLedger:
+    """One persistent eight-hour session; no automatic restart or reset."""
+
+    def __init__(self, path: str | Path):
+        self.path = Path(path)
+        if not self.path.exists():
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            descriptor = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            os.close(descriptor)
+        self.db = sqlite3.connect(self.path, isolation_level=None, timeout=30)
+        self.db.execute("PRAGMA journal_mode=WAL")
+        self.db.execute("PRAGMA busy_timeout=30000")
+        self.db.executescript("""
+            CREATE TABLE IF NOT EXISTS trial (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                started_at REAL NOT NULL, deadline REAL NOT NULL,
+                halted INTEGER NOT NULL DEFAULT 0, reason TEXT
+            );
+            CREATE TABLE IF NOT EXISTS orders (
+                intent TEXT PRIMARY KEY, agent TEXT NOT NULL,
+                side TEXT NOT NULL, mint TEXT NOT NULL,
+                reserved_cents INTEGER NOT NULL DEFAULT 0,
+                executed_cents INTEGER, proceeds_cents INTEGER,
+                state TEXT NOT NULL, signature TEXT, realized_cents INTEGER,
+                created_at REAL NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS decisions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                at REAL NOT NULL, agent TEXT NOT NULL, mint TEXT NOT NULL,
+                state TEXT NOT NULL, reason TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS positions (
+                agent TEXT NOT NULL, mint TEXT NOT NULL,
+                quantity_raw INTEGER NOT NULL, decimals INTEGER NOT NULL,
+                cost_cents INTEGER NOT NULL, entry_price REAL NOT NULL,
+                entry_liquidity_usd REAL NOT NULL,
+                peak_price REAL NOT NULL, current_price REAL NOT NULL,
+                opened_at REAL NOT NULL, updated_at REAL NOT NULL,
+                principal_recovered INTEGER NOT NULL DEFAULT 0,
+                second_stage_taken INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY(agent,mint)
+            );
+        """)
+        if "realized_cents" not in {row[1] for row in self.db.execute("PRAGMA table_info(orders)")}:
+            self.db.execute("ALTER TABLE orders ADD COLUMN realized_cents INTEGER")
+        position_columns = {row[1] for row in self.db.execute("PRAGMA table_info(positions)")}
+        for column in ("principal_recovered", "second_stage_taken"):
+            if column not in position_columns:
+                self.db.execute(f"ALTER TABLE positions ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0")
+
+    def close(self) -> None:
+        self.db.close()
+
+    def _begin(self) -> None:
+        self.db.execute("BEGIN IMMEDIATE")
+
+    @staticmethod
+    def _check_kill_switch() -> None:
+        if os.getenv("AGENT_LIVE_KILL_SWITCH", "true").lower() != "false":
+            raise TrialHalted("agent kill switch is active")
+        # An already-running process cannot see edits to its parent shell's
+        # environment. Read only the kill-switch key from the current .env.
+        try:
+            lines = Path(".env").read_text(encoding="utf-8").splitlines()
+        except FileNotFoundError:
+            lines = []
+        for line in lines:
+            if line.strip().startswith("AGENT_LIVE_KILL_SWITCH="):
+                if line.split("=", 1)[1].strip().strip('"\'').lower() != "false":
+                    raise TrialHalted("kill switch is active in .env")
+
+    def _guard(self, now: float) -> None:
+        row = self.db.execute("SELECT deadline, halted FROM trial WHERE id=1").fetchone()
+        if not row or row[1] or not math.isfinite(now) or now >= row[0]:
+            raise TrialHalted("trial is absent, halted, or expired")
+        self._check_kill_switch()
+        if self.path.with_suffix(self.path.suffix + ".stop").exists():
+            raise TrialHalted("operator stop file exists")
+
+    def assert_active(self, *, now: float | None = None) -> None:
+        self._guard(time.time() if now is None else now)
+
+    def log(self, *, agent: str, mint: str, state: str, reason: str) -> None:
+        if agent not in (*BUY_AGENTS, "portfolio-v1") or not state or not reason:
+            raise ValueError("attributed decision, state, and reason are required")
+        self.db.execute(
+            "INSERT INTO decisions(at,agent,mint,state,reason) VALUES(?,?,?,?,?)",
+            (time.time(), agent, mint[:100], state[:40], reason[:1000]),
+        )
+
+    def unresolved(self) -> list[dict]:
+        rows = self.db.execute(
+            "SELECT intent,agent,side,mint,state,signature FROM orders "
+            "WHERE state IN ('RESERVED','SUBMITTED','UNCERTAIN') ORDER BY created_at"
+        ).fetchall()
+        return [dict(zip(("intent", "agent", "side", "mint", "state", "signature"), row)) for row in rows]
+
+    def model_request_count(self) -> int:
+        return int(self.db.execute(
+            "SELECT COUNT(*) FROM decisions WHERE state='MODEL_REQUEST'"
+        ).fetchone()[0])
+
+    def start(self, *, now: float | None = None) -> None:
+        """Initialize once; caller must independently pass all live preflights."""
+        at = time.time() if now is None else now
+        if not math.isfinite(at) or at <= 0:
+            raise ValueError("invalid trial start time")
+        self._check_kill_switch()
+        if self.path.with_suffix(self.path.suffix + ".stop").exists():
+            raise TrialHalted("operator stop file exists")
+        self._begin()
+        try:
+            if self.db.execute("SELECT 1 FROM trial WHERE id=1").fetchone():
+                raise TrialHalted("trial already exists; a new session is not automatic")
+            self.db.execute("INSERT INTO trial(id,started_at,deadline) VALUES(1,?,?)", (at, at + TRIAL_SECONDS))
+            self.db.commit()
+        except BaseException:
+            self.db.rollback()
+            raise
+
+    def halt(self, reason: str) -> None:
+        if not reason.strip():
+            raise ValueError("halt reason is required")
+        self.db.execute("UPDATE trial SET halted=1,reason=? WHERE id=1", (reason[:300],))
+
+    def stop(self) -> None:
+        """Durable operator stop, visible to processes with a cached environment."""
+        path = self.path.with_suffix(self.path.suffix + ".stop")
+        descriptor = os.open(path, os.O_CREAT | os.O_WRONLY, 0o600)
+        os.close(descriptor)
+        self.halt("operator requested stop")
+
+    def _spent(self, agent: str) -> int:
+        row = self.db.execute(
+            "SELECT COALESCE(SUM(reserved_cents),0) FROM orders "
+            "WHERE agent=? AND side='BUY' AND state IN ('RESERVED','SUBMITTED','UNCERTAIN','CONFIRMED')",
+            (agent,),
+        ).fetchone()
+        return int(row[0])
+
+    def daily_realized_cents(self, agent: str, *, now: float | None = None) -> int:
+        at = time.time() if now is None else now
+        start = math.floor(at / 86400) * 86400
+        return int(self.db.execute(
+            "SELECT COALESCE(SUM(realized_cents),0) FROM orders WHERE agent=? "
+            "AND side='SELL' AND state='CONFIRMED' AND created_at >= ?",
+            (agent, start),
+        ).fetchone()[0])
+
+    def reserve_buy(self, *, intent: str, agent: str, mint: str,
+                    requested_cents: int, approved_cents: int, now: float | None = None) -> None:
+        at = time.time() if now is None else now
+        self._begin()
+        try:
+            self._guard(at)
+            if agent not in BUY_AGENTS or not intent or not mint:
+                raise ValueError("only attributed hunter/copy trades can reserve new capital")
+            if type(requested_cents) is not int or type(approved_cents) is not int or not (
+                0 < approved_cents <= requested_cents and approved_cents <= BUY_CAP_CENTS
+            ):
+                raise ValueError("buy must remain within request and $5 order cap")
+            if self._spent(agent) + approved_cents > AGENT_BUDGET_CENTS:
+                raise ValueError("agent gross-buy budget exhausted")
+            if self.db.execute("SELECT 1 FROM positions WHERE mint=?", (mint,)).fetchone():
+                raise ValueError("token is already owned in this trial")
+            if self.db.execute("SELECT 1 FROM orders WHERE mint=? AND side='BUY' "
+                               "AND state IN ('RESERVED','SUBMITTED','UNCERTAIN')", (mint,)).fetchone():
+                raise ValueError("token buy has an unresolved trial intent")
+            if self.db.execute("SELECT COUNT(*) FROM positions WHERE agent=?", (agent,)).fetchone()[0] >= 2:
+                raise ValueError("maximum two live positions per agent")
+            self.db.execute(
+                "INSERT INTO orders(intent,agent,side,mint,reserved_cents,state,created_at) "
+                "VALUES(?,?,'BUY',?,?,'RESERVED',?)",
+                (intent, agent, mint, approved_cents, at),
+            )
+            self.db.commit()
+        except BaseException:
+            self.db.rollback()
+            raise
+
+    def reserve_sell(self, *, intent: str, agent: str, mint: str, now: float | None = None) -> None:
+        at = time.time() if now is None else now
+        self._begin()
+        try:
+            self._guard(at)
+            if agent not in (*BUY_AGENTS, "portfolio-v1") or not intent or not mint:
+                raise ValueError("invalid owned-position sell intent")
+            self.db.execute(
+                "INSERT INTO orders(intent,agent,side,mint,state,created_at) "
+                "VALUES(?,?,'SELL',?,'RESERVED',?)", (intent, agent, mint, at),
+            )
+            self.db.commit()
+        except BaseException:
+            self.db.rollback()
+            raise
+
+    def transition(self, intent: str, state: str, *, signature: str | None = None,
+                   executed_cents: int | None = None, proceeds_cents: int | None = None,
+                   verified_on_chain: bool = False,
+                   absent_on_chain: bool = False) -> None:
+        """Only a verified chain receipt may use CONFIRMED; uncertain spends stay reserved."""
+        self._begin()
+        try:
+            row = self.db.execute(
+                "SELECT side,state,reserved_cents FROM orders WHERE intent=?", (intent,)
+            ).fetchone()
+            if row is None:
+                raise ValueError("order intent does not exist")
+            side, old, reserved = row
+            if (old, state) not in {
+                ("RESERVED", "FAILED"), ("RESERVED", "SUBMITTED"),
+                ("SUBMITTED", "UNCERTAIN"), ("SUBMITTED", "CONFIRMED"),
+                ("UNCERTAIN", "CONFIRMED"), ("UNCERTAIN", "FAILED"),
+            }:
+                raise ValueError("invalid or duplicate order transition")
+            if state == "SUBMITTED" and not signature:
+                raise ValueError("submitted transaction requires signature")
+            if state == "CONFIRMED" and verified_on_chain is not True:
+                raise ValueError("a confirmed order requires an independent on-chain check")
+            if old == "UNCERTAIN" and state == "FAILED" and absent_on_chain is not True:
+                raise ValueError("an uncertain order cannot release capital without chain reconciliation")
+            if state == "CONFIRMED" and (not signature or
+                    (side == "BUY" and (type(executed_cents) is not int or not 0 < executed_cents <= reserved)) or
+                    (side == "SELL" and (type(proceeds_cents) is not int or proceeds_cents < 0))):
+                raise ValueError("confirmation requires a verified signature and bounded fill")
+            self.db.execute(
+                "UPDATE orders SET state=?,signature=COALESCE(?,signature),"
+                "executed_cents=COALESCE(?,executed_cents),proceeds_cents=COALESCE(?,proceeds_cents) "
+                "WHERE intent=?",
+                (state, signature, executed_cents, proceeds_cents, intent),
+            )
+            self.db.commit()
+        except BaseException:
+            self.db.rollback()
+            raise
+
+    def confirm_buy(self, *, intent: str, signature: str, executed_cents: int,
+                    quantity_raw: int, decimals: int, entry_price: float,
+                    entry_liquidity_usd: float, verified_on_chain: bool) -> None:
+        """Atomically confirm a buy and establish its persistent post-entry peak."""
+        self._begin()
+        try:
+            row = self.db.execute("SELECT agent,mint,side,state,signature,reserved_cents FROM orders WHERE intent=?", (intent,)).fetchone()
+            if (not row or row[2] != "BUY" or row[3] not in {"SUBMITTED", "UNCERTAIN"}
+                or row[4] != signature or verified_on_chain is not True
+                or type(executed_cents) is not int or not 0 < executed_cents <= row[5]
+                or type(quantity_raw) is not int or quantity_raw <= 0
+                or type(decimals) is not int or not 0 <= decimals <= 18
+                or not math.isfinite(entry_price) or entry_price <= 0
+                or not math.isfinite(entry_liquidity_usd) or entry_liquidity_usd <= 0):
+                raise ValueError("buy fill has not been independently verified or exceeds reservation")
+            self.db.execute("INSERT INTO positions(agent,mint,quantity_raw,decimals,cost_cents,entry_price,"
+                            "entry_liquidity_usd,peak_price,current_price,opened_at,updated_at) "
+                            "VALUES(?,?,?,?,?,?,?,?,?,?,?)", (
+                row[0], row[1], quantity_raw, decimals, executed_cents,
+                entry_price, entry_liquidity_usd, entry_price, entry_price,
+                time.time(), time.time(),
+            ))
+            self.db.execute("UPDATE orders SET state='CONFIRMED',executed_cents=? WHERE intent=?", (executed_cents,intent))
+            self.db.commit()
+        except BaseException:
+            self.db.rollback()
+            raise
+
+    def positions(self, agent: str | None = None) -> list[dict]:
+        names = ("agent", "mint", "quantity_raw", "decimals", "cost_cents", "entry_price",
+                 "entry_liquidity_usd", "peak_price", "current_price", "opened_at", "updated_at",
+                 "principal_recovered", "second_stage_taken")
+        if agent is None:
+            rows = self.db.execute("SELECT * FROM positions").fetchall()
+        else:
+            rows = self.db.execute("SELECT * FROM positions WHERE agent=?", (agent,)).fetchall()
+        return [dict(zip(names, row)) for row in rows]
+
+    def mark_position(self, *, agent: str, mint: str, price: float) -> dict:
+        if not math.isfinite(price) or price <= 0:
+            raise ValueError("position mark requires a positive finite price")
+        self.db.execute("UPDATE positions SET peak_price=MAX(peak_price,?),current_price=?,updated_at=? "
+                        "WHERE agent=? AND mint=?", (price, price, time.time(), agent, mint))
+        row = next((p for p in self.positions(agent) if p["mint"] == mint), None)
+        if row is None:
+            raise ValueError("position not found")
+        return row
+
+    def confirm_sell(self, *, intent: str, signature: str, quantity_raw: int,
+                     proceeds_cents: int, verified_on_chain: bool) -> None:
+        """Credit proceeds only after a matching on-chain token and USDC delta."""
+        self._begin()
+        try:
+            order = self.db.execute("SELECT agent,mint,side,state,signature FROM orders WHERE intent=?", (intent,)).fetchone()
+            if (not order or order[2] != "SELL" or order[3] not in {"SUBMITTED", "UNCERTAIN"}
+                or order[4] != signature or verified_on_chain is not True
+                or type(quantity_raw) is not int or quantity_raw <= 0
+                or type(proceeds_cents) is not int or proceeds_cents <= 0):
+                raise ValueError("sell fill is not independently verified")
+            pos = self.db.execute("SELECT quantity_raw,cost_cents FROM positions WHERE agent=? AND mint=?", order[:2]).fetchone()
+            realized = None
+            if pos:
+                if quantity_raw > pos[0]:
+                    raise ValueError("sell quantity exceeds tracked position")
+                remaining = pos[0] - quantity_raw
+                cost_sold = pos[1] - round(pos[1] * remaining / pos[0])
+                realized = proceeds_cents - cost_sold
+                if remaining:
+                    cost_remaining = round(pos[1] * remaining / pos[0])
+                    self.db.execute("UPDATE positions SET quantity_raw=?,cost_cents=?,updated_at=?,"
+                                    "principal_recovered=MAX(principal_recovered,?),"
+                                    "second_stage_taken=MAX(second_stage_taken,?) "
+                                    "WHERE agent=? AND mint=?", (
+                                        remaining,cost_remaining,time.time(),
+                                        int(intent.endswith(":PRINCIPAL")),
+                                        int(intent.endswith(":SECOND_STAGE")), *order[:2],
+                                    ))
+                else:
+                    self.db.execute("DELETE FROM positions WHERE agent=? AND mint=?", order[:2])
+            self.db.execute("UPDATE orders SET state='CONFIRMED',proceeds_cents=?,realized_cents=? WHERE intent=?", (proceeds_cents,realized,intent))
+            self.db.commit()
+        except BaseException:
+            self.db.rollback()
+            raise
+
+    def status(self, *, now: float | None = None) -> dict:
+        row = self.db.execute("SELECT started_at,deadline,halted,reason FROM trial WHERE id=1").fetchone()
+        if not row:
+            return {"status": "NOT_STARTED", "agents": {}}
+        at = time.time() if now is None else now
+        agents = {}
+        for agent in BUY_AGENTS:
+            spent = self._spent(agent)
+            proceeds = self.db.execute(
+                "SELECT COALESCE(SUM(proceeds_cents),0) FROM orders "
+                "WHERE agent=? AND side='SELL' AND state='CONFIRMED'", (agent,)
+            ).fetchone()[0]
+            agents[agent] = {
+                "starting_budget_cents": AGENT_BUDGET_CENTS,
+                "gross_buy_committed_cents": spent,
+                "remaining_buy_cap_cents": AGENT_BUDGET_CENTS - spent,
+                "confirmed_sell_proceeds_cents": int(proceeds),
+                "available_cash_cents": AGENT_BUDGET_CENTS - spent + int(proceeds),
+                "open_positions": len(self.positions(agent)),
+                "position_cost_cents": sum(p["cost_cents"] for p in self.positions(agent)),
+                "realized_pnl_cents": int(self.db.execute(
+                    "SELECT COALESCE(SUM(realized_cents),0) FROM orders WHERE agent=? AND state='CONFIRMED'",
+                    (agent,),
+                ).fetchone()[0]),
+                "unrealized_pnl_estimate_cents": sum(
+                    round(p["quantity_raw"] * p["current_price"] / 10**p["decimals"] * 100)
+                    - p["cost_cents"] for p in self.positions(agent)
+                ),
+            }
+        return {
+            "status": "HALTED" if row[2] else "EXPIRED" if at >= row[1] else "ACTIVE",
+            "started_at": row[0], "deadline": row[1],
+            "remaining_seconds": max(0, int(row[1] - at)), "halt_reason": row[3],
+            "agents": agents,
+            "total_remaining_buy_cap_cents": sum(a["remaining_buy_cap_cents"] for a in agents.values()),
+            "total_gross_buy_committed_cents": sum(a["gross_buy_committed_cents"] for a in agents.values()),
+            "model_requests": self.model_request_count(),
+            "unresolved_orders": self.unresolved(),
+            "recent_decisions": [
+                {"at": at, "agent": agent, "mint": mint, "state": state, "reason": reason}
+                for at, agent, mint, state, reason in self.db.execute(
+                    "SELECT at,agent,mint,state,reason FROM decisions ORDER BY id DESC LIMIT 10"
+                )
+            ],
+            "positions": self.positions(),
+        }
+
+    def report(self, *, now: float | None = None) -> dict:
+        """Report confirmed fills; leave unknown fees and portfolio basis null."""
+        status = self.status(now=now)
+        if status["status"] == "NOT_STARTED":
+            return status
+        agents = {}
+        for agent in (*BUY_AGENTS, "portfolio-v1"):
+            orders = self.db.execute(
+                "SELECT side,state,realized_cents FROM orders WHERE agent=? ORDER BY created_at,intent",
+                (agent,),
+            ).fetchall()
+            realized = [row[2] for row in orders if row[0] == "SELL" and row[1] == "CONFIRMED" and row[2] is not None]
+            wins = [n for n in realized if n > 0]
+            losses = [n for n in realized if n < 0]
+            total_profit = sum(wins)
+            total_loss = -sum(losses)
+            running = peak = worst = 0
+            for value in realized:
+                running += value
+                peak = max(peak, running)
+                worst = max(worst, peak - running)
+            marks = self.positions(agent)
+            agents[agent] = {
+                "starting_budget_cents": AGENT_BUDGET_CENTS if agent in BUY_AGENTS else 0,
+                "gross_buy_committed_cents": self._spent(agent),
+                "available_cash_estimate_cents": (
+                    AGENT_BUDGET_CENTS - self._spent(agent) +
+                    int(self.db.execute(
+                        "SELECT COALESCE(SUM(proceeds_cents),0) FROM orders WHERE agent=? "
+                        "AND side='SELL' AND state='CONFIRMED'", (agent,),
+                    ).fetchone()[0])
+                ) if agent in BUY_AGENTS else None,
+                "confirmed_buys": sum(row[0] == "BUY" and row[1] == "CONFIRMED" for row in orders),
+                "confirmed_sells": sum(row[0] == "SELL" and row[1] == "CONFIRMED" for row in orders),
+                "failed_orders": sum(row[1] == "FAILED" for row in orders),
+                "open_positions": len(marks),
+                "marked_open_value_cents": sum(round(p["current_price"] * p["quantity_raw"]
+                                          / 10**p["decimals"] * 100) for p in marks),
+                "oldest_open_mark_epoch": min((p["updated_at"] for p in marks), default=None),
+                "realized_pnl_cents": sum(realized) if agent in BUY_AGENTS else None,
+                "winning_trades_with_known_basis": len(wins),
+                "losing_trades_with_known_basis": len(losses),
+                "win_rate_known_basis": len(wins) / len(realized) if realized else None,
+                "average_win_cents": total_profit / len(wins) if wins else None,
+                "average_loss_cents": total_loss / len(losses) if losses else None,
+                "largest_win_cents": max(wins, default=None),
+                "largest_loss_cents": min(losses, default=None),
+                "max_realized_drawdown_cents": worst,
+                "profit_factor": total_profit / total_loss if total_loss else None,
+                "expectancy_cents": sum(realized) / len(realized) if realized else None,
+                "fees_usd": None,
+                "estimated_slippage_usd": None,
+            }
+        return {
+            "status": status["status"], "started_at": status["started_at"],
+            "deadline": status["deadline"], "generated_at": time.time(),
+            "max_new_capital_cents": 6000,
+            "agents": agents,
+            "blocked_decisions": self.db.execute(
+                "SELECT COUNT(*) FROM decisions WHERE state IN ('BLOCKED','EXIT_BLOCKED','CYCLE_BLOCKED')"
+            ).fetchone()[0],
+            "unresolved_orders": status["unresolved_orders"],
+            "note": "Open values use last observed marks and can be stale; unknown fees, slippage and portfolio cost basis are not estimated.",
+        }

@@ -100,6 +100,7 @@ class PreparedSell:
     quoted_slippage_bps: int | None = None
     reported_slippage_bps: int | None = None
     threshold_slippage_bps: int | None = None
+    signature_fee_payer: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -810,6 +811,10 @@ class SolanaAutoSeller:
             quoted_slippage_bps=quoted_slippage_bps,
             reported_slippage_bps=reported_slippage_bps,
             threshold_slippage_bps=threshold_slippage_bps,
+            signature_fee_payer=(
+                str(order["signatureFeePayer"])
+                if order.get("signatureFeePayer") else None
+            ),
         )
 
     async def execute(self, prepared: PreparedSell) -> SellReceipt:
@@ -852,6 +857,17 @@ class SolanaAutoSeller:
         excluded = ("jupiterz",)
         for _ in range(3):
             prepared = await self.prepare(intent, exclude_routers=excluded)
+            if (
+                prepared.signature_fee_payer is not None
+                and prepared.signature_fee_payer != self.signer.public_key
+            ):
+                raise AdditionalSignerError(
+                    "Jupiter returned a sponsored transaction requiring a "
+                    "second signature, even with JupiterZ excluded; this "
+                    "wallet cannot fully sign or signature-verify its sell "
+                    "preflight. Check the wallet's SOL balance and fund its "
+                    "network fees before retrying. No transaction broadcast."
+                )
             try:
                 signed = self.signer.sign(prepared.transaction)
                 break

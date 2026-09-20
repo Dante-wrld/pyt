@@ -151,3 +151,12 @@ def test_learning_promotion_requires_forward_evidence_after_costs():
         PromotionEvidence(10, 30, 1, 2, False)
     )
     assert not denied
+def test_live_exit_does_not_apply_new_buy_cap():
+    from solana_launch_guard.agents import RiskArbiter, RiskPolicy, RiskSnapshot
+
+    arbiter = RiskArbiter(RiskPolicy(allowed_modes=("live",), max_order_usd=5))
+    state = RiskSnapshot(mode="live", current_position_usd=12, quote_age_seconds=2)
+    assert arbiter.evaluate_live_exit(12, state).approved_usd == 12
+    assert not arbiter.evaluate_live_exit(13, state).approved
+    assert not arbiter.evaluate_live_exit(1.99, state).approved
+    assert not arbiter.evaluate_live_exit(12, RiskSnapshot(mode="live", current_position_usd=12, kill_switch=True)).approved
