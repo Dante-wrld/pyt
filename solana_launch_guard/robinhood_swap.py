@@ -181,7 +181,7 @@ def validate_pool(key, token, pool_id, native=ZERO):
     if key[0] != native or key[1] != token or native not in NATIVE_CURRENCIES:
         raise TrialError('Pool currencies do not match the discovered ETH/WETH pair')
     if key[4] != ZERO:
-        raise TrialError('Hooked pool requires a separate adapter review; trial blocked')
+        raise TrialError(f'Hooked pool {key[4]} (fee {key[2]}, tick spacing {key[3]}) requires a separate adapter review; trial blocked')
     if not 0 < key[2] <= 10000 or not 0 < key[3] <= 32767:
         raise TrialError('Unsupported pool fee or tick spacing')
 
