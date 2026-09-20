@@ -31,6 +31,10 @@ class QuoteGuardError(ValueError):
     """A Jupiter quote exceeded a configured price-impact or slippage cap."""
 
 
+class AdditionalSignerError(ValueError):
+    """A quoted transaction lacks a valid signature from another required signer."""
+
+
 class JupiterRequestError(ConnectionError):
     """A sanitized Jupiter HTTP failure with any public execution evidence."""
 
@@ -472,10 +476,19 @@ class KeyringSolanaSigner:
             ) from exc
 
         signatures = list(transaction.signatures)
+        if len(signatures) != required:
+            raise ValueError("Jupiter transaction has an invalid signature count")
         signatures[signer_index] = self._keypair.sign_message(
             to_bytes_versioned(transaction.message)
         )
         signed = VersionedTransaction.populate(transaction.message, signatures)
+        verified = signed.verify_with_results()
+        if not verified[signer_index]:
+            raise ValueError("wallet signature did not verify locally")
+        if not all(verified):
+            raise AdditionalSignerError(
+                "Jupiter quote requires an invalid or missing additional signature"
+            )
         return base64.b64encode(bytes(signed)).decode("ascii")
 
 
@@ -836,10 +849,22 @@ class SolanaAutoSeller:
         # JupiterZ RFQ transactions require a market-maker signature that is
         # added only by /execute. Excluding that router keeps preflight fully
         # simulatable without ever calling the execution endpoint.
-        prepared = await self.prepare(
-            intent, exclude_routers=("jupiterz",)
-        )
-        signed = self.signer.sign(prepared.transaction)
+        excluded = ("jupiterz",)
+        for _ in range(3):
+            prepared = await self.prepare(intent, exclude_routers=excluded)
+            try:
+                signed = self.signer.sign(prepared.transaction)
+                break
+            except AdditionalSignerError:
+                # Some router quotes require a signer other than this wallet.
+                # Requote once per alternative router; every quote must pass
+                # the existing amount, price impact, and slippage guards.
+                router = (prepared.router or "").strip().lower()
+                if not router or router in excluded or len(excluded) >= 3:
+                    raise
+                excluded += (router,)
+        else:
+            raise AdditionalSignerError("no fully signed alternative quote")
         simulation = await simulator.simulate_transaction(signed)
         logs = simulation.get("logs")
         units = simulation.get("unitsConsumed")
