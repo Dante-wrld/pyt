@@ -183,7 +183,7 @@ def validate_pool(key, token, pool_id, native=ZERO):
     if '0x' + keccak(encode([POOL_TYPE], [key])).hex() != pool_id:
         raise TrialError('Pool key hash mismatch')
     if key[0] != native or key[1] != token or native not in NATIVE_CURRENCIES:
-        raise TrialError('Pool currencies do not match the discovered ETH/WETH pair')
+        raise TrialError(f'Pool currencies do not match the discovered ETH/WETH pair: on-chain {key[0]}/{key[1]}, expected {native}/{token}')
     if not 0 < key[2] <= 10000 or not 0 < key[3] <= 32767:
         raise TrialError('Unsupported pool fee or tick spacing')
     if key[4] == ZERO:
