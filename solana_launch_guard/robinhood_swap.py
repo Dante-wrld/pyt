@@ -173,6 +173,11 @@ def pool_key(rpc, token, market, head):
             c0, c1 = ('0x' + t[-40:].lower() for t in topics[2:])
             fee, spacing, hooks, _, _ = decode(['uint24','int24','address','uint160','int24'], bytes.fromhex(log['data'][2:]))
             key = (c0, c1, fee, spacing, hooks.lower())
+            expected_native = market.get('native_currency', ZERO)
+            # Market data can label WETH as native ETH. The on-chain PoolKey is
+            # authoritative when it contains the known Robinhood WETH/token pair.
+            if c0 in NATIVE_CURRENCIES and c1 == token and c0 != expected_native:
+                market['native_currency'] = c0
             validate_pool(key, token, market['pool_id'], market.get('native_currency', ZERO))
             return key
         first = last + 1
