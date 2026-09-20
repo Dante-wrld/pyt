@@ -72,32 +72,55 @@ def finite_positive(value):
     return n
 
 
-def discover(token):
-    # Public market data is used for discovery and conservative USD sizing only.
-    try:
-        with urlopen(Request('https://api.dexscreener.com/latest/dex/tokens/' + token,
-                             headers={'User-Agent': 'LaunchGuard/1'}), timeout=15,
-                     context=ssl.create_default_context(cafile=certifi.where())) as response:
-            pairs = json.load(response).get('pairs') or []
-        matches = [p for p in pairs if p.get('chainId') == 'robinhood'
-                   and p.get('dexId') == 'uniswap' and 'v4' in p.get('labels', [])
-                   and p.get('baseToken', {}).get('address', '').lower() == token
-                   and p.get('quoteToken', {}).get('address', '').lower() == ZERO]
-        pair = max(matches, key=lambda p: finite_positive(p['liquidity']['usd']))
-        if finite_positive(pair['liquidity']['usd']) < 50000:
-            raise TrialError('Pool liquidity is below the $50,000 trial floor')
-        token_usd = finite_positive(pair['priceUsd'])
-        native_usd = token_usd / finite_positive(pair['priceNative'])
-        pool_id = pair['pairAddress'].lower()
-        if not re.fullmatch('0x[0-9a-f]{64}', pool_id):
-            raise TrialError('Invalid pool ID')
-        return {'pool_id': pool_id, 'created': int(pair['pairCreatedAt']) // 1000,
-                'token_usd': token_usd, 'native_usd': native_usd, 'observed_at': time.time()}
-    except TrialError:
-        raise
-    except Exception:
-        raise TrialError('Native ETH/v4 market discovery unavailable; no trade planned') from None
+def _market_pairs(token):
+    """Use Dexscreener's token-pairs endpoint, with the legacy endpoint as fallback."""
+    urls = [
+        'https://api.dexscreener.com/token-pairs/v1/robinhood/' + token,
+        'https://api.dexscreener.com/latest/dex/tokens/' + token,
+    ]
+    for url in urls:
+        try:
+            with urlopen(Request(url, headers={'User-Agent': 'LaunchGuard/1'}), timeout=15,
+                         context=ssl.create_default_context(cafile=certifi.where())) as response:
+                payload = json.load(response)
+            pairs = payload.get('pairs') if isinstance(payload, dict) else payload
+            if isinstance(pairs, list):
+                return pairs
+        except Exception:
+            pass
+    raise TrialError('Dexscreener market data is unavailable; no trade planned')
 
+
+def discover(token):
+    # Dexscreener may list native ETH as either base or quote. PoolKey validation
+    # later requires the canonical address(0)/token ordering.
+    matches = []
+    for pair in _market_pairs(token):
+        if not isinstance(pair, dict) or pair.get('chainId') != 'robinhood' or pair.get('dexId') != 'uniswap' or 'v4' not in pair.get('labels', []):
+            continue
+        base = str(pair.get('baseToken', {}).get('address', '')).lower()
+        quote = str(pair.get('quoteToken', {}).get('address', '')).lower()
+        if (base, quote) not in {(token, ZERO), (ZERO, token)}:
+            continue
+        try:
+            liquidity = finite_positive(pair['liquidity']['usd'])
+            token_usd = finite_positive(pair['priceUsd'])
+            price_native = finite_positive(pair['priceNative'])
+            created = int(pair['pairCreatedAt']) // 1000
+        except (KeyError, TypeError, ValueError, ArithmeticError):
+            continue
+        native_usd = token_usd / price_native if base == token else token_usd * price_native
+        pool_id = str(pair.get('pairAddress', '')).lower()
+        if re.fullmatch('0x[0-9a-f]{64}', pool_id):
+            matches.append((liquidity, {'pool_id': pool_id, 'created': created,
+                'token_usd': token_usd, 'native_usd': native_usd, 'observed_at': time.time(),
+                'orientation': 'token/native' if base == token else 'native/token'}))
+    if not matches:
+        raise TrialError('No native-ETH Uniswap v4 pool was returned for this token; no trade planned')
+    liquidity, market = max(matches, key=lambda item: item[0])
+    if liquidity < 50000:
+        raise TrialError('Pool liquidity is below the $50,000 trial floor')
+    return market
 
 def block_at(rpc, timestamp, high):
     low = 0
