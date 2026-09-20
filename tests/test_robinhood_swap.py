@@ -372,3 +372,10 @@ def test_hook_return_delta_stays_blocked():
     pool='0x'+keccak(encode([s.POOL_TYPE],[key])).hex()
     with pytest.raises(s.TrialError,match='return swap deltas'):
         s.validate_pool(key,TOKEN,pool)
+
+
+def test_currency_mismatch_reports_onchain_and_expected_currencies():
+    key=(s.WETH,TOKEN,3000,60,s.ZERO)
+    pool='0x'+keccak(encode([s.POOL_TYPE],[key])).hex()
+    with pytest.raises(s.TrialError,match=s.WETH):
+        s.validate_pool(key,TOKEN,pool,s.ZERO)
