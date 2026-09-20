@@ -110,6 +110,24 @@ class RiskArbiter:
     def __init__(self, policy: RiskPolicy | None = None) -> None:
         self.policy = policy or RiskPolicy()
 
+    def evaluate_shadow_exit(self, amount_usd: float, state: RiskSnapshot) -> Arbitration:
+        """Approve a simulated position exit without changing role mandates."""
+        reasons = []
+        if state.mode != "shadow" or state.mode not in self.policy.allowed_modes:
+            reasons.append("shadow mode is required")
+        if state.kill_switch or state.mint_blocked:
+            reasons.append("kill switch or mint block is active")
+        if state.quote_age_seconds > self.policy.max_quote_age_seconds:
+            reasons.append("market quote is stale")
+        if abs(state.quoted_price_impact_pct) > self.policy.max_price_impact_pct:
+            reasons.append("quoted price impact exceeds the policy limit")
+        if not math.isfinite(amount_usd) or amount_usd <= 0:
+            reasons.append("invalid exit amount")
+        if reasons:
+            return Arbitration(False, 0, tuple(reasons))
+        approved = min(amount_usd, self.policy.max_order_usd)
+        return Arbitration(True, round(approved, 8), ("passed deterministic shadow exit checks",))
+
     def evaluate(self, proposal: TradeProposal, state: RiskSnapshot) -> Arbitration:
         proposal.validate()
         reasons: list[str] = []

@@ -3337,10 +3337,10 @@ def test_portfolio_advisor_uses_cost_basis_for_partial_profit() -> None:
         chain="solana",
         token_address="MintOwned111",
         symbol="OWN",
-        quantity=100,
+        quantity=20_000,
         entry_price=0.000001,
         price_currency="SOL",
-        cost_amount=0.0001,
+        cost_amount=0.02,
     )
     quote = MarketQuote(
         mint=holding.token_address,
@@ -3353,16 +3353,16 @@ def test_portfolio_advisor_uses_cost_basis_for_partial_profit() -> None:
         pair_address="PairOwned",
         pair_created_at_ms=1,
         buys_m5=20,
-        sells_m5=10,
+        sells_m5=21,
         volume_m5_usd=5_000,
-        price_change_m5_pct=2,
+        price_change_m5_pct=-1,
     )
 
     signal = PortfolioAdvisor().evaluate(holding, quote, sol_usd=150)
 
     assert signal.decision == "TAKE PARTIAL"
     assert signal.pnl_pct == pytest.approx(35)
-    assert signal.current_value_usd == pytest.approx(0.02)
+    assert signal.current_value_usd == pytest.approx(4.0)
 
 
 def test_portfolio_advisor_warns_on_momentum_reversal_without_cost_basis() -> None:
@@ -3370,7 +3370,7 @@ def test_portfolio_advisor_warns_on_momentum_reversal_without_cost_basis() -> No
         chain="solana",
         token_address="MintRisk111",
         symbol="RISK",
-        quantity=10,
+        quantity=20_000,
     )
     quote = MarketQuote(
         mint=holding.token_address,
@@ -3427,6 +3427,7 @@ def test_owned_holding_persists_and_dashboard_is_read_only(
             [signal], wallet="Wallet111", poll_seconds=15
         ),
         color=False,
+        show_all=True,
     )
     assert "MY HOLDINGS (READ-ONLY)" in output
     assert "UNPRICED" in output
@@ -3443,6 +3444,7 @@ def test_owned_holding_persists_and_dashboard_is_read_only(
             "token_address": "MintOwned111",
             "peak_price": 0.02,
             "baseline_liquidity_usd": 50_000.0,
+            "below_sell_minimum": 0,
         }
     ]
     store.close()
@@ -3558,7 +3560,7 @@ def test_portfolio_phone_alert_is_high_priority_and_state_deduplicated(
         chain="solana",
         token_address="MintAlert111",
         symbol="ALERT",
-        quantity=100,
+        quantity=20_000,
     )
     quote = MarketQuote(
         mint=holding.token_address,

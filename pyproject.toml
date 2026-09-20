@@ -22,6 +22,7 @@ dependencies = [
 robinhood = ["eth-account>=0.13,<0.14"]
 dev = [
   "pytest>=8,<10",
+  "eth-account>=0.13,<0.14",
 ]
 
 [project.scripts]

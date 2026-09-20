@@ -1,0 +1,163 @@
+"""Deterministic, shadow-only recovery and position reviews.
+
+These decisions never construct or broadcast a transaction. The existing
+RiskArbiter remains the final authority for an entry proposal.
+"""
+from __future__ import annotations
+
+import math
+import os
+from dataclasses import dataclass
+from typing import Any
+
+
+def _number(value: Any, default: float = 0.0) -> float:
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return default
+    return result if math.isfinite(result) else default
+
+
+@dataclass(frozen=True)
+class ShadowRecoveryPolicy:
+    pullback_pct: float = 4.0
+    confirmations: int = 3
+    min_liquidity_usd: float = 5_000.0
+    min_liquidity_retention_pct: float = 80.0
+    min_score: int = 65
+    buy_sell_ratio: float = 1.2
+    trailing_activation_pct: float = 20.0
+    trailing_stop_pct: float = 12.0
+    momentum_exit_pct: float = -8.0
+    sell_pressure_ratio: float = 1.5
+    liquidity_drop_pct: float = 30.0
+    principal_multiple: float = 2.0
+    half_profit_multiple: float = 3.0
+    second_stage_fraction: float = 0.5
+    min_sell_usd: float = 2.0
+
+    @classmethod
+    def from_env(cls) -> ShadowRecoveryPolicy:
+        get = lambda name, default: float(os.getenv(name, str(default)))
+        policy = cls(
+            pullback_pct=get("PULLBACK_ZONE_MIN_PCT", 4),
+            confirmations=int(get("ENTRY_CONFIRMATION_POLLS", 3)),
+            min_liquidity_usd=get("INTELLIGENCE_MIN_LIQUIDITY_USD", 5_000),
+            min_liquidity_retention_pct=get("ENTRY_MIN_LIQUIDITY_RETENTION_PCT", 80),
+            min_score=int(get("ENTRY_MIN_SIGNAL_SCORE", 65)),
+            buy_sell_ratio=get("BUY_NOW_MIN_RATIO", 1.2),
+            trailing_activation_pct=get("TRAILING_ACTIVATION_PCT", 20),
+            trailing_stop_pct=get("TRAILING_STOP_PCT", 12),
+            momentum_exit_pct=get("MOMENTUM_EXIT_PCT", -8),
+            sell_pressure_ratio=get("SELL_PRESSURE_RATIO", 1.5),
+            liquidity_drop_pct=get("LIQUIDITY_DROP_PCT", 30),
+            principal_multiple=get("AUTO_SELL_PRINCIPAL_MULTIPLE", 2),
+            half_profit_multiple=get("AUTO_SELL_HALF_PROFIT_MULTIPLE", 3),
+            second_stage_fraction=get("AUTO_SELL_SECOND_STAGE_FRACTION", 0.5),
+            min_sell_usd=get("PORTFOLIO_MIN_SELL_VALUE_USD", 2),
+        )
+        if policy.confirmations < 3 or policy.pullback_pct <= 0 or not 0 < policy.trailing_stop_pct < 100:
+            raise ValueError("invalid shadow recovery configuration: confirmations >= 3, pullback and trailing stop required")
+        return policy
+
+
+def assess_entry(candidate: dict[str, Any], policy: ShadowRecoveryPolicy) -> dict[str, Any]:
+    """Explain all missing evidence; never infer missing market data as favorable."""
+    price = _number(candidate.get("price"))
+    peak = _number(candidate.get("peak_price"))
+    pullback = _number(candidate.get("pullback_from_peak_pct"))
+    # Peak is persisted by the recommendation engine and may be absent from
+    # its public snapshot; its computed pullback is the authoritative field.
+    if peak > price > 0:
+        pullback = max(pullback, (peak - price) / peak * 100)
+    liquidity = _number(candidate.get("liquidity_usd"))
+    baseline = _number(candidate.get("initial_liquidity_usd"))
+    count = int(_number(candidate.get("entry_confirmation_count")))
+    required = max(3, policy.confirmations, int(_number(candidate.get("entry_confirmation_required"))))
+    momentum = str(candidate.get("momentum_label") or "UNKNOWN").upper()
+    volume = str(candidate.get("volume_label") or "UNKNOWN").upper()
+    risk = str(candidate.get("risk_label") or "UNKNOWN").upper()
+    failures = []
+    if price <= 0 or pullback < policy.pullback_pct:
+        failures.append(f"meaningful pullback missing ({pullback:.1f}%/{policy.pullback_pct:.1f}%)")
+    if momentum not in {"RISING", "STRONG"} or _number(candidate.get("price_change_m5_pct"), -1) <= 0:
+        failures.append("short-term momentum has not turned upward")
+    if liquidity < policy.min_liquidity_usd or (baseline > 0 and liquidity / baseline * 100 < policy.min_liquidity_retention_pct):
+        failures.append("liquidity below floor or retention requirement")
+    if volume not in {"STEADY", "RISING"} or _number(candidate.get("buys_m5")) <= 0:
+        failures.append("volume/trading activity does not support recovery")
+    if _number(candidate.get("buy_sell_ratio")) < policy.buy_sell_ratio:
+        failures.append("buyer-to-seller ratio below recovery minimum")
+    if risk not in {"MEDIUM", "MODERATE"} or candidate.get("decision") == "AVOID":
+        failures.append("risk is outside permitted recovery band")
+    if _number(candidate.get("signal_score")) < policy.min_score:
+        failures.append("signal score below minimum")
+    if count < required:
+        failures.append(f"entry confirmations {count}/{required}")
+    if candidate.get("decision") not in {"BUY ZONE", "BUY NOW"}:
+        failures.append("recommendation has no final buy decision")
+    if not failures:
+        state = "BUY_READY"
+    elif pullback < policy.pullback_pct:
+        state = "WATCH"
+    elif momentum == "FALLING":
+        state = "PULLBACK_STARTED"
+    elif momentum in {"RISING", "STRONG"}:
+        state = "RECOVERY_CONFIRMING"
+    else:
+        state = "STABILIZING"
+    return {
+        "state": state, "decision": "BUY" if not failures else "WATCH",
+        "pullback_from_peak_pct": round(pullback, 4), "momentum": momentum,
+        "risk": risk, "liquidity": "ACCEPTABLE" if liquidity >= policy.min_liquidity_usd else "LOW",
+        "volume": volume, "entry_confirmations": f"{count}/{required}",
+        "reasons": failures or ["pullback confirmed; momentum and activity support recovery; confirmations complete"],
+    }
+
+
+def assess_exit(position: dict[str, Any], quote: dict[str, Any], policy: ShadowRecoveryPolicy) -> dict[str, Any]:
+    price = _number(quote.get("price"))
+    peak = max(_number(position.get("highest_price_since_entry")), _number(position.get("entry_price")), price)
+    entry = _number(position.get("entry_price"))
+    if price <= 0 or entry <= 0:
+        return {"state": "HOLD", "reasons": ["no usable price; position not marked"]}
+    gain = (price / entry - 1) * 100
+    peak_gain = (peak / entry - 1) * 100
+    drawdown = (peak - price) / peak * 100
+    liquidity = _number(quote.get("liquidity_usd"))
+    baseline = _number(position.get("entry_liquidity_usd"))
+    momentum = _number(quote.get("price_change_m5_pct"))
+    sells = _number(quote.get("sells_m5"))
+    buys = _number(quote.get("buys_m5"))
+    volume_label = str(quote.get("volume_label") or "UNKNOWN").upper()
+    liquidity_failure = liquidity > 0 and (liquidity < policy.min_liquidity_usd or baseline > 0 and liquidity < baseline * (1 - policy.liquidity_drop_pct / 100))
+    trend_break = momentum <= policy.momentum_exit_pct and sells >= 5 and sells / max(1, buys) >= policy.sell_pressure_ratio
+    trailing_break = peak_gain >= policy.trailing_activation_pct and drawdown >= policy.trailing_stop_pct
+    reasons = [f"return {gain:+.2f}%", f"post-entry peak drawdown {drawdown:.2f}%", f"momentum {momentum:+.2f}%"]
+    if liquidity_failure and sells > buys:
+        state = "EMERGENCY_EXIT"
+        reasons.append("liquidity collapse with net selling")
+    elif trend_break and (trailing_break or drawdown >= policy.trailing_stop_pct or quote.get("decision") == "EXIT WARNING"):
+        state = "EXIT"
+        reasons.append("confirmed reversal: momentum, selling and peak/structure evidence")
+    elif trailing_break and (sells > buys or volume_label == "FALLING"):
+        state = "EXIT"
+        reasons.append("trailing protection with deteriorating activity")
+    elif trend_break or trailing_break:
+        state = "REVERSAL_WARNING"
+        reasons.append("one reversal condition; awaiting corroboration")
+    elif gain > 0:
+        state = "PROFIT_RUNNING"
+    else:
+        state = "HOLD"
+    if state == "PROFIT_RUNNING":
+        if price / entry >= policy.principal_multiple and not position.get("principal_recovered"):
+            state = "TAKE_PARTIAL"
+            reasons.append("configured principal recovery multiple reached")
+        elif price / entry >= policy.half_profit_multiple and not position.get("second_stage_taken"):
+            state = "TAKE_PARTIAL"
+            reasons.append("configured second profit stage reached")
+    return {"state": state, "reasons": reasons, "momentum": quote.get("momentum_label", "UNKNOWN"),
+            "liquidity_usd": liquidity, "post_entry_peak": peak, "return_pct": round(gain, 4),
+            "drawdown_from_post_entry_peak_pct": round(drawdown, 4)}

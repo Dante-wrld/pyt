@@ -671,8 +671,9 @@ def build_snapshot(
     pending_count: int,
     poll_seconds: float,
     alerts: list[RecommendationCandidate] | None = None,
+    tracked_candidates: list[RecommendationCandidate] | None = None,
 ) -> dict[str, Any]:
-    return {
+    snapshot = {
         "generated_at": time.time(),
         "pending_count": pending_count,
         "poll_seconds": poll_seconds,
@@ -711,6 +712,11 @@ def build_snapshot(
                 "rise_pct": candidate.rise_pct,
                 "price_change_m5_pct": candidate.price_change_m5_pct or 0.0,
                 "liquidity_usd": candidate.liquidity_usd,
+                "initial_liquidity_usd": candidate.initial_liquidity_usd,
+                "peak_price": candidate.peak_price,
+                "buys_m5": candidate.buys_m5,
+                "sells_m5": candidate.sells_m5,
+                "buy_sell_ratio": candidate.buy_sell_ratio,
                 "price": candidate.current_price,
                 "price_currency": candidate.price_currency,
                 "decision": candidate.decision,
@@ -739,6 +745,11 @@ def build_snapshot(
             for rank, candidate in enumerate(candidates, start=1)
         ],
     }
+    if tracked_candidates is not None:
+        snapshot["tracked_candidates"] = build_snapshot(
+            tracked_candidates, pending_count=0, poll_seconds=poll_seconds,
+        )["candidates"]
+    return snapshot
 
 
 def write_snapshot(path: str | Path, snapshot: dict[str, Any]) -> None:
