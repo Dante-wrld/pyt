@@ -379,3 +379,15 @@ def test_currency_mismatch_reports_onchain_and_expected_currencies():
     pool='0x'+keccak(encode([s.POOL_TYPE],[key])).hex()
     with pytest.raises(s.TrialError,match=s.WETH):
         s.validate_pool(key,TOKEN,pool,s.ZERO)
+
+
+def test_pool_key_reconciles_native_market_label_to_verified_weth(monkeypatch):
+    key=(s.WETH,TOKEN,3000,60,s.ZERO)
+    pool='0x'+keccak(encode([s.POOL_TYPE],[key])).hex()
+    monkeypatch.setattr(s,'block_at',lambda *args:100)
+    def rpc(method,params):
+        return [{'address':s.MANAGER,'topics':[s.INIT_TOPIC,pool,'0x'+s.WETH[2:].zfill(64),'0x'+TOKEN[2:].zfill(64)],
+                 'data':'0x'+encode(['uint24','int24','address','uint160','int24'],[3000,60,s.ZERO,1,0]).hex()}]
+    market={'created':1000,'pool_id':pool,'native_currency':s.ZERO}
+    assert s.pool_key(rpc,TOKEN,market,100)==key
+    assert market['native_currency']==s.WETH
