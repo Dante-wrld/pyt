@@ -277,7 +277,7 @@ def test_discovery_uses_current_endpoint_and_accepts_reverse_orientation(monkeyp
     # StringIO provides the context manager used by urlopen.
     market=s.discover(TOKEN)
     assert seen==['https://api.dexscreener.com/token-pairs/v1/robinhood/'+TOKEN]
-    assert market['native_usd']==Decimal('0.002') and market['orientation']=='native/token'
+    assert market['native_usd']==Decimal('0.002') and market['native_currency']==s.ZERO
 
 
 def test_discovery_falls_back_to_legacy_and_reports_no_matching_pool(monkeypatch):
@@ -288,7 +288,7 @@ def test_discovery_falls_back_to_legacy_and_reports_no_matching_pool(monkeypatch
         import io
         return io.StringIO(json.dumps({'pairs':[]}))
     monkeypatch.setattr(s,'urlopen',open_)
-    with pytest.raises(s.TrialError,match='No native-ETH'):
+    with pytest.raises(s.TrialError,match='No supported ETH'):
         s.discover(TOKEN)
     assert len(calls)==2
 
@@ -303,7 +303,7 @@ def test_discovery_uses_current_endpoint_and_accepts_reverse_orientation(monkeyp
     monkeypatch.setattr(s,'urlopen',lambda request,**kw: (seen.append(request.full_url) or io.BytesIO(json.dumps(payload).encode())))
     market=s.discover(TOKEN)
     assert seen==['https://api.dexscreener.com/token-pairs/v1/robinhood/'+TOKEN]
-    assert market['native_usd']==Decimal('0.002') and market['orientation']=='native/token'
+    assert market['native_usd']==Decimal('0.002') and market['native_currency']==s.ZERO
 
 
 def test_discovery_falls_back_to_legacy_and_reports_no_matching_pool(monkeypatch):
@@ -314,6 +314,31 @@ def test_discovery_falls_back_to_legacy_and_reports_no_matching_pool(monkeypatch
         if len(calls)==1: raise OSError('unavailable')
         return io.BytesIO(json.dumps({'pairs':[]}).encode())
     monkeypatch.setattr(s,'urlopen',open_)
-    with pytest.raises(s.TrialError,match='No native-ETH'):
+    with pytest.raises(s.TrialError,match='No supported ETH'):
         s.discover(TOKEN)
     assert len(calls)==2
+
+
+def test_discovery_accepts_weth_and_buy_wraps_before_v4_swap(monkeypatch):
+    import io
+    key=(s.WETH,TOKEN,3000,60,s.ZERO)
+    pool='0x'+keccak(encode([s.POOL_TYPE],[key])).hex()
+    payload=[{'chainId':'robinhood','dexId':'uniswap','labels':['v4'],
+        'baseToken':{'address':TOKEN},'quoteToken':{'address':s.WETH},
+        'liquidity':{'usd':60000},'priceUsd':'2','priceNative':'0.001',
+        'pairCreatedAt':1000000,'pairAddress':pool}]
+    monkeypatch.setattr(s,'urlopen',lambda *a,**kw:io.BytesIO(json.dumps(payload).encode()))
+    market=s.discover(TOKEN)
+    assert market['native_currency']==s.WETH and market['native_usd']==Decimal('2000')
+    s.validate_pool(key,TOKEN,pool,market['native_currency'])
+    commands,inputs,_=decode(['bytes','bytes[]','uint256'],bytes.fromhex(s.swap_data(key,True,1000,900,999)[10:]))
+    assert commands==b'\x0b\x10\x04'
+    assert decode(['address','uint256'],inputs[0])==('0x'+'00'*19+'02',1000)
+
+
+def test_weth_sell_unwraps_to_wallet_after_v4_swap():
+    key=(s.WETH,TOKEN,3000,60,s.ZERO)
+    commands,inputs,_=decode(['bytes','bytes[]','uint256'],bytes.fromhex(s.swap_data(key,False,1000,900,999,b'permit')[10:]))
+    assert commands==b'\x0a\x10\x0c'
+    assert inputs[0]==b'permit'
+    assert decode(['address','uint256'],inputs[2])==('0x'+'00'*19+'01',900)
