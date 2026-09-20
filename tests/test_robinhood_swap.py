@@ -259,3 +259,61 @@ def test_sell_approval_and_swap_use_two_bounded_transactions(monkeypatch,tmp_pat
     assert result['broadcast'] and result['token_balance_after']=='7000000'
     journal=json.loads(s.JOURNAL.read_text())
     assert [tx['kind'] for tx in journal['transactions']]==['EXACT_APPROVAL','SWAP']
+
+
+def test_discovery_uses_current_endpoint_and_accepts_reverse_orientation(monkeypatch):
+    seen=[]
+    def response(payload):
+        class R:
+            def __enter__(self): return self
+            def __exit__(self,*args): pass
+            def read(self): return b''
+        return R()
+    payload=[{'chainId':'robinhood','dexId':'uniswap','labels':['v4'],
+        'baseToken':{'address':s.ZERO},'quoteToken':{'address':TOKEN},
+        'liquidity':{'usd':60000},'priceUsd':'2','priceNative':'0.001',
+        'pairCreatedAt':1000000,'pairAddress':POOL}]
+    monkeypatch.setattr(s,'urlopen',lambda request,**kw: (seen.append(request.full_url) or __import__('io').StringIO(__import__('json').dumps(payload))))
+    # StringIO provides the context manager used by urlopen.
+    market=s.discover(TOKEN)
+    assert seen==['https://api.dexscreener.com/token-pairs/v1/robinhood/'+TOKEN]
+    assert market['native_usd']==Decimal('0.002') and market['orientation']=='native/token'
+
+
+def test_discovery_falls_back_to_legacy_and_reports_no_matching_pool(monkeypatch):
+    calls=[]
+    def open_(request,**kw):
+        calls.append(request.full_url)
+        if len(calls)==1: raise OSError('unavailable')
+        import io
+        return io.StringIO(json.dumps({'pairs':[]}))
+    monkeypatch.setattr(s,'urlopen',open_)
+    with pytest.raises(s.TrialError,match='No native-ETH'):
+        s.discover(TOKEN)
+    assert len(calls)==2
+
+
+def test_discovery_uses_current_endpoint_and_accepts_reverse_orientation(monkeypatch):
+    import io
+    seen=[]
+    payload=[{'chainId':'robinhood','dexId':'uniswap','labels':['v4'],
+        'baseToken':{'address':s.ZERO},'quoteToken':{'address':TOKEN},
+        'liquidity':{'usd':60000},'priceUsd':'2','priceNative':'0.001',
+        'pairCreatedAt':1000000,'pairAddress':POOL}]
+    monkeypatch.setattr(s,'urlopen',lambda request,**kw: (seen.append(request.full_url) or io.BytesIO(json.dumps(payload).encode())))
+    market=s.discover(TOKEN)
+    assert seen==['https://api.dexscreener.com/token-pairs/v1/robinhood/'+TOKEN]
+    assert market['native_usd']==Decimal('0.002') and market['orientation']=='native/token'
+
+
+def test_discovery_falls_back_to_legacy_and_reports_no_matching_pool(monkeypatch):
+    import io
+    calls=[]
+    def open_(request,**kw):
+        calls.append(request.full_url)
+        if len(calls)==1: raise OSError('unavailable')
+        return io.BytesIO(json.dumps({'pairs':[]}).encode())
+    monkeypatch.setattr(s,'urlopen',open_)
+    with pytest.raises(s.TrialError,match='No native-ETH'):
+        s.discover(TOKEN)
+    assert len(calls)==2
