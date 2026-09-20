@@ -4,9 +4,13 @@ Run this on the Mac that holds the Solana signer and `.env`. It monitors launche
 and your wallet for up to eight hours. It waits for a fresh, three-confirmation
 Solana signal with at least $50,000 reported liquidity, locally preflights a
 fixed $5 USDC purchase and a reverse sale quote, and may broadcast **one** buy.
-Once acquired, the existing portfolio monitor may sell **only that confirmed
-canary mint** if its configured signal and sell checks pass. A sale is not
-guaranteed; the position may remain in the wallet at the end of eight hours.
+Once acquired, the existing portfolio monitor may sell that confirmed canary
+mint if its configured signal and sell checks pass. An optional extra-small
+sell setting also permits **one full exit in total** of an older Solana holding
+valued at $2–$5, only after three fresh `EXIT WARNING` polls and a guarded
+sale quote and simulation. It cannot sell larger old holdings under this
+option. Neither sale is guaranteed; positions may remain at the end of eight
+hours.
 The command stops its own monitor at the deadline or on Ctrl+C.
 
 This is a deterministic canary, not a live AI Hunter or Portfolio model. It
@@ -21,12 +25,19 @@ AGENT_LIVE_TEST_ENABLED=true
 AGENT_LIVE_KILL_SWITCH=false
 AGENT_LIVE_TEST_AMOUNT_USD=5
 AGENT_LIVE_CANARY_ONLY=true
+AGENT_LIVE_EXTRA_SMALL_SELL=true
 AUTO_SELL_ENABLED=true
 AUTO_SELL_LIVE=true
 AUTO_SELL_PORTFOLIO_SIGNALS=true
 AUTO_BUY_LIVE=false
 AUTO_REBUY_ENABLED=false
 ```
+
+The extra-sell flag is optional and defaults to false. An extra exit is
+durably claimed in `launch_guard_live_extra_sell.json` and its `.claim` file
+before submission; a failed quote is skipped, while a claim or uncertain
+execution requires inspection rather than automatic retry. `EXIT WARNING` can
+occur on a losing position: this option does not promise a profitable exit.
 
 The existing SOLANA_WALLET_ADDRESS and JUPITER_API_KEY are required. The
 runner does not edit `.env`, import a signer, or enable a flag. It refuses to
