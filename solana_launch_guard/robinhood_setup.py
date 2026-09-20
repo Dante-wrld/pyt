@@ -12,6 +12,7 @@ import socket
 import certifi
 import warnings
 from decimal import Decimal
+from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from urllib.parse import urlsplit
@@ -65,7 +66,7 @@ def import_key(wallet: str, backend) -> str:
         backend.set_password(SERVICE, wallet, secret.strip())
         return derived
     finally:
-        secret = None  # Python cannot guarantee erasure of immutable strings.
+        del secret  # Python cannot guarantee erasure of immutable strings.
 
 
 def verify_key(wallet: str, backend) -> str:
@@ -222,7 +223,7 @@ def check_wallet(wallet: str, rpc, token: str | None = None) -> dict:
     block = rpc("eth_blockNumber", [])
     wei = int(rpc("eth_getBalance", [wallet, block]), 16)
     code = rpc("eth_getCode", [wallet, block])
-    result = {
+    result: dict[str, Any] = {
         "chain_id": CHAIN_ID, "wallet": wallet, "block": int(block, 16),
         "native_balance_wei": str(wei), "native_balance_eth": str(Decimal(wei) / Decimal(10**18)),
         "wallet_has_code": code not in {"0x", "0x0", "0x00"},

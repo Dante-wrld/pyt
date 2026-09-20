@@ -85,25 +85,6 @@ def finite_positive(value):
 
 
 def _market_pairs(token):
-    """Use Dexscreener's token-pairs endpoint, with the legacy endpoint as fallback."""
-    urls = [
-        'https://api.dexscreener.com/token-pairs/v1/robinhood/' + token,
-        'https://api.dexscreener.com/latest/dex/tokens/' + token,
-    ]
-    for url in urls:
-        try:
-            with urlopen(Request(url, headers=MARKET_HEADERS), timeout=15,
-                         context=ssl.create_default_context(cafile=certifi.where())) as response:
-                payload = json.load(response)
-            pairs = payload.get('pairs') if isinstance(payload, dict) else payload
-            if isinstance(pairs, list):
-                return pairs
-        except Exception:
-            pass
-    raise TrialError('Dexscreener market data is unavailable; no trade planned')
-
-
-def _market_pairs(token):
     urls = ['https://api.dexscreener.com/token-pairs/v1/robinhood/' + token,
             'https://api.dexscreener.com/latest/dex/tokens/' + token]
     for url in urls:
