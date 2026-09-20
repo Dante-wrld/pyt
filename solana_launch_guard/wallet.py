@@ -373,10 +373,16 @@ class WalletWatcher:
                     async for raw in websocket:
                         payload = json.loads(raw)
                         if "id" in payload and "result" in payload:
-                            wallet = request_wallet.get(int(payload["id"]))
-                            if wallet:
-                                subscription_wallet[int(payload["result"])] = wallet
-                                LOGGER.info("Watching trader wallet %s", wallet)
+                            requested_wallet = request_wallet.get(
+                                int(payload["id"])
+                            )
+                            if requested_wallet:
+                                subscription_wallet[int(payload["result"])] = (
+                                    requested_wallet
+                                )
+                                LOGGER.info(
+                                    "Watching trader wallet %s", requested_wallet
+                                )
                             continue
 
                         params = payload.get("params") or {}
@@ -384,11 +390,15 @@ class WalletWatcher:
                         context = result.get("context") or {}
                         value = result.get("value") or {}
                         subscription = int(params.get("subscription") or 0)
-                        wallet = subscription_wallet.get(subscription)
+                        matched_wallet = subscription_wallet.get(subscription)
                         signature = str(value.get("signature") or "")
-                        if not wallet or not signature or value.get("err") is not None:
+                        if (
+                            not matched_wallet
+                            or not signature
+                            or value.get("err") is not None
+                        ):
                             continue
-                        key = (wallet, signature)
+                        key = (matched_wallet, signature)
                         if key in self._seen:
                             continue
                         self._seen.add(key)
@@ -402,7 +412,7 @@ class WalletWatcher:
                             continue
                         for trade in parse_wallet_trades(
                             transaction,
-                            wallet,
+                            matched_wallet,
                             signature,
                             int(context.get("slot") or 0),
                         ):

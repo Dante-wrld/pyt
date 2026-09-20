@@ -184,7 +184,7 @@ class DexScreenerOracle:
 
         payload = self._request_json("https://api.robinhood.com/rhj/assets")
         excluded: set[str] = set()
-        symbols: set[str] = set()
+        collected_symbols: set[str] = set()
         assets = payload.get("assets") if isinstance(payload, dict) else None
         if not isinstance(assets, list):
             if self._stock_token_cache is not None:
@@ -198,7 +198,7 @@ class DexScreenerOracle:
                 continue
             symbol = str(asset.get("tokenSymbol") or "").strip().casefold()
             if symbol:
-                symbols.add(symbol)
+                collected_symbols.add(symbol)
             deployments = asset.get("deployments")
             if not isinstance(deployments, list):
                 continue
@@ -217,7 +217,7 @@ class DexScreenerOracle:
                 if address:
                     excluded.add(address.casefold())
         result = frozenset(excluded)
-        stock_symbols = frozenset(symbols)
+        stock_symbols = frozenset(collected_symbols)
         self._stock_token_cache = (now, result, stock_symbols)
         return result, stock_symbols
 
@@ -239,9 +239,12 @@ class DexScreenerOracle:
                 continue
             if chain == "solana" and quote_token.get("address") != WSOL_MINT:
                 continue
+            price_field = "priceNative" if chain == "solana" else "priceUsd"
+            raw_price = pair.get(price_field)
+            if raw_price is None:
+                continue
             try:
-                price_field = "priceNative" if chain == "solana" else "priceUsd"
-                price = float(pair.get(price_field))
+                price = float(raw_price)
             except (TypeError, ValueError):
                 continue
             if price > 0:
@@ -329,8 +332,11 @@ class DexScreenerOracle:
                 return 0.0
 
         pair = max(candidates, key=liquidity)
+        raw_price = pair.get("priceUsd")
+        if raw_price is None:
+            return None
         try:
-            price = float(pair.get("priceUsd"))
+            price = float(raw_price)
         except (TypeError, ValueError):
             return None
         return price if price > 0 else None
