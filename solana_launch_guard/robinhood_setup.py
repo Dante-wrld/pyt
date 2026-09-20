@@ -18,6 +18,7 @@ from urllib.parse import urlsplit
 
 from eth_account import Account
 from eth_account.messages import encode_defunct
+from eth_abi import encode, decode
 from .config import _load_dotenv
 
 CHAIN_ID = 4663
@@ -140,22 +141,42 @@ def inspect_wallet(wallet: str, rpc, secret: str) -> dict:
         raise ValueError("Stored key does not match configured wallet")
     # A fixed harmless message binds a conventional EIP-191 signature to this address.
     signed = account.sign_message(encode_defunct(text="Launch Guard wallet compatibility check"))
-    calldata = "0x1626ba7e" + _bytes32(bytes(signed.message_hash)) + format(64, "064x") + format(len(signed.signature), "064x") + signed.signature.hex().ljust(64 * 2, "0")
+    calldata = "0x1626ba7e" + encode(
+        ["bytes32", "bytes"], [bytes(signed.message_hash), bytes(signed.signature)]
+    ).hex()
     result = {
         "chain_id": CHAIN_ID, "wallet": wallet, "block": int(block, 16),
         "wallet_code_bytes": len(raw_code), "eip7702_delegation_target": None,
-        "eip1271_supported": None, "broadcast": False, "live_execution": False,
+        "eip1271_supported": None, "signature_probe_status": "NOT_RUN",
+        "wallet_type": "EOA" if not raw_code else "CONTRACT",
+        "broadcast": False, "live_execution": False,
         "ready_for_direct_execution": False,
         "next_step": "No execution path is enabled.",
     }
     if raw_code.startswith(bytes.fromhex("ef0100")) and len(raw_code) == 23:
         result["eip7702_delegation_target"] = "0x" + raw_code[3:].hex()
-        result["next_step"] = "EIP-7702 delegation detected; sponsored-gas/account-abstraction compatibility still requires simulation."
+        result["wallet_type"] = "EIP7702_DELEGATED_EOA"
+        result["next_step"] = "Delegated EOAs may originate transactions; gas funding and swap simulation remain required."
     if raw_code:
-        response = rpc("eth_call", [{"to": wallet, "data": calldata}, block])
-        result["eip1271_supported"] = isinstance(response, str) and response.lower().startswith("0x1626ba7e")
-        if result["eip1271_supported"]:
-            result["next_step"] = "EIP-1271 signature accepted; account-abstraction route still requires simulation and a sponsor/bundler."
+        try:
+            response = rpc("eth_call", [{"to": wallet, "data": calldata}, block])
+        except ValueError:
+            # Preserve code classification even when this optional probe fails.
+            result["signature_probe_status"] = "RPC_OR_CALL_FAILED"
+        else:
+            try:
+                if not isinstance(response, str) or not response.startswith("0x"):
+                    raise ValueError()
+                response_bytes = bytes.fromhex(response[2:])
+                if len(response_bytes) != 32:
+                    raise ValueError()
+                magic = decode(["bytes4"], response_bytes)[0]
+            except Exception:
+                result["signature_probe_status"] = "INVALID_RETURN_DATA"
+            else:
+                result["eip1271_supported"] = magic == bytes.fromhex("1626ba7e")
+                result["signature_probe_status"] = "ACCEPTED" if result["eip1271_supported"] else "NOT_ACCEPTED"
+    result["signature_probe_scope"] = "Tests one EIP-191 signature only; failure does not prove EIP-1271 is unsupported."
     return result
 
 
@@ -219,6 +240,7 @@ def main():
                 raise ValueError("No Robinhood key stored; run --import-signer locally")
             try:
                 result = inspect_wallet(wallet, rpc, secret)
+                result["balance_check"] = check_wallet(wallet, rpc)
             finally:
                 secret = None
         else:
