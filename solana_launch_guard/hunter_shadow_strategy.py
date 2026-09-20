@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import math
 import os
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -36,6 +37,8 @@ class ShadowRecoveryPolicy:
     half_profit_multiple: float = 3.0
     second_stage_fraction: float = 0.5
     min_sell_usd: float = 2.0
+    stagnation_window_seconds: float = 900.0
+    stagnation_min_gain_pct: float = 3.0
 
     @classmethod
     def from_env(cls) -> ShadowRecoveryPolicy:
@@ -54,11 +57,15 @@ class ShadowRecoveryPolicy:
             liquidity_drop_pct=get("LIQUIDITY_DROP_PCT", 30),
             principal_multiple=get("AUTO_SELL_PRINCIPAL_MULTIPLE", 2),
             half_profit_multiple=get("AUTO_SELL_HALF_PROFIT_MULTIPLE", 3),
+            stagnation_window_seconds=get("STAGNATION_WINDOW_SECONDS", 900),
+            stagnation_min_gain_pct=get("STAGNATION_MIN_GAIN_PCT", 3),
             second_stage_fraction=get("AUTO_SELL_SECOND_STAGE_FRACTION", 0.5),
             min_sell_usd=get("PORTFOLIO_MIN_SELL_VALUE_USD", 2),
         )
-        if policy.confirmations < 3 or policy.pullback_pct <= 0 or not 0 < policy.trailing_stop_pct < 100:
-            raise ValueError("invalid shadow recovery configuration: confirmations >= 3, pullback and trailing stop required")
+        if (policy.confirmations < 3 or policy.pullback_pct <= 0
+                or not 0 < policy.trailing_stop_pct < 100
+                or policy.stagnation_window_seconds <= 0):
+            raise ValueError("invalid shadow recovery configuration: confirmations >= 3, pullback, trailing stop and stagnation window required")
         return policy
 
 
@@ -116,7 +123,10 @@ def assess_entry(candidate: dict[str, Any], policy: ShadowRecoveryPolicy) -> dic
     }
 
 
-def assess_exit(position: dict[str, Any], quote: dict[str, Any], policy: ShadowRecoveryPolicy) -> dict[str, Any]:
+def assess_exit(
+    position: dict[str, Any], quote: dict[str, Any], policy: ShadowRecoveryPolicy,
+    *, now: float | None = None,
+) -> dict[str, Any]:
     price = _number(quote.get("price"))
     peak = max(_number(position.get("highest_price_since_entry")), _number(position.get("entry_price")), price)
     entry = _number(position.get("entry_price"))
@@ -131,9 +141,27 @@ def assess_exit(position: dict[str, Any], quote: dict[str, Any], policy: ShadowR
     sells = _number(quote.get("sells_m5"))
     buys = _number(quote.get("buys_m5"))
     volume_label = str(quote.get("volume_label") or "UNKNOWN").upper()
+    opened_at = _number(position.get("opened_at"))
+    # opened_at missing/invalid -> age 0, so the stagnation check below never
+    # fires on data we don't actually have (never infer missing data as
+    # grounds for an exit, same principle as the rest of this module).
+    age_seconds = ((now if now is not None else time.time()) - opened_at) if opened_at > 0 else 0.0
     liquidity_failure = liquidity > 0 and (liquidity < policy.min_liquidity_usd or baseline > 0 and liquidity < baseline * (1 - policy.liquidity_drop_pct / 100))
     trend_break = momentum <= policy.momentum_exit_pct and sells >= 5 and sells / max(1, buys) >= policy.sell_pressure_ratio
     trailing_break = peak_gain >= policy.trailing_activation_pct and drawdown >= policy.trailing_stop_pct
+    # Bought expecting a bounce; gave it the configured grace window, and
+    # there's still no rise (gain below the bar) and no sign of one forming
+    # (momentum non-positive) - exit proactively rather than wait for a
+    # confirmed reversal that trend_break/trailing_break would eventually
+    # catch anyway, likely at a worse price. volume_label isn't included
+    # here: live_trial.py's cycle() doesn't currently populate it on the
+    # quote passed in (it's always "UNKNOWN" there), so a volume-rising
+    # requirement would be vacuous rather than a real gate.
+    stagnant = (
+        age_seconds >= policy.stagnation_window_seconds
+        and gain < policy.stagnation_min_gain_pct
+        and momentum <= 0
+    )
     reasons = [f"return {gain:+.2f}%", f"post-entry peak drawdown {drawdown:.2f}%", f"momentum {momentum:+.2f}%"]
     if liquidity_failure and sells > buys:
         state = "EMERGENCY_EXIT"
@@ -144,6 +172,12 @@ def assess_exit(position: dict[str, Any], quote: dict[str, Any], policy: ShadowR
     elif trailing_break and (sells > buys or volume_label == "FALLING"):
         state = "EXIT"
         reasons.append("trailing protection with deteriorating activity")
+    elif stagnant:
+        state = "EXIT"
+        reasons.append(
+            f"no sign of a rise {age_seconds / 60:.0f} min after entry "
+            f"(gain {gain:+.2f}%, momentum {momentum:+.2f}%, volume {volume_label})"
+        )
     elif trend_break or trailing_break:
         state = "REVERSAL_WARNING"
         reasons.append("one reversal condition; awaiting corroboration")

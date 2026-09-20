@@ -56,6 +56,33 @@ def test_confirmed_reversal_and_liquidity_collapse_take_priority_over_partial():
     assert assess_exit(position, candidate(price=3.5), ShadowRecoveryPolicy())["state"] == "TAKE_PARTIAL"
 
 
+def test_stagnant_position_exits_after_grace_window_with_no_rise():
+    position = {"entry_price": 1, "highest_price_since_entry": 1, "opened_at": 1_000}
+    row = candidate(price=0.99, price_change_m5_pct=-1, buys_m5=10, sells_m5=10)
+    # Before the grace window: not yet judged stagnant, and it's not up
+    # either, so it just holds.
+    before = assess_exit(position, row, ShadowRecoveryPolicy(), now=1_000 + 899)
+    assert before["state"] == "HOLD"
+    # After the window, still no rise and no positive momentum: exit.
+    after = assess_exit(position, row, ShadowRecoveryPolicy(), now=1_000 + 901)
+    assert after["state"] == "EXIT"
+    assert "no sign of a rise" in " ".join(after["reasons"])
+
+
+def test_positive_momentum_prevents_a_stagnant_exit():
+    position = {"entry_price": 1, "highest_price_since_entry": 1, "opened_at": 1_000}
+    row = candidate(price=0.99, price_change_m5_pct=2, buys_m5=10, sells_m5=10)
+    review = assess_exit(position, row, ShadowRecoveryPolicy(), now=1_000 + 2_000)
+    assert review["state"] == "HOLD"
+
+
+def test_missing_opened_at_never_triggers_a_stagnant_exit():
+    position = {"entry_price": 1, "highest_price_since_entry": 1}
+    row = candidate(price=0.99, price_change_m5_pct=-1, buys_m5=10, sells_m5=10)
+    review = assess_exit(position, row, ShadowRecoveryPolicy(), now=10**9)
+    assert review["state"] == "HOLD"
+
+
 def test_persisted_high_water_partial_sell_and_performance_survive_restart(tmp_path):
     path = tmp_path / "capital.json"
     book = CapitalBook(path)
