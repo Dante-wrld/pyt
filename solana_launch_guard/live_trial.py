@@ -65,7 +65,13 @@ def _snapshot_is_fresh(snapshot: dict) -> bool:
         age = time.time() - float(snapshot.get("generated_at") or 0)
     except (ValueError, TypeError):
         return False
-    return math.isfinite(age) and 0 <= age <= 15
+    # Same 30s bound as _live_arbiter()'s max_quote_age_seconds, and for the
+    # same reason: cycle() checks this snapshot again after a model.propose()
+    # round trip (e.g. hunter-v1's eligibility check runs after portfolio-v1
+    # has already evaluated its own proposal in the same cycle), so a bound
+    # this tight can fail purely from that latency rather than genuine
+    # staleness.
+    return math.isfinite(age) and 0 <= age <= 30
 
 
 def require_exclusive_trial_flags() -> None:
