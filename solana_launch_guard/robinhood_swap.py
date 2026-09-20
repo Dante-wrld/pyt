@@ -33,6 +33,8 @@ ROUTER = '0x204faca1764b154221e35c0d20abb3c525710498'  # UniversalRouter 2.1.2
 MANAGER = '0x8366a39cc670b4001a1121b8f6a443a643e40951'
 QUOTER = '0x8dc178efb8111bb0973dd9d722ebeff267c98f94'
 PERMIT2 = '0x000000000022d473030f116ddee9f6b43ac78ba3'
+WETH = '0x0bd7d308f8e1639fab988df18a8011f41eacad73'
+NATIVE_CURRENCIES = {ZERO, WETH}
 POOL_TYPE = '(address,address,uint24,int24,address)'
 INIT_TOPIC = '0x' + keccak(text='Initialize(bytes32,address,address,uint24,int24,address,uint160,int24)').hex()
 TRANSFER = '0x' + keccak(text='Transfer(address,address,uint256)').hex()
@@ -91,35 +93,39 @@ def _market_pairs(token):
     raise TrialError('Dexscreener market data is unavailable; no trade planned')
 
 
+def _market_pairs(token):
+    urls = ['https://api.dexscreener.com/token-pairs/v1/robinhood/' + token,
+            'https://api.dexscreener.com/latest/dex/tokens/' + token]
+    for url in urls:
+        try:
+            with urlopen(Request(url, headers={'User-Agent': 'LaunchGuard/1'}), timeout=15,
+                         context=ssl.create_default_context(cafile=certifi.where())) as response:
+                payload = json.load(response)
+            pairs = payload.get('pairs') if isinstance(payload, dict) else payload
+            if isinstance(pairs, list): return pairs
+        except Exception: pass
+    raise TrialError('Dexscreener market data is unavailable; no trade planned')
+
+
 def discover(token):
-    # Dexscreener may list native ETH as either base or quote. PoolKey validation
-    # later requires the canonical address(0)/token ordering.
     matches = []
     for pair in _market_pairs(token):
-        if not isinstance(pair, dict) or pair.get('chainId') != 'robinhood' or pair.get('dexId') != 'uniswap' or 'v4' not in pair.get('labels', []):
-            continue
+        if not isinstance(pair, dict) or pair.get('chainId') != 'robinhood' or pair.get('dexId') != 'uniswap' or 'v4' not in pair.get('labels', []): continue
         base = str(pair.get('baseToken', {}).get('address', '')).lower()
         quote = str(pair.get('quoteToken', {}).get('address', '')).lower()
-        if (base, quote) not in {(token, ZERO), (ZERO, token)}:
-            continue
+        native = quote if base == token and quote in NATIVE_CURRENCIES else base if quote == token and base in NATIVE_CURRENCIES else None
+        if native is None: continue
         try:
-            liquidity = finite_positive(pair['liquidity']['usd'])
-            token_usd = finite_positive(pair['priceUsd'])
-            price_native = finite_positive(pair['priceNative'])
+            liquidity, token_usd, price_native = finite_positive(pair['liquidity']['usd']), finite_positive(pair['priceUsd']), finite_positive(pair['priceNative'])
             created = int(pair['pairCreatedAt']) // 1000
-        except (KeyError, TypeError, ValueError, ArithmeticError):
-            continue
+        except (KeyError, TypeError, ValueError, ArithmeticError): continue
         native_usd = token_usd / price_native if base == token else token_usd * price_native
         pool_id = str(pair.get('pairAddress', '')).lower()
         if re.fullmatch('0x[0-9a-f]{64}', pool_id):
-            matches.append((liquidity, {'pool_id': pool_id, 'created': created,
-                'token_usd': token_usd, 'native_usd': native_usd, 'observed_at': time.time(),
-                'orientation': 'token/native' if base == token else 'native/token'}))
-    if not matches:
-        raise TrialError('No native-ETH Uniswap v4 pool was returned for this token; no trade planned')
-    liquidity, market = max(matches, key=lambda item: item[0])
-    if liquidity < 50000:
-        raise TrialError('Pool liquidity is below the $50,000 trial floor')
+            matches.append((liquidity, {'pool_id':pool_id,'created':created,'token_usd':token_usd,'native_usd':native_usd,'observed_at':time.time(),'native_currency':native}))
+    if not matches: raise TrialError('No supported ETH or WETH Uniswap v4 pool was returned for this token; no trade planned')
+    liquidity, market = max(matches, key=lambda item:item[0])
+    if liquidity < 50000: raise TrialError('Pool liquidity is below the $50,000 trial floor')
     return market
 
 def block_at(rpc, timestamp, high):
@@ -153,16 +159,16 @@ def pool_key(rpc, token, market, head):
             c0, c1 = ('0x' + t[-40:].lower() for t in topics[2:])
             fee, spacing, hooks, _, _ = decode(['uint24','int24','address','uint160','int24'], bytes.fromhex(log['data'][2:]))
             key = (c0, c1, fee, spacing, hooks.lower())
-            validate_pool(key, token, market['pool_id'])
+            validate_pool(key, token, market['pool_id'], market.get('native_currency', ZERO))
             return key
     raise TrialError('Pool Initialize event not found; no fee/hook parameters guessed')
 
 
-def validate_pool(key, token, pool_id):
+def validate_pool(key, token, pool_id, native=ZERO):
     if '0x' + keccak(encode([POOL_TYPE], [key])).hex() != pool_id:
         raise TrialError('Pool key hash mismatch')
-    if key[0] != ZERO or key[1] != token:
-        raise TrialError('Only native ETH/token pools are supported')
+    if key[0] != native or key[1] != token or native not in NATIVE_CURRENCIES:
+        raise TrialError('Pool currencies do not match the discovered ETH/WETH pair')
     if key[4] != ZERO:
         raise TrialError('Hooked pool requires a separate adapter review; trial blocked')
     if not 0 < key[2] <= 10000 or not 0 < key[3] <= 32767:
@@ -202,21 +208,31 @@ def quote(rpc, key, buy, amount):
 
 def swap_data(key, buy, amount, minimum, deadline, permit=None):
     # Interface pinned to the 2.1.2 release dependency; never use upstream main.
+    wrapped = key[0] == WETH
     swap = encode([f'({POOL_TYPE},bool,uint128,uint128,uint256,bytes)'], [(key, buy, amount, minimum, minimum * 10**36 // amount, b'')])
     incoming, outgoing = (key[0], key[1]) if buy else (key[1], key[0])
-    actions = encode(['bytes','bytes[]'], [bytes.fromhex('060c0f'), [swap,
-        encode(['address','uint256'], [incoming, amount]),
-        encode(['address','uint256'], [outgoing, minimum])]])
-    commands, inputs = b'\x10', [actions]
-    if buy:
-        # Return any unspent native input after a partial pool fill. Address 1
-        # is the Universal Router's mapped MSG_SENDER recipient.
-        commands += b'\x04'
-        inputs.append(encode(['address','address','uint256'], [ZERO, '0x'+'00'*19+'01', 0]))
-    if permit:
-        commands, inputs = b'\x0a\x10', [permit, actions]
-    return calldata('execute(bytes,bytes[],uint256)', ['bytes','bytes[]','uint256'], [commands, inputs, deadline])
-
+    # TAKE_ALL always sends to msg.sender. Wrapped sell must instead hold WETH
+    # in the router before UNWRAP_WETH returns native ETH to msg.sender.
+    if wrapped and not buy:
+        actions = encode(['bytes','bytes[]'], [bytes.fromhex('060c0e'), [swap,
+            encode(['address','uint256'], [incoming, amount]),
+            encode(['address','address','uint256'], [outgoing, '0x'+'00'*19+'02', minimum])]])
+    else:
+        actions = encode(['bytes','bytes[]'], [bytes.fromhex('060c0f'), [swap,
+            encode(['address','uint256'], [incoming, amount]),
+            encode(['address','uint256'], [outgoing, minimum])]])
+    commands, inputs = [], []
+    if permit: commands.append(b'\x0a'); inputs.append(permit)
+    if wrapped and buy:
+        commands.append(b'\x0b'); inputs.append(encode(['address','uint256'], ['0x'+'00'*19+'02', amount]))
+    commands.append(b'\x10'); inputs.append(actions)
+    if wrapped and not buy:
+        commands.append(b'\x0c'); inputs.append(encode(['address','uint256'], ['0x'+'00'*19+'01', minimum]))
+    elif wrapped and buy:
+        commands.append(b'\x04'); inputs.append(encode(['address','address','uint256'], [WETH, '0x'+'00'*19+'01', 0]))
+    elif buy:
+        commands.append(b'\x04'); inputs.append(encode(['address','address','uint256'], [ZERO, '0x'+'00'*19+'01', 0]))
+    return calldata('execute(bytes,bytes[],uint256)', ['bytes','bytes[]','uint256'], [b''.join(commands), inputs, deadline])
 
 def permit_data(rpc, wallet, token, amount, deadline, secret):
     _, _, nonce = call(rpc, PERMIT2, 'allowance(address,address,address)',
