@@ -7,8 +7,12 @@ import json
 import os
 import re
 import sys
+import ssl
+import socket
+import certifi
 import warnings
 from decimal import Decimal
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from urllib.parse import urlsplit
 
@@ -84,14 +88,36 @@ class ReadOnlyRpc:
             raise ValueError("Only read-only RPC methods are permitted")
         data = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).encode()
         try:
-            with urlopen(Request(self.url, data=data, headers={"Content-Type": "application/json"}), timeout=15) as response:
+            with urlopen(Request(self.url, data=data, headers={"Content-Type": "application/json"}), timeout=15, context=ssl.create_default_context(cafile=certifi.where())) as response:
                 result = json.load(response)
-            if result.get("id") != 1 or "error" in result or "result" not in result:
-                raise ValueError()
-            return result["result"]
+        except HTTPError as exc:
+            raise ValueError(f"Robinhood RPC {method}: HTTP {exc.code}; check provider access or rate limits") from None
+        except (TimeoutError, socket.timeout):
+            raise ValueError(f"Robinhood RPC {method}: timed out after 15 seconds; try a working provider endpoint") from None
+        except (URLError, ssl.SSLError) as exc:
+            reason = getattr(exc, "reason", exc)
+            if isinstance(reason, ssl.SSLError):
+                category = "TLS certificate/handshake failure"
+            elif isinstance(reason, socket.gaierror):
+                category = "DNS lookup failed"
+            elif isinstance(reason, TimeoutError):
+                category = "connection timed out"
+            else:
+                category = "connection failed"
+            raise ValueError(f"Robinhood RPC {method}: {category}") from None
         except Exception:
-            # Endpoint URLs and provider errors may contain credentials.
-            raise ValueError("Robinhood RPC read failed; check endpoint/connectivity locally") from None
+            raise ValueError(f"Robinhood RPC {method}: invalid or unreadable response") from None
+        # Never print URLs, response bodies or server error text: they may echo keys.
+        if not isinstance(result, dict) or result.get("id") != 1:
+            raise ValueError(f"Robinhood RPC {method}: invalid response envelope")
+        if "error" in result:
+            error = result["error"]
+            code = error.get("code") if isinstance(error, dict) else None
+            suffix = f" (code {code})" if type(code) is int else ""
+            raise ValueError(f"Robinhood RPC {method}: provider rejected request{suffix}")
+        if "result" not in result:
+            raise ValueError(f"Robinhood RPC {method}: missing result")
+        return result["result"]
 
 
 def check_wallet(wallet: str, rpc, token: str | None = None) -> dict:
