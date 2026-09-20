@@ -463,13 +463,13 @@ def verify_transfers(receipt, token, wallet, planned):
         raise TrialError('Mined swap token debit differs from plan; review receipt')
 
 
-def main():
+def main(argv=None):
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--token',required=True)
     parser.add_argument('--side',choices=['buy','sell'],required=True)
     parser.add_argument('--usd',default='3')
     parser.add_argument('--execute',action='store_true')
-    args=parser.parse_args()
+    args=parser.parse_args(argv)
     journal=None
     claimed=False
     try:
