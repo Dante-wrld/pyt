@@ -3124,7 +3124,8 @@ async def preflight_owned_auto_sell(
 
 
 async def execute_owned_sell_once(
-    settings: Settings, store: SQLiteStore, mint: str, confirmation: str | None
+    settings: Settings, store: SQLiteStore, mint: str, confirmation: str | None,
+    *, before_broadcast=None,
 ) -> dict[str, Any]:
     """Explicit single-mint exit; claim durably before any possible broadcast."""
     from .agent_live_test import CanaryJournal
@@ -3182,6 +3183,8 @@ async def execute_owned_sell_once(
                       if item.mint == mint), None)
     if refreshed is None or refreshed.raw_amount != balance.raw_amount:
         raise ValueError("wallet balance changed during sell simulation")
+    if before_broadcast is not None:
+        before_broadcast()
     attempt = {"mint": mint, "wallet": signer.public_key, "status": "PENDING",
                "at": time.time(), "input_amount_raw": prepared.input_amount_raw,
                "minimum_output_usdc": prepared.minimum_output_raw / 1_000_000}
