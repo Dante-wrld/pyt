@@ -3,12 +3,13 @@ from __future__ import annotations
 import logging
 
 from .core import Launch
+from .launch_guard_state import LaunchGuardState
 from .wallet import WalletTrade
 
 LOGGER = logging.getLogger("solana_launch_guard")
 
 
-class WalletCopyMixin:
+class WalletCopyMixin(LaunchGuardState):
     """Copy-trading a watched wallet's buys."""
 
     async def handle_wallet_trade(self, trade: WalletTrade) -> None:

@@ -4,6 +4,7 @@ import logging
 import asyncio
 from typing import Any
 
+from .launch_guard_state import LaunchGuardState
 from .market import MarketQuote
 from .multichain import (
     EvmRpc,
@@ -18,7 +19,7 @@ from .launch_guard_support import _is_stock_token_symbol
 LOGGER = logging.getLogger("solana_launch_guard")
 
 
-class MultichainMixin:
+class MultichainMixin(LaunchGuardState):
     """Multichain (EVM/HyperCore/Robinhood) wallet feeds."""
 
     async def run_multichain_feed(self, chains: tuple[str, ...]) -> None:

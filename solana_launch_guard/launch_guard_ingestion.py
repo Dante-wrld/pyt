@@ -12,13 +12,14 @@ from typing import Any
 
 from .core import Launch
 from .intelligence import IntelligenceResult
+from .launch_guard_state import LaunchGuardState
 from .market import MarketQuote
 from .recommendations import RecommendationCandidate
 
 LOGGER = logging.getLogger("solana_launch_guard")
 
 
-class LaunchIngestionMixin:
+class LaunchIngestionMixin(LaunchGuardState):
     """New-launch discovery, intelligence scoring, and the auto-buy discovery watch loop."""
 
     async def run_launch_feed(self) -> None:

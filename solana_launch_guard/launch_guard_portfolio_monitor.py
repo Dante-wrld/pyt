@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from dataclasses import replace
 
 from .core import Launch
+from .launch_guard_state import LaunchGuardState
 from .market import MarketQuote
 from .portfolio import (
     OwnedHolding,
@@ -22,7 +23,7 @@ from .wallet import (
 LOGGER = logging.getLogger("solana_launch_guard")
 
 
-class PortfolioMonitorMixin:
+class PortfolioMonitorMixin(LaunchGuardState):
     """Polling owned positions, pricing them, and routing them to the sell/rebuy checks."""
 
     async def run_price_monitor(self) -> None:

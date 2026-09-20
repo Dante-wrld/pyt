@@ -6,6 +6,7 @@ from .execution import (
     BuyIntent,
     USDC_MINT,
 )
+from .launch_guard_state import LaunchGuardState
 from .portfolio import OwnedHolding
 from .recommendations import RecommendationCandidate
 from .wallet import SolanaRpc
@@ -14,7 +15,7 @@ from .launch_guard_support import auto_buy_discovery_rejection
 LOGGER = logging.getLogger("solana_launch_guard")
 
 
-class AutoBuyMixin:
+class AutoBuyMixin(LaunchGuardState):
     """Deciding whether to open a new live position from a recommendation candidate."""
 
     async def _maybe_auto_buy(

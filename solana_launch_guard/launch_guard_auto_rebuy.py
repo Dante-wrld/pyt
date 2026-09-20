@@ -10,6 +10,7 @@ from .execution import (
     BuyIntent,
     USDC_MINT,
 )
+from .launch_guard_state import LaunchGuardState
 from .market import MarketQuote
 from .portfolio import OwnedHolding
 from .rebuy_assessment import auto_rebuy_recovery_assessment
@@ -21,7 +22,7 @@ from .wallet import (
 LOGGER = logging.getLogger("solana_launch_guard")
 
 
-class AutoRebuyMixin:
+class AutoRebuyMixin(LaunchGuardState):
     """Deciding whether to re-enter a position after a stop-out."""
 
     async def _monitor_auto_rebuys(

@@ -6,6 +6,7 @@ import os
 import time
 from dataclasses import replace
 
+from .launch_guard_state import LaunchGuardState
 from .portfolio import PortfolioSignal
 from .wallet import (
     SolanaRpc,
@@ -15,7 +16,7 @@ from .wallet import (
 LOGGER = logging.getLogger("solana_launch_guard")
 
 
-class AutoSellMixin:
+class AutoSellMixin(LaunchGuardState):
     """Deciding whether and how much of an owned position to sell."""
 
     async def _maybe_auto_sell(

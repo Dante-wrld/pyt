@@ -5,6 +5,7 @@ import asyncio
 import sys
 import time
 
+from .launch_guard_state import LaunchGuardState
 from .recommendations import (
     build_snapshot,
     format_recommendations,
@@ -14,7 +15,7 @@ from .recommendations import (
 LOGGER = logging.getLogger("solana_launch_guard")
 
 
-class RecommendationMonitorMixin:
+class RecommendationMonitorMixin(LaunchGuardState):
     """The recommendation dashboard refresh loop."""
 
     async def run_recommendation_monitor(self) -> None:
