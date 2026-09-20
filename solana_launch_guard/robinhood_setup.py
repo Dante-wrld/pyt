@@ -17,6 +17,7 @@ from urllib.request import Request, urlopen
 from urllib.parse import urlsplit
 
 from eth_account import Account
+from eth_account.messages import encode_defunct
 from .config import _load_dotenv
 
 CHAIN_ID = 4663
@@ -120,6 +121,44 @@ class ReadOnlyRpc:
         return result["result"]
 
 
+def _bytes32(value: bytes) -> str:
+    return value.hex().rjust(64, "0")
+
+
+def inspect_wallet(wallet: str, rpc, secret: str) -> dict:
+    """Classify wallet code and test EIP-1271 through eth_call only."""
+    wallet = address(wallet)
+    if int(rpc("eth_chainId", []), 16) != CHAIN_ID:
+        raise ValueError("RPC chain mismatch: expected Robinhood mainnet 4663")
+    block = rpc("eth_blockNumber", [])
+    code = rpc("eth_getCode", [wallet, block])
+    if not isinstance(code, str) or not re.fullmatch(r"0x[0-9a-fA-F]*", code):
+        raise ValueError("Invalid wallet code response")
+    raw_code = bytes.fromhex(code[2:])
+    account = Account.from_key(secret)
+    if account.address.lower() != wallet:
+        raise ValueError("Stored key does not match configured wallet")
+    # A fixed harmless message binds a conventional EIP-191 signature to this address.
+    signed = account.sign_message(encode_defunct(text="Launch Guard wallet compatibility check"))
+    calldata = "0x1626ba7e" + _bytes32(bytes(signed.message_hash)) + format(64, "064x") + format(len(signed.signature), "064x") + signed.signature.hex().ljust(64 * 2, "0")
+    result = {
+        "chain_id": CHAIN_ID, "wallet": wallet, "block": int(block, 16),
+        "wallet_code_bytes": len(raw_code), "eip7702_delegation_target": None,
+        "eip1271_supported": None, "broadcast": False, "live_execution": False,
+        "ready_for_direct_execution": False,
+        "next_step": "No execution path is enabled.",
+    }
+    if raw_code.startswith(bytes.fromhex("ef0100")) and len(raw_code) == 23:
+        result["eip7702_delegation_target"] = "0x" + raw_code[3:].hex()
+        result["next_step"] = "EIP-7702 delegation detected; sponsored-gas/account-abstraction compatibility still requires simulation."
+    if raw_code:
+        response = rpc("eth_call", [{"to": wallet, "data": calldata}, block])
+        result["eip1271_supported"] = isinstance(response, str) and response.lower().startswith("0x1626ba7e")
+        if result["eip1271_supported"]:
+            result["next_step"] = "EIP-1271 signature accepted; account-abstraction route still requires simulation and a sponsor/bundler."
+    return result
+
+
 def check_wallet(wallet: str, rpc, token: str | None = None) -> dict:
     wallet = address(wallet)
     if int(rpc("eth_chainId", []), 16) != CHAIN_ID:
@@ -162,6 +201,7 @@ def main():
     group.add_argument("--import-signer", action="store_true")
     group.add_argument("--verify-signer", action="store_true")
     group.add_argument("--check-wallet", action="store_true")
+    group.add_argument("--inspect-wallet", action="store_true")
     parser.add_argument("--token", help="Optional public ERC-20 contract for --check-wallet")
     args = parser.parse_args()
     try:
@@ -169,8 +209,18 @@ def main():
         wallet = address(os.getenv("ROBINHOOD_WALLET_ADDRESS") or os.getenv("EVM_WALLET_ADDRESS") or "")
         if args.token and not args.check_wallet:
             raise ValueError("--token requires --check-wallet")
+        rpc = ReadOnlyRpc(os.getenv("ROBINHOOD_RPC_URL") or DEFAULT_RPC)
         if args.check_wallet:
-            result = check_wallet(wallet, ReadOnlyRpc(os.getenv("ROBINHOOD_RPC_URL") or DEFAULT_RPC), args.token)
+            result = check_wallet(wallet, rpc, args.token)
+        elif args.inspect_wallet:
+            backend = keychain()
+            secret = backend.get_password(SERVICE, wallet)
+            if not secret:
+                raise ValueError("No Robinhood key stored; run --import-signer locally")
+            try:
+                result = inspect_wallet(wallet, rpc, secret)
+            finally:
+                secret = None
         else:
             backend = keychain()
             derived = import_key(wallet, backend) if args.import_signer else verify_key(wallet, backend)

@@ -39,3 +39,15 @@ https://docs.robinhood.com/chain/connecting/
 
 Uniswap deployment reference (deployment alone does not verify a swap):
 https://developers.uniswap.org/docs/protocols/v4/deployments
+
+To inspect a contract/delegated Fomo wallet without broadcasting, run:
+
+```sh
+.venv/bin/launch-guard-robinhood --inspect-wallet
+```
+
+It reads contract code at a fixed block and makes a non-state-changing
+EIP-1271 `eth_call` using a locally generated signature. It never prints the
+private key and never signs or submits a transaction. A positive EIP-1271
+result confirms only signature validation; it does not demonstrate that a swap,
+gas sponsor, or account-abstraction submission will work.
