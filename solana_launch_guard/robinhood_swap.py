@@ -145,9 +145,19 @@ def pool_key(rpc, token, market, head):
     end = min(head, block_at(rpc, market['created'] + 120, head))
     if end - start > 10000:
         raise TrialError('Pool discovery window exceeds the bounded scan')
-    for first in range(start, end + 1, 100):
-        logs = rpc('eth_getLogs', [{'address': MANAGER, 'fromBlock': hex(first),
-                    'toBlock': hex(min(first + 99, end)), 'topics': [INIT_TOPIC, market['pool_id']]}])
+    first, batch = start, 100
+    while first <= end:
+        last = min(first + batch - 1, end)
+        try:
+            logs = rpc('eth_getLogs', [{'address': MANAGER, 'fromBlock': hex(first),
+                        'toBlock': hex(last), 'topics': [INIT_TOPIC, market['pool_id']]}])
+        except TrialError as exc:
+            if 'HTTP 413' not in str(exc) and 'range' not in str(exc).lower():
+                raise
+            if batch == 1:
+                raise TrialError('Robinhood RPC rejected even a one-block pool-log query') from None
+            batch = max(1, batch // 2)
+            continue
         if not isinstance(logs, list):
             raise TrialError('Invalid pool log response')
         for log in logs:
@@ -161,6 +171,7 @@ def pool_key(rpc, token, market, head):
             key = (c0, c1, fee, spacing, hooks.lower())
             validate_pool(key, token, market['pool_id'], market.get('native_currency', ZERO))
             return key
+        first = last + 1
     raise TrialError('Pool Initialize event not found; no fee/hook parameters guessed')
 
 
