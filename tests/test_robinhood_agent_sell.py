@@ -32,6 +32,22 @@ def test_agent_cannot_change_sell_token_size_or_confidence():
             a.decide(proposal(**changes), TOKEN, Decimal(3))
 
 
+def test_invalid_token_and_missing_or_invalid_wallet_are_identified(monkeypatch):
+    monkeypatch.delenv('ROBINHOOD_WALLET_ADDRESS', raising=False)
+    monkeypatch.delenv('EVM_WALLET_ADDRESS', raising=False)
+    with pytest.raises(ValueError, match='--token'):
+        a.run('TOKEN_ADDRESS', 3)
+    with pytest.raises(ValueError, match='Set ROBINHOOD_WALLET_ADDRESS'):
+        a.preflight(TOKEN, Decimal(3))
+    monkeypatch.setenv('ROBINHOOD_WALLET_ADDRESS', 'YOUR_PUBLIC_ADDRESS')
+    with pytest.raises(ValueError, match='ROBINHOOD_WALLET_ADDRESS is not'):
+        a.preflight(TOKEN, Decimal(3))
+    monkeypatch.setenv('ROBINHOOD_WALLET_ADDRESS', '')
+    monkeypatch.setenv('EVM_WALLET_ADDRESS', 'YOUR_PUBLIC_ADDRESS')
+    with pytest.raises(ValueError, match='EVM_WALLET_ADDRESS is not'):
+        a.preflight(TOKEN, Decimal(3))
+
+
 def test_no_model_request_when_owned_sell_quote_or_gas_fails(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     def failed(*args):
