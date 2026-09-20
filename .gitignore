@@ -22,3 +22,7 @@ launch_guard_agent_decisions.jsonl
 launch_guard_copy_signals.json
 
 launch_guard_live_canary.json
+
+launch_guard_agent_sell_session.json*
+launch_guard_live_sell_*.json*
+launch_guard_live_canary.json.*
