@@ -182,3 +182,39 @@ def test_portfolio_owned_exit_can_exceed_five_dollars_without_bypassing_guards(t
     assert not book.unresolved()
     assert book.status()["total_remaining_buy_cap_cents"] == 6000
     book.close()
+
+
+def test_signal_expiring_during_simulation_never_reserves_or_broadcasts(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    book = LiveTrialLedger(tmp_path / "trial.sqlite")
+    book.start()
+    checks = iter((True, False))
+
+    class Rpc:
+        async def token_balance(self, owner, mint):
+            return SimpleNamespace(raw_amount=100_000_000, decimals=6)
+
+    class Seller:
+        max_price_impact_pct = 3
+        max_slippage_bps = 300
+
+        async def preflight(self, plan, rpc):
+            return SimpleNamespace(prepared=SimpleNamespace(
+                input_amount_raw=plan.amount_raw, minimum_output_raw=9_000_000,
+                quoted_price_impact_pct=-1, quoted_slippage_bps=100,
+            ))
+
+        async def execute(self, prepared):
+            pytest.fail("a stale signal cannot broadcast")
+
+    with pytest.raises(TrialHalted, match="EXIT BLOCKED: exit signal changed"):
+        asyncio.run(execute_live_exit(
+            ledger=book, agent="portfolio-v1", mint=MINT, symbol="TEST",
+            decision="SELL", position_value_usd=12, quote_age_seconds=2,
+            liquidity_usd=60_000, fraction=1, rpc=Rpc(), seller=Seller(),
+            store=None, wallet="synthetic-owner",
+            current_exit_allowed=lambda: next(checks),
+        ))
+    assert not book.unresolved()
+    assert book.status()["status"] == "ACTIVE"
+    book.close()

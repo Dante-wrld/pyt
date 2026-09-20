@@ -286,7 +286,7 @@ async def execute_live_exit(
     if not math.isfinite(fraction) or not 0 < fraction <= 1:
         raise ValueError("invalid owned position exit fraction")
     if not current_exit_allowed():
-        raise TrialHalted("exit signal expired or changed")
+        raise TrialHalted("EXIT BLOCKED: exit signal expired or changed before reservation")
     ledger.assert_active()
     if (seller.max_price_impact_pct > max_price_impact_pct
         or seller.max_slippage_bps > max_slippage_bps):
@@ -337,7 +337,7 @@ async def execute_live_exit(
         or prepared.quoted_slippage_bps > max_slippage_bps):
         raise TrialHalted("EXIT BLOCKED: exact quote impact or slippage exceeds live limits")
     if not current_exit_allowed():
-        raise TrialHalted("exit signal changed during sell simulation")
+        raise TrialHalted("EXIT BLOCKED: exit signal changed during sell simulation")
     ledger.reserve_sell(intent=key, agent=agent, mint=mint)
     ledger.log(agent=agent, mint=mint, state="RESERVED",
                reason=f"exit {decision}; token amount {prepared.input_amount_raw}")

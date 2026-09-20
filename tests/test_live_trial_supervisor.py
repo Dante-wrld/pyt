@@ -1,7 +1,8 @@
 """Pure trial gates: importing this module cannot broadcast."""
+import asyncio
 import pytest
 
-from solana_launch_guard.live_trial import BoundedTrialModel, _sell_choice, require_exclusive_trial_flags
+from solana_launch_guard.live_trial import BoundedTrialModel, _guarded_exit, _sell_choice, require_exclusive_trial_flags
 from solana_launch_guard.live_trial_ledger import LiveTrialLedger, TrialHalted
 from solana_launch_guard.agents import AgentRole
 
@@ -66,4 +67,41 @@ def test_model_request_budget_persists_across_reopen(tmp_path, monkeypatch):
     with pytest.raises(TrialHalted, match="model requests"):
         BoundedTrialModel(Model(), book).propose(role=AgentRole.PORTFOLIO_MANAGER, context={})
     assert book.model_request_count() == 1
+    book.close()
+
+
+def test_expired_exit_blocks_one_sell_without_stopping_trial(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    book = LiveTrialLedger(tmp_path / "trial.sqlite")
+    book.start()
+    result = asyncio.run(_guarded_exit(
+        ledger=book, agent="portfolio-v1", mint="A" * 44,
+        requested_usd=12, current_exit_allowed=lambda: False,
+        decision="SELL", fraction=1, position_value_usd=12,
+        quote_age_seconds=2, liquidity_usd=60_000,
+        rpc=None, seller=None, store=None, wallet="synthetic-owner",
+        symbol="TEST",
+    ))
+    assert result is None
+    assert book.status()["status"] == "ACTIVE"
+    assert not book.unresolved()
+    assert book.status()["recent_decisions"][0]["state"] == "EXIT_BLOCKED"
+    book.close()
+
+
+def test_expired_exit_never_suppresses_an_unresolved_order(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    book = LiveTrialLedger(tmp_path / "trial.sqlite")
+    book.start()
+    book.reserve_sell(intent="already-submitted", agent="portfolio-v1", mint="A" * 44)
+    with pytest.raises(TrialHalted, match="EXIT BLOCKED"):
+        asyncio.run(_guarded_exit(
+            ledger=book, agent="portfolio-v1", mint="A" * 44,
+            requested_usd=12, current_exit_allowed=lambda: False,
+            decision="SELL", fraction=1, position_value_usd=12,
+            quote_age_seconds=2, liquidity_usd=60_000,
+            rpc=None, seller=None, store=None, wallet="synthetic-owner",
+            symbol="TEST",
+        ))
+    assert len(book.unresolved()) == 1
     book.close()
