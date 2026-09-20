@@ -53,3 +53,18 @@ def test_token_and_gas_checks():
     assert result["token_balance_raw"] == "1234567"
     assert result["token_decimals"] == 6
     assert len(result["blockers"]) == 3
+
+
+@pytest.mark.parametrize('error, expected', [
+    (TimeoutError('secret'), 'timed out'),
+    (__import__('urllib.error', fromlist=['HTTPError']).HTTPError('https://secret', 429, 'secret', {}, None), 'HTTP 429'),
+    (__import__('urllib.error', fromlist=['URLError']).URLError(__import__('ssl').SSLCertVerificationError('secret')), 'TLS'),
+])
+def test_rpc_errors_are_actionable_and_redacted(monkeypatch, error, expected):
+    def fail(*args, **kwargs):
+        assert kwargs['context'].check_hostname
+        raise error
+    monkeypatch.setattr('solana_launch_guard.robinhood_setup.urlopen', fail)
+    with pytest.raises(ValueError, match=expected) as caught:
+        ReadOnlyRpc('https://example.com/secret')('eth_chainId', [])
+    assert 'secret' not in str(caught.value)
