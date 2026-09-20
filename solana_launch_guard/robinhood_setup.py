@@ -80,13 +80,14 @@ def verify_key(wallet: str, backend) -> str:
 
 
 class ReadOnlyRpc:
+    METHODS = {"eth_chainId", "eth_blockNumber", "eth_getBalance", "eth_getCode", "eth_call"}
     def __init__(self, url: str):
         if urlsplit(url).scheme != "https":
             raise ValueError("ROBINHOOD_RPC_URL must use HTTPS")
         self.url = url
 
     def __call__(self, method: str, params: list):
-        if method not in {"eth_chainId", "eth_blockNumber", "eth_getBalance", "eth_getCode", "eth_call"}:
+        if method not in self.METHODS:
             raise ValueError("Only read-only RPC methods are permitted")
         data = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).encode()
         try:
@@ -193,7 +194,7 @@ def check_wallet(wallet: str, rpc, token: str | None = None) -> dict:
         "wallet_has_code": code not in {"0x", "0x0", "0x00"},
         "live_execution": False, "broadcast": False, "swap_simulated": False,
         "ready_for_live": False,
-        "blockers": ["Robinhood swap execution adapter is not implemented"],
+        "blockers": ["Run robinhood_swap preflight to validate the route, approvals and gas"],
     }
     if wei == 0:
         result["blockers"].append("No native ETH balance for direct transaction gas")
