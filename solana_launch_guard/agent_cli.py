@@ -236,7 +236,11 @@ def _priced_sell_signal(value: object) -> dict[str, object]:
             continue
         if all(map(math.isfinite, (price, amount, liquidity))) and price > 0 and amount >= 2 and liquidity > 0:
             eligible.append(item)
-    return max(eligible, key=lambda x: (priorities[x["decision"]], float(x["current_value_usd"])), default={})
+
+    def _sort_key(x: dict[str, object]) -> tuple[int, float]:
+        return priorities[str(x["decision"])], float(str(x["current_value_usd"]))
+
+    return max(eligible, key=_sort_key, default={})
 
 
 def _solana_opportunity(value: object) -> dict[str, object]:
@@ -256,7 +260,7 @@ def _solana_opportunity(value: object) -> dict[str, object]:
 
 def _snapshot_is_fresh(snapshot: dict[str, object], *, now: float | None = None) -> bool:
     try:
-        age = (time.time() if now is None else now) - float(snapshot.get("generated_at") or 0)
+        age = (time.time() if now is None else now) - float(str(snapshot.get("generated_at") or 0))
     except (TypeError, ValueError):
         return False
     return 0 <= age <= 15
@@ -272,7 +276,7 @@ def shadow_core_loop(book: CapitalBook, *, interval_seconds: int = 60) -> None:
                 recommendations = _read_json(os.getenv("RECOMMENDATION_SNAPSHOT_PATH", "launch_guard_recommendations.json"))
                 portfolio = _read_json(os.getenv("PORTFOLIO_SNAPSHOT_PATH", "launch_guard_portfolio.json"))
                 fresh = (
-                    _snapshot_is_fresh(recommendations) and bool(_solana_opportunity(recommendations.get("candidates")) or (recommendations.get("tracked_candidates") and book.load()["agents"]["hunter-v1"]["positions"])),
+                    _snapshot_is_fresh(recommendations) and bool(_solana_opportunity(recommendations.get("candidates")) or (recommendations.get("tracked_candidates") and (book.load() or {}).get("agents", {}).get("hunter-v1", {}).get("positions"))),
                     _snapshot_is_fresh(portfolio) and bool(
                         _priced_sell_signal(portfolio.get("signals"))
                         or portfolio.get("loss_sale_reviews")
@@ -308,14 +312,16 @@ def shadow_once(model: OpenAIProposalModel | None, book: CapitalBook, *, portfol
     )
     recovery_policy = ShadowRecoveryPolicy.from_env()
     shadow_arbiter = RiskArbiter(RiskPolicy(max_order_usd=5, max_position_pct=100, max_open_positions=2))
-    observed = recommendations.get("candidates", [])
-    tracked = recommendations.get("tracked_candidates", [])
+    observed_raw = recommendations.get("candidates", [])
+    tracked_raw = recommendations.get("tracked_candidates", [])
+    observed: list[object] = observed_raw if isinstance(observed_raw, list) else []
+    tracked: list[object] = tracked_raw if isinstance(tracked_raw, list) else []
     fresh_quotes = {
         item["mint"]: item for item in (tracked + observed)
         if isinstance(item, dict) and item.get("chain") == "solana"
         and isinstance(item.get("mint"), str)
         and 0 <= time.time() - float(item.get("quoted_at") or 0) <= 15
-    } if (_snapshot_is_fresh(recommendations) and isinstance(observed, list) and isinstance(tracked, list)) else {}
+    } if _snapshot_is_fresh(recommendations) else {}
     candidate_reviews = {item["mint"]: assess_entry(fresh_quotes[item["mint"]], recovery_policy)
                          for item in observed if isinstance(item, dict) and item.get("mint") in fresh_quotes}
     shadow_reviews: list[dict[str, object]] = []
@@ -365,25 +371,26 @@ def shadow_once(model: OpenAIProposalModel | None, book: CapitalBook, *, portfol
                     if not math.isfinite(slippage) or not 0 <= slippage < 100:
                         slippage = 0
                     review["shadow_fill"] = book.close_shadow_position("hunter-v1", mint, fraction=fraction, stage=stage, slippage_pct=slippage)
-                    review["remaining_position"] = book.load()["agents"]["hunter-v1"]["positions"].get(mint)
+                    review["remaining_position"] = (book.load() or {}).get("agents", {}).get("hunter-v1", {}).get("positions", {}).get(mint)
                 else:
                     review["reasons"].append(f"shadow exit blocked or below ${recovery_policy.min_sell_usd:.2f} minimum")
             shadow_reviews.append(review)
     candidate = _solana_opportunity(recommendations.get("candidates")) if core_only and _snapshot_is_fresh(recommendations) else ({} if core_only else _first_dict(recommendations.get("candidates")))
     holding = _priced_sell_signal(portfolio.get("signals")) if (portfolio_sell_only or core_only) and _snapshot_is_fresh(portfolio) else ({} if portfolio_sell_only or core_only else _first_dict(portfolio.get("signals")))
     leader = _first_dict(copy_data.get("signals"))
+    loss_sale_reviews_raw = portfolio.get("loss_sale_reviews")
     reviews = (
-        [item for item in portfolio.get("loss_sale_reviews", []) if isinstance(item, dict)]
-        if _snapshot_is_fresh(portfolio) and isinstance(portfolio.get("loss_sale_reviews"), list)
+        [item for item in loss_sale_reviews_raw if isinstance(item, dict)]
+        if _snapshot_is_fresh(portfolio) and isinstance(loss_sale_reviews_raw, list)
         else []
     )
     inputs = (
         ("hunter-v1", AgentRole.OPPORTUNITY_HUNTER, {
             "candidate": candidate,
-            "watched_candidates": [item for item in recommendations.get("candidates", [])
+            "watched_candidates": [item for item in observed
                                    if isinstance(item, dict) and item.get("chain") == "solana"
                                    and 0 <= time.time() - float(item.get("quoted_at") or 0) <= 15][:20]
-                                  if _snapshot_is_fresh(recommendations) and isinstance(recommendations.get("candidates"), list) else [],
+                                  if _snapshot_is_fresh(recommendations) else [],
             "loss_sale_reviews": reviews,
         }),
         ("portfolio-v1", AgentRole.PORTFOLIO_MANAGER,
