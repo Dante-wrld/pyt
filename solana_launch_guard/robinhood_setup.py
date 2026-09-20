@@ -79,18 +79,33 @@ def verify_key(wallet: str, backend) -> str:
         secret = None
 
 
-def _revert_selector(error) -> str | None:
-    """Return only four validated on-chain revert bytes; never return RPC text."""
+def _revert_data(error) -> bytes | None:
+    """Read bounded, strictly hexadecimal revert data without exposing RPC text."""
     value = error
     for _ in range(3):
         if isinstance(value, str):
             if len(value) > 4096:
                 return None
-            return value[:10].lower() if re.fullmatch(r"0x[0-9a-fA-F]{8}(?:[0-9a-fA-F]{2})*", value) else None
+            return bytes.fromhex(value[2:]) if re.fullmatch(r"0x[0-9a-fA-F]{8}(?:[0-9a-fA-F]{2})*", value) else None
         if not isinstance(value, dict):
             return None
         value = value.get("data", value.get("originalError"))
     return None
+
+
+def _revert_selectors(error) -> tuple[str | None, str | None]:
+    data = _revert_data(error)
+    if data is None:
+        return None, None
+    outer = '0x' + data[:4].hex()
+    # Uniswap v4 QuoterRevert.UnexpectedRevertBytes(bytes) wraps the actual
+    # revert. Decode only the nested selector, never a dynamic error message.
+    if outer != '0x6190b2b0' or len(data) < 72 or int.from_bytes(data[4:36], 'big') != 32:
+        return outer, None
+    length = int.from_bytes(data[36:68], 'big')
+    if not 4 <= length <= len(data) - 68:
+        return outer, None
+    return outer, '0x' + data[68:72].hex()
 
 
 class ReadOnlyRpc:
@@ -131,9 +146,11 @@ class ReadOnlyRpc:
             error = result["error"]
             code = error.get("code") if isinstance(error, dict) else None
             suffix = f" (code {code})" if type(code) is int else ""
-            selector = _revert_selector(error)
+            selector, inner = _revert_selectors(error)
             if selector:
                 suffix += f" (revert selector {selector})"
+            if inner:
+                suffix += f" (wrapped revert selector {inner})"
             raise ValueError(f"Robinhood RPC {method}: provider rejected request{suffix}")
         if "result" not in result:
             raise ValueError(f"Robinhood RPC {method}: missing result")
