@@ -39,6 +39,7 @@ POOL_TYPE = '(address,address,uint24,int24,address)'
 INIT_TOPIC = '0x' + keccak(text='Initialize(bytes32,address,address,uint24,int24,address,uint160,int24)').hex()
 TRANSFER = '0x' + keccak(text='Transfer(address,address,uint256)').hex()
 JOURNAL = Path('launch_guard_robinhood_trial.json')
+MARKET_HEADERS = {'User-Agent': 'curl/8.0', 'Accept': 'application/json', 'Accept-Encoding': 'identity'}
 BEFORE_SWAP_FLAG = 1 << 7
 AFTER_SWAP_FLAG = 1 << 6
 BEFORE_SWAP_RETURNS_DELTA_FLAG = 1 << 3
@@ -86,7 +87,7 @@ def _market_pairs(token):
     ]
     for url in urls:
         try:
-            with urlopen(Request(url, headers={'User-Agent': 'LaunchGuard/1'}), timeout=15,
+            with urlopen(Request(url, headers=MARKET_HEADERS), timeout=15,
                          context=ssl.create_default_context(cafile=certifi.where())) as response:
                 payload = json.load(response)
             pairs = payload.get('pairs') if isinstance(payload, dict) else payload
@@ -102,7 +103,7 @@ def _market_pairs(token):
             'https://api.dexscreener.com/latest/dex/tokens/' + token]
     for url in urls:
         try:
-            with urlopen(Request(url, headers={'User-Agent': 'LaunchGuard/1'}), timeout=15,
+            with urlopen(Request(url, headers=MARKET_HEADERS), timeout=15,
                          context=ssl.create_default_context(cafile=certifi.where())) as response:
                 payload = json.load(response)
             pairs = payload.get('pairs') if isinstance(payload, dict) else payload
