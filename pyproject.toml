@@ -19,11 +19,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+robinhood = ["eth-account>=0.13,<0.14"]
 dev = [
   "pytest>=8,<10",
 ]
 
 [project.scripts]
+launch-guard-robinhood = "solana_launch_guard.robinhood_setup:main"
 launch-guard = "solana_launch_guard.app:main"
 launch-guard-agents = "solana_launch_guard.agent_cli:main"
 
