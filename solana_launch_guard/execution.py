@@ -537,7 +537,7 @@ class JupiterSwapClient:
         input_mint: str,
         output_mint: str = USDC_MINT,
         amount_raw: int,
-        taker: str,
+        taker: str | None = None,
         exclude_routers: tuple[str, ...] = (),
     ) -> dict[str, Any]:
         parameters = {

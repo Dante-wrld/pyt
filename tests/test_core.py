@@ -619,6 +619,34 @@ def test_jupiter_preflight_order_excludes_rfq_router(
     assert "excludeRouters=jupiterz" in requested_url
 
 
+def test_jupiter_order_without_taker_omits_it_from_the_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reverse-quote callers (live canary/trial exit checks) omit taker,
+    relying on OrderClient's optional taker; the concrete client must accept
+    that instead of raising a missing-argument TypeError."""
+    client = JupiterSwapClient(api_key="key")
+    requested_url = ""
+
+    def fake_request(url: str, payload: object) -> dict[str, object]:
+        nonlocal requested_url
+        requested_url = url
+        assert payload is None
+        return {}
+
+    monkeypatch.setattr(client, "_request_json", fake_request)
+
+    asyncio.run(
+        client.order(
+            input_mint="MintProfit111",
+            output_mint=USDC_MINT,
+            amount_raw=10,
+        )
+    )
+
+    assert "taker=" not in requested_url
+
+
 def test_jupiter_execute_sends_block_height_as_string(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
