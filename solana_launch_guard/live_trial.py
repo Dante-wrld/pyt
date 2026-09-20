@@ -174,6 +174,8 @@ async def cycle(*, ledger: LiveTrialLedger, settings: Settings, rpc: SolanaRpc,
     if ledger.unresolved():
         raise TrialHalted("unresolved order; stop for chain reconciliation")
     wallet = settings.solana_wallet_address
+    if not wallet or not settings.jupiter_api_key:
+        raise TrialHalted("Solana wallet and Jupiter API key are required")
     try:
         signer = KeyringSolanaSigner(expected_public_key=wallet)
     except (ValueError, RuntimeError) as exc:
