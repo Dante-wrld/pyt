@@ -55,6 +55,10 @@ class EvmTransfer:
         return f"{self.transaction_hash}:{self.log_index}"
 
 
+class LogRangeLimitError(ConnectionError):
+    """Provider explicitly rejected the requested log range/response size."""
+
+
 class EvmRpc:
     def __init__(self, url: str) -> None:
         self.url = url
@@ -100,6 +104,8 @@ class EvmRpc:
                     f"{chain} eth_getLogs failed for blocks "
                     f"{from_block}-{to_block}"
                 )
+            if not isinstance(result, list) or any(not isinstance(item, dict) for item in result):
+                raise ConnectionError(f"{chain} eth_getLogs returned an invalid log list")
             if isinstance(result, list):
                 raw_logs.extend(
                     (direction, item)
@@ -195,9 +201,28 @@ class EvmRpc:
                 request, timeout=15, context=self._ssl
             ) as response:
                 payload = json.load(response)
-        except (OSError, ValueError, urllib.error.URLError):
+        except urllib.error.HTTPError as exc:
+            if method == "eth_getLogs":
+                raise ConnectionError(f"eth_getLogs HTTP {exc.code}; check provider permissions or rate limits") from None
             return None
-        if not isinstance(payload, dict) or payload.get("error"):
+        except (OSError, ValueError, urllib.error.URLError):
+            if method == "eth_getLogs":
+                raise ConnectionError("eth_getLogs transport/TLS/response failure") from None
+            return None
+        if not isinstance(payload, dict):
+            if method == "eth_getLogs":
+                raise ConnectionError("eth_getLogs invalid response envelope")
+            return None
+        if payload.get("error"):
+            if method == "eth_getLogs":
+                error = payload["error"]
+                message = str(error.get("message", "")).lower() if isinstance(error, dict) else ""
+                range_markers = ("block range", "range too large", "too many results", "response size", "maximum block", "limit the query", "limited to a", "limited to an")
+                if any(marker in message for marker in range_markers):
+                    raise LogRangeLimitError("eth_getLogs provider range/result limit; reducing batch size")
+                code = error.get("code") if isinstance(error, dict) else None
+                suffix = f" (code {code})" if type(code) is int else ""
+                raise ConnectionError("eth_getLogs provider rejected request" + suffix)
             return None
         return payload.get("result")
 
@@ -222,6 +247,7 @@ class EvmWalletWatcher:
 
     async def run_forever(self) -> None:
         next_block: int | None = None
+        batch_size = 500
         backoff = 1
         while True:
             try:
@@ -237,13 +263,21 @@ class EvmWalletWatcher:
                         next_block,
                     )
                 while next_block <= latest:
-                    end_block = min(latest, next_block + 499)
-                    transfers = await self.rpc.transfers(
-                        chain=self.chain,
-                        wallet=self.wallet,
-                        from_block=next_block,
-                        to_block=end_block,
-                    )
+                    end_block = min(latest, next_block + batch_size - 1)
+                    try:
+                        transfers = await self.rpc.transfers(
+                            chain=self.chain,
+                            wallet=self.wallet,
+                            from_block=next_block,
+                            to_block=end_block,
+                        )
+                    except LogRangeLimitError:
+                        attempted = end_block - next_block + 1
+                        if attempted <= 1:
+                            raise
+                        batch_size = max(1, attempted // 2)
+                        LOGGER.info("%s reducing wallet log batch to %d blocks", self.chain, batch_size)
+                        continue  # Same cursor: failed ranges are never skipped.
                     for transfer in transfers:
                         await self.callback(transfer)
                     next_block = end_block + 1
@@ -420,3 +454,4 @@ class HyperCoreWatcher:
                 )
             )
         return sorted(result, key=lambda item: item.timestamp_ms, reverse=True)
+
