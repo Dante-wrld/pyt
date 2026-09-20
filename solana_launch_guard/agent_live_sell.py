@@ -98,8 +98,11 @@ async def run():
     from .execution import KeyringSolanaSigner
     from .openai_agents import OpenAIProposalModel
     from .app import execute_owned_sell_once, verify_owned_sell
-    settings = replace(Settings.from_env(), auto_sell_max_price_impact_pct=3.0,
-                       auto_sell_max_slippage_bps=300, portfolio_min_sell_value_usd=2.0)
+    settings = Settings.from_env()
+    settings = replace(settings,
+        auto_sell_max_price_impact_pct=min(3.0, settings.auto_sell_max_price_impact_pct),
+        auto_sell_max_slippage_bps=min(300, settings.auto_sell_max_slippage_bps),
+        portfolio_min_sell_value_usd=max(2.0, settings.portfolio_min_sell_value_usd))
     if not settings.solana_wallet_address or not settings.jupiter_api_key:
         raise ValueError("Solana wallet and Jupiter API key are required")
     signer = KeyringSolanaSigner(expected_public_key=settings.solana_wallet_address)
