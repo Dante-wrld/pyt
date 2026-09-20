@@ -2267,6 +2267,7 @@ class LaunchGuard:
             )
             snapshot = build_snapshot(
                 ranked,
+                tracked_candidates=list(self.recommendations.candidates.values()),
                 pending_count=(
                     len(self.candidate_tasks) + self.multichain_pending_count
                 ),

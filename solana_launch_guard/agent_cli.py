@@ -11,6 +11,7 @@ from pathlib import Path
 from openai import OpenAIError
 
 from .agent_capital import CapitalBook
+from .hunter_shadow_strategy import ShadowRecoveryPolicy, assess_entry, assess_exit
 from .agents import (
     AgentCoordinator,
     AgentRecord,
@@ -80,6 +81,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="show shadow cash, reserved capital, and open-position counts",
     )
+    group.add_argument("--shadow-performance", action="store_true", help="show persisted hunter shadow-trade performance")
     group.add_argument(
         "--shadow-once",
         action="store_true",
@@ -258,7 +260,7 @@ def shadow_core_loop(book: CapitalBook, *, interval_seconds: int = 60) -> None:
                 recommendations = _read_json(os.getenv("RECOMMENDATION_SNAPSHOT_PATH", "launch_guard_recommendations.json"))
                 portfolio = _read_json(os.getenv("PORTFOLIO_SNAPSHOT_PATH", "launch_guard_portfolio.json"))
                 fresh = (
-                    _snapshot_is_fresh(recommendations) and bool(_solana_opportunity(recommendations.get("candidates"))),
+                    _snapshot_is_fresh(recommendations) and bool(_solana_opportunity(recommendations.get("candidates")) or (recommendations.get("tracked_candidates") and book.load()["agents"]["hunter-v1"]["positions"])),
                     _snapshot_is_fresh(portfolio) and bool(
                         _priced_sell_signal(portfolio.get("signals"))
                         or portfolio.get("loss_sale_reviews")
@@ -292,6 +294,69 @@ def shadow_once(model: OpenAIProposalModel | None, book: CapitalBook, *, portfol
     copy_data = _read_json(
         os.getenv("AGENT_COPY_SIGNAL_PATH", "launch_guard_copy_signals.json")
     )
+    recovery_policy = ShadowRecoveryPolicy.from_env()
+    shadow_arbiter = RiskArbiter(RiskPolicy(max_order_usd=5, max_position_pct=100, max_open_positions=2))
+    observed = recommendations.get("candidates", [])
+    tracked = recommendations.get("tracked_candidates", [])
+    fresh_quotes = {
+        item["mint"]: item for item in (tracked + observed)
+        if isinstance(item, dict) and item.get("chain") == "solana"
+        and isinstance(item.get("mint"), str)
+        and 0 <= time.time() - float(item.get("quoted_at") or 0) <= 15
+    } if (_snapshot_is_fresh(recommendations) and isinstance(observed, list) and isinstance(tracked, list)) else {}
+    candidate_reviews = {item["mint"]: assess_entry(fresh_quotes[item["mint"]], recovery_policy)
+                         for item in observed if isinstance(item, dict) and item.get("mint") in fresh_quotes}
+    shadow_reviews: list[dict[str, object]] = []
+    if not portfolio_sell_only:
+        # Existing position marks and exits use the same fresh, read-only quote
+        # snapshot as entries; a missing quote can never silently sell a token.
+        open_positions = (book.load() or {}).get("agents", {}).get("hunter-v1", {}).get("positions", {})
+        for mint, old_position in list(open_positions.items()):
+            quote = fresh_quotes.get(mint)
+            if quote is None:
+                shadow_reviews.append({"mint": mint, "state": "HOLD", "reasons": ["fresh matching quote unavailable"]})
+                continue
+            if old_position.get("price_currency") != quote.get("price_currency"):
+                shadow_reviews.append({"mint": mint, "state": "HOLD", "reasons": ["quote currency differs from entry"]})
+                continue
+            price = float(quote.get("price") or 0)
+            if not math.isfinite(price) or price <= 0:
+                continue
+            marked = book.mark_shadow_position("hunter-v1", mint, price)
+            review = assess_exit(marked, quote, recovery_policy)
+            review.update({"mint": mint, "entry_price": marked["entry_price"], "current_price": price})
+            state = review["state"]
+            if state in {"EXIT", "EMERGENCY_EXIT", "TAKE_PARTIAL"}:
+                fraction = 1.0
+                stage = state
+                if state == "TAKE_PARTIAL":
+                    if not marked.get("principal_recovered"):
+                        fraction = min(1.0, float(marked["allocated_usd"]) / float(marked["current_value_usd"]))
+                        stage = "PRINCIPAL_RECOVERY"
+                    else:
+                        fraction = recovery_policy.second_stage_fraction
+                        stage = "SECOND_STAGE"
+                sell_value = float(marked["current_value_usd"]) * fraction
+                approval = shadow_arbiter.evaluate_shadow_exit(
+                    sell_value,
+                    RiskSnapshot(mode="shadow", liquidity_usd=float(quote.get("liquidity_usd") or 0),
+                                 quote_age_seconds=max(0, time.time() - float(quote["quoted_at"])),
+                                 quoted_price_impact_pct=float(quote.get("quoted_price_impact_pct") or 0)),
+                )
+                review["arbitration"] = {"approved": approval.approved, "approved_usd": approval.approved_usd,
+                                         "reasons": list(approval.reasons)}
+                if approval.approved and approval.approved_usd >= recovery_policy.min_sell_usd:
+                    fraction = min(1.0, approval.approved_usd / float(marked["current_value_usd"]))
+                    if state in {"EXIT", "EMERGENCY_EXIT"} and fraction < 1:
+                        stage = "EXIT_CHUNK"
+                    slippage = float(quote.get("estimated_slippage_pct") or 0)
+                    if not math.isfinite(slippage) or not 0 <= slippage < 100:
+                        slippage = 0
+                    review["shadow_fill"] = book.close_shadow_position("hunter-v1", mint, fraction=fraction, stage=stage, slippage_pct=slippage)
+                    review["remaining_position"] = book.load()["agents"]["hunter-v1"]["positions"].get(mint)
+                else:
+                    review["reasons"].append(f"shadow exit blocked or below ${recovery_policy.min_sell_usd:.2f} minimum")
+            shadow_reviews.append(review)
     candidate = _solana_opportunity(recommendations.get("candidates")) if core_only and _snapshot_is_fresh(recommendations) else ({} if core_only else _first_dict(recommendations.get("candidates")))
     holding = _priced_sell_signal(portfolio.get("signals")) if (portfolio_sell_only or core_only) and _snapshot_is_fresh(portfolio) else ({} if portfolio_sell_only or core_only else _first_dict(portfolio.get("signals")))
     leader = _first_dict(copy_data.get("signals"))
@@ -324,7 +389,7 @@ def shadow_once(model: OpenAIProposalModel | None, book: CapitalBook, *, portfol
         # a sell quote may age out while Hunter evaluates a separate token.
         inputs = tuple(item for item in (inputs[1], inputs[0]) if any(item[2].values()))
         if not inputs:
-            return {"mode": "shadow", "live_execution": False, "agents": [], "reason": "no eligible Solana opportunity or priced sell recommendation", "capital": book.public_status()}
+            return {"mode": "shadow", "live_execution": False, "agents": [], "hunter_candidate_reviews": candidate_reviews, "hunter_position_reviews": shadow_reviews, "reason": "no eligible Solana opportunity or priced sell recommendation", "capital": book.public_status()}
     if model is None:
         raise ValueError("an agent model is required for available shadow inputs")
     coordinator = AgentCoordinator(
@@ -369,33 +434,39 @@ def shadow_once(model: OpenAIProposalModel | None, book: CapitalBook, *, portfol
                     "maximum_order_usd": 5,
                     "maximum_open_positions": 2,
                 },
+                "recovery_reviews": candidate_reviews if role is AgentRole.OPPORTUNITY_HUNTER else {},
+                "hunter_position_reviews": shadow_reviews if role is AgentRole.OPPORTUNITY_HUNTER else [],
                 **context,
             },
             RiskSnapshot(
                 mode="shadow",
                 equity_usd=account.equity_usd,
+                daily_realized_pnl_usd=book.daily_realized_pnl(agent_id),
                 open_positions=account.open_positions,
                 liquidity_usd=liquidity,
                 quote_age_seconds=quote_age,
             ),
         )
+        entry_review = candidate_reviews.get(proposal.mint) if role is AgentRole.OPPORTUNITY_HUNTER else None
         if role is AgentRole.OPPORTUNITY_HUNTER and proposal.action is TradeAction.BUY:
             selected = next((item for item in context.get("watched_candidates", [])
                              if item.get("mint") == proposal.mint), None)
             if selected is None:
                 arbitration = Arbitration(False, 0, ("buy mint lacks a fresh watched quote",))
-            elif selected.get("decision") not in {"BUY NOW", "BUY ZONE"}:
-                arbitration = Arbitration(False, 0, ("candidate has no final buy decision",))
             else:
+                entry_review = assess_entry(selected, recovery_policy)
                 arbitration = coordinator.arbiter.evaluate(
                     proposal,
                     RiskSnapshot(
                         mode="shadow", equity_usd=account.equity_usd,
+                        daily_realized_pnl_usd=book.daily_realized_pnl(agent_id),
                         open_positions=account.open_positions,
                         liquidity_usd=float(selected.get("liquidity_usd") or 0),
                         quote_age_seconds=max(0, time.time() - float(selected["quoted_at"])),
                     ),
                 )
+                if entry_review["state"] != "BUY_READY":
+                    arbitration = Arbitration(False, 0, tuple(entry_review["reasons"]) + arbitration.reasons)
         if proposal.action is TradeAction.REBUY and not any(
             item.get("decision") == "REBUY REVIEW"
             and item.get("token_address") == proposal.mint
@@ -405,14 +476,16 @@ def shadow_once(model: OpenAIProposalModel | None, book: CapitalBook, *, portfol
         shadow_position = None
         shadow_fill = None
         if arbitration.approved and proposal.action is TradeAction.BUY:
-            price = float(source.get("price") or source.get("current_price") or 0)
+            selected = fresh_quotes[proposal.mint]
+            price = float(selected["price"])
             shadow_position = book.reserve_shadow_buy(
                 agent_id=agent_id,
                 mint=proposal.mint,
-                symbol=str(source.get("symbol") or proposal.mint[:8]),
+                symbol=str(selected.get("symbol") or proposal.mint[:8]),
                 amount_usd=arbitration.approved_usd,
                 entry_price=price,
-                price_currency=str(source.get("price_currency") or "UNKNOWN"),
+                price_currency=str(selected.get("price_currency") or "UNKNOWN"),
+                entry_liquidity_usd=float(selected.get("liquidity_usd") or 0),
             )
             shadow_fill = {"action": "BUY", "mint": proposal.mint, "amount_usd": arbitration.approved_usd}
         updated_account = {row.agent_id: row for row in book.accounts()}[agent_id]
@@ -436,6 +509,7 @@ def shadow_once(model: OpenAIProposalModel | None, book: CapitalBook, *, portfol
                     "reasons": list(arbitration.reasons),
                 },
                 "shadow_position": shadow_position,
+                "recovery_review": entry_review,
                 "shadow_fill": shadow_fill,
                 "shadow_balance": {
                     "cash_usd": updated_account.cash_usd,
@@ -450,6 +524,8 @@ def shadow_once(model: OpenAIProposalModel | None, book: CapitalBook, *, portfol
         "live_execution": False,
         "generated_at": time.time(),
         "agents": results,
+        "hunter_candidate_reviews": candidate_reviews,
+        "hunter_position_reviews": shadow_reviews,
         "capital": book.public_status(),
     }
     log_path = Path(os.getenv("AGENT_DECISION_LOG_PATH", "launch_guard_agent_decisions.jsonl"))
@@ -471,6 +547,8 @@ def main() -> None:
             result = book.public_status()
         elif args.capital_status:
             result = book.public_status()
+        elif args.shadow_performance:
+            result = book.performance()
         elif args.shadow_once:
             model = OpenAIProposalModel()
             result = shadow_once(model, book)

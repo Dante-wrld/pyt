@@ -68,7 +68,12 @@ def sanitize_context(value: Any, *, depth: int = 0) -> Any:
 ROLE_BOUNDARIES: dict[AgentRole, str] = {
     AgentRole.OPPORTUNITY_HUNTER: (
         "You may return BUY, WATCH, or HOLD. You may not manage or sell an "
-        "existing position. Prefer WATCH when evidence is incomplete."
+        "existing position. Read recovery_reviews for every candidate. A "
+        "pullback by itself is not a buy: only propose BUY for a fresh "
+        "BUY_READY recovery with at least three confirmations, improving "
+        "momentum, acceptable liquidity and supportive trading activity. "
+        "Explain the failed confirmation when WATCH is chosen. Existing "
+        "position reviews are handled by the shadow ledger."
     ),
     AgentRole.PORTFOLIO_MANAGER: (
         "You may return HOLD, TAKE_PARTIAL, or SELL for an owned position. "
