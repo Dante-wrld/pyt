@@ -14,6 +14,7 @@ from .core import Launch
 from .intelligence import IntelligenceResult
 from .launch_guard_state import LaunchGuardState
 from .market import MarketQuote
+from .launch_guard_support import _is_stock_token_symbol
 from .recommendations import RecommendationCandidate
 
 LOGGER = logging.getLogger("solana_launch_guard")
@@ -167,6 +168,22 @@ class LaunchIngestionMixin(LaunchGuardState):
             "; ".join(result.reasons),
         )
         if not result.accepted or quote is None:
+            return
+
+        # A real-world equity tokenized on any chain (Robinhood's registry
+        # is the only stock-symbol source available, but the ticker itself
+        # is chain-agnostic) doesn't fit pump.fun-style momentum/pullback
+        # sniping logic no matter which chain it launched on.
+        stock_symbols = await self.oracle.robinhood_stock_token_symbols()
+        if stock_symbols is not None and _is_stock_token_symbol(
+            quote.symbol, stock_symbols
+        ):
+            LOGGER.info(
+                "%s REJECT %-10s mint=%s reason=tokenized stock symbol",
+                quote.chain.upper(),
+                quote.symbol,
+                launch.mint,
+            )
             return
 
         self.recommendations.add(quote, result)

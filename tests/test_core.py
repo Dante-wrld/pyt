@@ -4082,6 +4082,59 @@ def test_evm_transfer_of_a_tokenized_stock_is_not_added_as_a_candidate(
     store.close()
 
 
+def test_solana_candidate_that_is_a_tokenized_stock_is_not_added(
+    tmp_path: Path,
+) -> None:
+    """The Robinhood-chain paths already exclude tokenized stocks from
+    becoming trading candidates. A real-world equity tokenized on Solana
+    under the same ticker deserves the identical exclusion - the symbol is
+    chain-agnostic, and pullback/momentum sniping logic doesn't fit a real
+    stock's price action no matter which chain it launched on.
+    """
+    database = tmp_path / "solana-stock-candidate.db"
+    config = settings(database, intelligence_wait_seconds=0)
+    store = SQLiteStore(str(database))
+    guard = LaunchGuard(config, store)
+
+    stock_quote = MarketQuote(
+        mint="MintNvda111",
+        symbol="NVDA",
+        price_sol=0.001,
+        price_usd=0.25,
+        chain="solana",
+        liquidity_usd=50_000,
+        market_cap_usd=100_000,
+        pair_address="PairNvda111",
+        pair_created_at_ms=1,
+        buys_m5=60,
+        sells_m5=20,
+        volume_m5_usd=15_000,
+        price_change_m5_pct=15,
+    )
+
+    class FakeOracle:
+        async def quote(
+            self, mint: str, *, chain: str = "solana"
+        ) -> MarketQuote | None:
+            return stock_quote
+
+        async def robinhood_stock_token_symbols(self) -> frozenset[str]:
+            return frozenset({"nvda"})
+
+        async def sol_usd_price(self) -> float:
+            return 100.0
+
+    guard.oracle = FakeOracle()  # type: ignore[assignment]
+    launch = Launch.from_payload(
+        launch_payload(mint=stock_quote.mint, symbol="NVDA")
+    )
+
+    asyncio.run(guard.evaluate_candidate(launch))
+
+    assert stock_quote.recommendation_key not in guard.recommendations.candidates
+    store.close()
+
+
 def test_robinhood_recommendation_shows_contract_and_fomo_link() -> None:
     address = "0x3333333333333333333333333333333333333333"
     quote = MarketQuote(
