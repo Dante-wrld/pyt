@@ -7,6 +7,7 @@ import pytest
 from solana_launch_guard.live_trial import (
     EXIT_STUCK_ALERT_STREAK,
     BoundedTrialModel,
+    _eligible_exit,
     _guarded_exit,
     _sell_choice,
     _track_exit_block_streak,
@@ -46,6 +47,35 @@ def test_exit_choice_requires_matched_signal_mint_confidence_and_amount():
     assert _sell_choice(partial, "mint", 12, "TAKE_PARTIAL") == ("TAKE_PARTIAL", 1 / 3)
     assert _sell_choice(partial, "mint", 12, "TAKE_PARTIAL", .25) is None
     assert _sell_choice(partial, "mint", 12, "TAKE_PARTIAL", .5) == ("TAKE_PARTIAL", 1 / 3)
+
+
+def test_eligible_exit_tolerates_a_relabel_between_still_sell_worthy_decisions():
+    """The portfolio monitor recomputes this label independently every ~15s;
+    for a small, volatile position it can relabel between EXIT WARNING and
+    TAKE PARTIAL/PROTECT PROFIT moments later without the underlying
+    sell-worthy situation actually changing. That relabel must not block
+    the exit - only a move to a non-sell-worthy decision should.
+    """
+    import time
+
+    def snapshot(decision: str) -> dict:
+        return {
+            "generated_at": time.time(),
+            "signals": [
+                {
+                    "chain": "solana",
+                    "token_address": "mint",
+                    "decision": decision,
+                    "current_price": 1.5,
+                }
+            ],
+        }
+
+    assert _eligible_exit(snapshot("EXIT WARNING"), "mint") is True
+    assert _eligible_exit(snapshot("TAKE PARTIAL"), "mint") is True
+    assert _eligible_exit(snapshot("PROTECT PROFIT"), "mint") is True
+    assert _eligible_exit(snapshot("HOLD"), "mint") is False
+    assert _eligible_exit(snapshot("REBOUND WATCH"), "mint") is False
 
 
 def test_editing_env_kill_switch_stops_existing_process(tmp_path, monkeypatch):

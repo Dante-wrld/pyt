@@ -28,6 +28,13 @@ from .wallet import SolanaRpc
 
 MAX_MODEL_REQUESTS = 100
 
+# Decisions that still warrant a sell attempt. The portfolio monitor
+# recomputes this label independently every ~15s, and for a small, volatile
+# position it can flip between these three (all still "sell it") between
+# when a proposal is generated and when the exit is about to execute -
+# that's a relabeling, not a change of mind, and must not block the exit.
+SELL_WORTHY_DECISIONS = ("EXIT WARNING", "TAKE PARTIAL", "PROTECT PROFIT")
+
 
 class BoundedTrialModel:
     """Persist a finite model-request cap before spending any API credits."""
@@ -104,14 +111,19 @@ def _write_report(ledger: LiveTrialLedger) -> None:
     os.replace(temporary, path)
 
 
-def _eligible_exit(snapshot: dict, mint: str, original: str) -> bool:
+def _eligible_exit(snapshot: dict, mint: str) -> bool:
     if not _snapshot_is_fresh(snapshot):
         return False
     signals = snapshot.get("signals")
     if not isinstance(signals, list):
         return False
     for row in signals:
-        if not isinstance(row, dict) or row.get("chain") != "solana" or row.get("token_address") != mint or row.get("decision") != original:
+        if (
+            not isinstance(row, dict)
+            or row.get("chain") != "solana"
+            or row.get("token_address") != mint
+            or row.get("decision") not in SELL_WORTHY_DECISIONS
+        ):
             continue
         try:
             price = float(row.get("current_price") or 0)
@@ -230,7 +242,7 @@ async def cycle(*, ledger: LiveTrialLedger, settings: Settings, rpc: SolanaRpc,
             if not isinstance(row, dict) or row.get("chain") != "solana":
                 continue
             signal = str(row.get("decision") or "")
-            if signal not in {"EXIT WARNING", "TAKE PARTIAL", "PROTECT PROFIT"}:
+            if signal not in SELL_WORTHY_DECISIONS:
                 continue
             mint = str(row.get("token_address") or "")
             try:
@@ -260,7 +272,7 @@ async def cycle(*, ledger: LiveTrialLedger, settings: Settings, rpc: SolanaRpc,
                                      settings.auto_sell_min_value_usd),
                 max_price_impact_pct=min(5, settings.auto_sell_max_price_impact_pct),
                 max_slippage_bps=min(500, settings.auto_sell_max_slippage_bps),
-                current_exit_allowed=lambda mint=mint, signal=signal: _eligible_exit(_read_portfolio(), mint, signal),
+                current_exit_allowed=lambda mint=mint: _eligible_exit(_read_portfolio(), mint),
             )
             await _track_exit_block_streak(
                 settings, exit_block_streaks, owner=owner, mint=mint,
