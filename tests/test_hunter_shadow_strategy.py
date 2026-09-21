@@ -56,6 +56,22 @@ def test_confirmed_reversal_and_liquidity_collapse_take_priority_over_partial():
     assert assess_exit(position, candidate(price=3.5), ShadowRecoveryPolicy())["state"] == "TAKE_PARTIAL"
 
 
+def test_trailing_stop_alone_exits_a_considerable_rise_that_reverses():
+    """A token that rose considerably (>=20% from entry) and has already
+    pulled back >=12% from its peak must exit on that alone - it must not
+    wait for extra sell-pressure or volume-falling confirmation.
+    live_trial.py's own quotes never populate volume_label (always
+    "UNKNOWN" there), so requiring it made trailing protection dead in the
+    one place that matters most.
+    """
+    position = {"entry_price": 1, "highest_price_since_entry": 1.3}
+    row = candidate(price=1.1, price_change_m5_pct=-2, buys_m5=10, sells_m5=8,
+                     volume_label="UNKNOWN")
+    review = assess_exit(position, row, ShadowRecoveryPolicy())
+    assert review["state"] == "EXIT"
+    assert "trailing" in " ".join(review["reasons"]).lower()
+
+
 def test_stagnant_position_exits_after_grace_window_with_no_rise():
     policy = ShadowRecoveryPolicy(stagnation_window_seconds=900)
     position = {"entry_price": 1, "highest_price_since_entry": 1, "opened_at": 1_000}

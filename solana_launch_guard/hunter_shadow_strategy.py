@@ -169,16 +169,25 @@ def assess_exit(
     elif trend_break and (trailing_break or drawdown >= policy.trailing_stop_pct or quote.get("decision") == "EXIT WARNING"):
         state = "EXIT"
         reasons.append("confirmed reversal: momentum, selling and peak/structure evidence")
-    elif trailing_break and (sells > buys or volume_label == "FALLING"):
+    elif trailing_break:
+        # A >=20% rise that has already pulled back >=12% from its peak is
+        # exit-worthy on its own; it must not wait for extra sell-pressure
+        # or volume-falling confirmation. live_trial.py's own quotes never
+        # populate volume_label (always "UNKNOWN" there), so requiring it
+        # made trailing protection dead in the one place that matters most.
+        # PortfolioAdvisor.evaluate()'s PROTECT PROFIT (portfolio.py) makes
+        # the same call on the same evidence, without extra confirmation.
         state = "EXIT"
-        reasons.append("trailing protection with deteriorating activity")
+        reasons.append("trailing stop: price pulled back from a considerable peak")
     elif stagnant:
         state = "EXIT"
         reasons.append(
             f"no sign of a rise {age_seconds / 60:.0f} min after entry "
             f"(gain {gain:+.2f}%, momentum {momentum:+.2f}%, volume {volume_label})"
         )
-    elif trend_break or trailing_break:
+    elif trend_break:
+        # trailing_break alone always exits above, so only a trend break
+        # without a qualifying trailing pullback can still reach here.
         state = "REVERSAL_WARNING"
         reasons.append("one reversal condition; awaiting corroboration")
     elif gain > 0:
