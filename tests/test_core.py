@@ -3397,6 +3397,101 @@ def test_confirmed_full_exit_starts_rebuy_watch(tmp_path: Path) -> None:
     store.close()
 
 
+def test_confirmed_protect_profit_exit_also_starts_rebuy_watch(tmp_path: Path) -> None:
+    """A considerable rise that reverses and gets fully sold to protect
+    profit deserves a rebuy watch exactly as much as a loss-driven exit -
+    it is not a mistake to walk away from, it is a real re-entry
+    opportunity once price is low again.
+    """
+    path = tmp_path / "rebuy-after-profit-sale.db"
+    store = SQLiteStore(str(path))
+    config = settings(
+        path,
+        auto_sell_enabled=True,
+        auto_sell_portfolio_signals=True,
+        auto_sell_signal_confirmation_polls=1,
+        auto_buy_enabled=True,
+        auto_rebuy_enabled=True,
+    )
+    guard = LaunchGuard(config, store)
+    # PROTECT PROFIT (unlike EXIT WARNING) requires a verified USD cost
+    # basis before it will execute at all.
+    store.save_owned_holding(
+        OwnedHolding(
+            chain="solana",
+            token_address="MintProfit111",
+            symbol="PROFIT",
+            quantity=100,
+            entry_price=0.1,
+            price_currency="USD",
+            cost_amount=10,
+        )
+    )
+
+    class FakeSeller:
+        async def preflight(
+            self, intent: SellIntent, _simulator: object
+        ) -> PreflightReceipt:
+            return PreflightReceipt(
+                prepared=PreparedSell(
+                    intent=intent,
+                    transaction="unsigned",
+                    request_id="request-sell",
+                    input_amount_raw=intent.amount_raw,
+                    expected_output_raw=24_000_000,
+                    minimum_output_raw=23_800_000,
+                    price_impact_pct=1.0,
+                    last_valid_block_height="123",
+                ),
+                units_consumed=100_000,
+                log_count=5,
+            )
+
+        async def execute(self, prepared: PreparedSell) -> SellReceipt:
+            return SellReceipt(
+                intent=prepared.intent,
+                signature="protect-profit-sell-confirmed",
+                input_amount_raw=prepared.input_amount_raw,
+                output_amount_raw=24_000_000,
+            )
+
+    guard.auto_seller = FakeSeller()  # type: ignore[assignment]
+    signal = PortfolioSignal(
+        chain="solana",
+        token_address="MintProfit111",
+        symbol="PROFIT",
+        quantity=100,
+        current_price=0.24,
+        price_currency="USD",
+        current_value_usd=24,
+        pnl_pct=140,
+        decision="PROTECT PROFIT",
+        reason="price is 15.0% below its monitored peak; open gain is 140.0%",
+        price_change_m5_pct=-4,
+        buys_m5=5,
+        sells_m5=6,
+        liquidity_usd=50_000,
+        entry_price=0.1,
+        peak_price=0.28,
+    )
+    balance = SolanaTokenHolding(
+        mint=signal.token_address,
+        amount=100,
+        raw_amount=100_000_000,
+        decimals=6,
+    )
+
+    asyncio.run(guard._maybe_auto_sell(signal, balance))
+
+    watch = store.load_auto_rebuy_watch(signal.token_address)
+    assert watch is not None
+    assert watch["status"] == "WATCHING"
+    assert watch["sell_signature"] == "protect-profit-sell-confirmed"
+    assert watch["exit_price_usd"] == pytest.approx(0.24)
+    assert watch["sale_proceeds_usdc_raw"] == 24_000_000
+    store.close()
+
+
 def test_rebuy_resets_profit_ladder_stage(tmp_path: Path) -> None:
     store = SQLiteStore(str(tmp_path / "rebuy-stage.db"))
     store.save_owned_holding(

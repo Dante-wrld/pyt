@@ -367,7 +367,14 @@ class AutoSellMixin(LaunchGuardState):
         if (
             self.settings.auto_rebuy_enabled
             and source == "portfolio signal"
-            and intent.stage == 12
+            # PROTECT PROFIT (11) and EXIT WARNING (12) in
+            # PortfolioSignalExitPlanner._STAGES - both are full, managed
+            # exits and equally deserve a rebuy watch. A considerable rise
+            # that reverses and gets sold to protect profit is not a
+            # mistake to walk away from; it is exactly the case where
+            # watching for a lower re-entry matters most. TAKE PARTIAL (10)
+            # is excluded: it is a partial sell, not a closed position.
+            and intent.stage in (11, 12)
             and managed_complete
             and intent.mint not in self.settings.auto_buy_excluded_mints
         ):
