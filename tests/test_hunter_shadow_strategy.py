@@ -33,7 +33,8 @@ def test_falling_pullback_is_never_buy_ready():
 def test_momentum_buy_does_not_require_a_pullback():
     result = assess_entry(
         candidate(decision="MOMENTUM BUY", price=1.0, peak_price=1.0,
-                  pullback_from_peak_pct=0, volume_label="RISING"),
+                  pullback_from_peak_pct=0, volume_label="RISING",
+                  buys_m5=35, sells_m5=20),
         ShadowRecoveryPolicy(),
     )
     assert result["state"] == "BUY_READY"
@@ -43,10 +44,23 @@ def test_momentum_buy_does_not_require_a_pullback():
 def test_momentum_buy_accepts_steady_volume_not_just_rising():
     result = assess_entry(
         candidate(decision="MOMENTUM BUY", price=1.0, peak_price=1.0,
-                  pullback_from_peak_pct=0, volume_label="STEADY"),
+                  pullback_from_peak_pct=0, volume_label="STEADY",
+                  buys_m5=35, sells_m5=20),
         ShadowRecoveryPolicy(),
     )
     assert result["state"] == "BUY_READY"
+
+
+def test_momentum_buy_requires_a_minimum_trade_count():
+    # buys_m5=20, sells_m5=10 -> 30 total, below the 50 minimum, even
+    # though the ratio (2.0) and volume both clear their own bars.
+    result = assess_entry(
+        candidate(decision="MOMENTUM BUY", price=1.0, peak_price=1.0,
+                  pullback_from_peak_pct=0, volume_label="RISING"),
+        ShadowRecoveryPolicy(),
+    )
+    assert result["state"] != "BUY_READY"
+    assert "trade_count" in result["failure_codes"]
 
 
 def test_momentum_buy_still_rejects_falling_volume():
@@ -57,6 +71,30 @@ def test_momentum_buy_still_rejects_falling_volume():
     )
     assert result["state"] != "BUY_READY"
     assert "volume" in result["failure_codes"]
+
+
+def test_momentum_buy_fires_via_liquidity_growth_despite_a_low_ratio():
+    result = assess_entry(
+        candidate(decision="MOMENTUM BUY", price=1.0, peak_price=1.0,
+                  pullback_from_peak_pct=0, volume_label="RISING",
+                  buys_m5=35, sells_m5=32, buy_sell_ratio=1.1,  # below the 1.5 bar
+                  liquidity_usd=25_000, initial_liquidity_usd=20_000),  # 25% growth
+        ShadowRecoveryPolicy(),
+    )
+    assert result["state"] == "BUY_READY"
+    assert "buy_sell_ratio" not in result["failure_codes"]
+
+
+def test_momentum_buy_rejects_low_ratio_with_flat_liquidity():
+    result = assess_entry(
+        candidate(decision="MOMENTUM BUY", price=1.0, peak_price=1.0,
+                  pullback_from_peak_pct=0, volume_label="RISING",
+                  buys_m5=35, sells_m5=32, buy_sell_ratio=1.1,
+                  liquidity_usd=20_400, initial_liquidity_usd=20_000),  # only 2% growth
+        ShadowRecoveryPolicy(),
+    )
+    assert result["state"] != "BUY_READY"
+    assert "buy_sell_ratio" in result["failure_codes"]
 
 
 def test_momentum_buy_requires_a_higher_buy_sell_ratio_than_the_pullback_path():

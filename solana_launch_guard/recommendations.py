@@ -230,6 +230,8 @@ class RecommendationBook:
         min_entry_reward_risk_ratio: float = 2.0,
         buy_now_min_ratio: float = 1.2,
         momentum_buy_min_ratio: float = 1.5,
+        momentum_buy_min_trades: int = 50,
+        momentum_buy_min_liquidity_growth_pct: float = 20.0,
         avoid_momentum_pct: float = -8.0,
         avoid_sell_pressure_ratio: float = 2.0,
         min_liquidity_usd: float = 5_000.0,
@@ -254,6 +256,8 @@ class RecommendationBook:
         self.min_entry_reward_risk_ratio = min_entry_reward_risk_ratio
         self.buy_now_min_ratio = buy_now_min_ratio
         self.momentum_buy_min_ratio = momentum_buy_min_ratio
+        self.momentum_buy_min_trades = momentum_buy_min_trades
+        self.momentum_buy_min_liquidity_growth_pct = momentum_buy_min_liquidity_growth_pct
         self.avoid_momentum_pct = avoid_momentum_pct
         self.avoid_sell_pressure_ratio = avoid_sell_pressure_ratio
         self.min_liquidity_usd = min_liquidity_usd
@@ -512,8 +516,8 @@ class RecommendationBook:
         pullback-only path can never reach, since it requires a real pullback
         to exist first. Deliberately stricter than the pullback path's own
         bar (buy_now_min_ratio): there is no dip-and-reclaim confirmation to
-        lean on here, so buy_sell_ratio is the main gate standing between
-        "genuine continuation" and "buying a fading pump".
+        lean on here, so this function's job is finding *some* real evidence
+        of firm buy pressure, since there is no other confirmation to lean on.
 
         require_rising_volume=True is for a candidate on its very first
         overextended observation: initial_volume_m5_usd is bootstrapped from
@@ -523,18 +527,45 @@ class RecommendationBook:
         that already has an anchored zone has necessarily survived at least
         one full overextend-and-anchor cycle already, so its STEADY reading
         reflects real, accumulated history and is accepted too.
+
+        Buy pressure is confirmed by EITHER a strong buy/sell transaction
+        ratio OR strong liquidity growth since the candidate's first
+        observation - a high-frequency, near-even transaction count can
+        still mask a genuine pump if buyers are moving meaningfully more
+        size than sellers, and liquidity growth is direct evidence of real
+        new capital (not just churn between existing holders) that a count
+        ratio alone can't see. DexScreener doesn't expose buy vs sell dollar
+        volume separately, so this is the closest available proxy.
         """
         if candidate.momentum_label not in {"RISING", "STRONG"}:
             return None
         required_volume = {"RISING"} if require_rising_volume else {"STEADY", "RISING"}
         if candidate.volume_label not in required_volume:
             return None
-        if candidate.buy_sell_ratio < self.momentum_buy_min_ratio:
+        # A ratio alone can't distinguish "1,700 real trades, mostly buys"
+        # from "13 trades, mostly buys" - the second is noise, not evidence.
+        if candidate.buys_m5 + candidate.sells_m5 < self.momentum_buy_min_trades:
             return None
+        ratio_confirmed = candidate.buy_sell_ratio >= self.momentum_buy_min_ratio
+        liquidity_growth_pct = None
+        initial_liquidity = candidate.initial_liquidity_usd
+        if initial_liquidity and initial_liquidity > 0 and candidate.liquidity_usd is not None:
+            liquidity_growth_pct = (candidate.liquidity_usd / initial_liquidity - 1) * 100
+        liquidity_confirmed = (
+            liquidity_growth_pct is not None
+            and liquidity_growth_pct >= self.momentum_buy_min_liquidity_growth_pct
+        )
+        if not (ratio_confirmed or liquidity_confirmed):
+            return None
+        evidence = (
+            f"a {candidate.buy_sell_ratio:.2f} buy/sell ratio" if ratio_confirmed
+            else f"liquidity up {liquidity_growth_pct:.0f}% since first seen"
+        )
         return (
             f"momentum continuation: {candidate.momentum_label.lower()} price "
-            f"action with {candidate.volume_label.lower()} volume and a "
-            f"{candidate.buy_sell_ratio:.2f} buy/sell ratio"
+            f"action with {candidate.volume_label.lower()} volume, "
+            f"{candidate.buys_m5 + candidate.sells_m5} five-minute trades, "
+            f"and {evidence}"
         )
 
     def _refresh_decision(self, candidate: RecommendationCandidate) -> None:

@@ -2788,6 +2788,103 @@ def test_momentum_buy_does_not_fire_on_a_fading_pump() -> None:
     assert candidate.entry_zone_low is not None
 
 
+def test_momentum_buy_does_not_fire_on_a_thin_trade_sample() -> None:
+    """A 3:1 buy/sell ratio from only a handful of trades isn't real evidence
+    of firm buy pressure - the count floor exists so a thin, easily-skewed
+    sample can't pass as confirmation the way COPPERCAT/XtraPad's thousands
+    of real trades did."""
+    initial = market_quote(
+        liquidity=50_000, market_cap=100_000, buys=60, sells=20,
+        volume=15_000, change=1,
+    )
+    book = RecommendationBook(
+        pool_size=10, ttl_seconds=60, entry_confirmation_polls=1,
+        momentum_buy_min_ratio=1.5, momentum_buy_min_trades=50,
+    )
+    candidate = book.add(initial, CoinIntelligence().score(initial), now=0)
+    assert candidate is not None
+
+    thin_sample = MarketQuote(
+        mint=initial.mint,
+        symbol=initial.symbol,
+        price_sol=initial.price_sol * 1.10,
+        liquidity_usd=initial.liquidity_usd,
+        market_cap_usd=initial.market_cap_usd,
+        pair_address=initial.pair_address,
+        pair_created_at_ms=initial.pair_created_at_ms,
+        buys_m5=9,
+        sells_m5=3,  # ratio 3.0, well above the bar - but only 12 total trades
+        volume_m5_usd=20_000,
+        price_change_m5_pct=6,
+    )
+    book.update(thin_sample, now=3)
+    assert candidate.decision != "MOMENTUM BUY"
+
+
+def test_momentum_buy_fires_via_liquidity_growth_despite_a_low_ratio() -> None:
+    """A near-even transaction count (ratio below the bar) can still reflect
+    a genuine pump if real new capital is flowing in - liquidity growth is
+    direct evidence a count ratio alone can't see (matches the real-world
+    '$' token: 32.6% liquidity growth alongside only a 1.093 ratio)."""
+    initial = market_quote(
+        liquidity=50_000, market_cap=100_000, buys=60, sells=20,
+        volume=15_000, change=1,
+    )
+    book = RecommendationBook(
+        pool_size=10, ttl_seconds=60, entry_confirmation_polls=1,
+        momentum_buy_min_ratio=1.5, momentum_buy_min_liquidity_growth_pct=20.0,
+    )
+    candidate = book.add(initial, CoinIntelligence().score(initial), now=0)
+    assert candidate is not None
+
+    low_ratio_but_liquid = MarketQuote(
+        mint=initial.mint,
+        symbol=initial.symbol,
+        price_sol=initial.price_sol * 1.10,
+        liquidity_usd=65_000,  # 30% growth from the 50,000 baseline
+        market_cap_usd=initial.market_cap_usd,
+        pair_address=initial.pair_address,
+        pair_created_at_ms=initial.pair_created_at_ms,
+        buys_m5=110,
+        sells_m5=100,  # ratio 1.10, below the 1.5 bar
+        volume_m5_usd=20_000,
+        price_change_m5_pct=6,
+    )
+    book.update(low_ratio_but_liquid, now=3)
+    assert candidate.decision == "MOMENTUM BUY"
+    assert "liquidity up" in candidate.decision_reason
+
+
+def test_momentum_buy_does_not_fire_without_ratio_or_liquidity_confirmation() -> None:
+    """Neither signal clears its bar - no confirmation, no entry."""
+    initial = market_quote(
+        liquidity=50_000, market_cap=100_000, buys=60, sells=20,
+        volume=15_000, change=1,
+    )
+    book = RecommendationBook(
+        pool_size=10, ttl_seconds=60, entry_confirmation_polls=1,
+        momentum_buy_min_ratio=1.5, momentum_buy_min_liquidity_growth_pct=20.0,
+    )
+    candidate = book.add(initial, CoinIntelligence().score(initial), now=0)
+    assert candidate is not None
+
+    weak_move = MarketQuote(
+        mint=initial.mint,
+        symbol=initial.symbol,
+        price_sol=initial.price_sol * 1.10,
+        liquidity_usd=52_000,  # only 4% growth
+        market_cap_usd=initial.market_cap_usd,
+        pair_address=initial.pair_address,
+        pair_created_at_ms=initial.pair_created_at_ms,
+        buys_m5=110,
+        sells_m5=100,  # ratio 1.10, below the 1.5 bar
+        volume_m5_usd=20_000,
+        price_change_m5_pct=6,
+    )
+    book.update(weak_move, now=3)
+    assert candidate.decision != "MOMENTUM BUY"
+
+
 def test_momentum_buy_fires_above_an_already_anchored_zone_without_re_anchoring() -> None:
     """A token that already has an anchored zone from an earlier
     overextension, and is now grinding above it without yet running far

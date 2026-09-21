@@ -45,6 +45,8 @@ class ShadowRecoveryPolicy:
     min_score: int = 65
     buy_sell_ratio: float = 1.2
     momentum_buy_min_ratio: float = 1.5
+    momentum_buy_min_trades: int = 50
+    momentum_buy_min_liquidity_growth_pct: float = 20.0
     trailing_activation_pct: float = 20.0
     trailing_stop_pct: float = 12.0
     momentum_exit_pct: float = -8.0
@@ -70,6 +72,10 @@ class ShadowRecoveryPolicy:
             min_score=int(get("ENTRY_MIN_SIGNAL_SCORE", 65)),
             buy_sell_ratio=get("BUY_NOW_MIN_RATIO", 1.2),
             momentum_buy_min_ratio=get("MOMENTUM_BUY_MIN_RATIO", 1.5),
+            momentum_buy_min_trades=int(get("MOMENTUM_BUY_MIN_TRADES", 50)),
+            momentum_buy_min_liquidity_growth_pct=get(
+                "MOMENTUM_BUY_MIN_LIQUIDITY_GROWTH_PCT", 20.0
+            ),
             trailing_activation_pct=get("TRAILING_ACTIVATION_PCT", 20),
             trailing_stop_pct=get("TRAILING_STOP_PCT", 12),
             momentum_exit_pct=get("MOMENTUM_EXIT_PCT", -8),
@@ -131,9 +137,28 @@ def assess_entry(candidate: dict[str, Any], policy: ShadowRecoveryPolicy) -> dic
         failures.append("volume/trading activity does not support recovery")
         codes.append("volume")
     required_ratio = policy.momentum_buy_min_ratio if is_momentum_buy else policy.buy_sell_ratio
-    if _number(candidate.get("buy_sell_ratio")) < required_ratio:
+    ratio_confirmed = _number(candidate.get("buy_sell_ratio")) >= required_ratio
+    if is_momentum_buy:
+        # A near-even transaction count can still mask a genuine pump if
+        # buyers are moving meaningfully more size than sellers; liquidity
+        # growth is direct evidence of real new capital that a count ratio
+        # alone can't see, so it's accepted as an alternative confirmation.
+        liquidity_growth_pct = (liquidity / baseline - 1) * 100 if baseline > 0 else None
+        liquidity_confirmed = (
+            liquidity_growth_pct is not None
+            and liquidity_growth_pct >= policy.momentum_buy_min_liquidity_growth_pct
+        )
+        if not (ratio_confirmed or liquidity_confirmed):
+            failures.append("buyer-to-seller ratio below minimum and liquidity is not growing enough")
+            codes.append("buy_sell_ratio")
+    elif not ratio_confirmed:
         failures.append("buyer-to-seller ratio below recovery minimum")
         codes.append("buy_sell_ratio")
+    if is_momentum_buy:
+        trade_count = _number(candidate.get("buys_m5")) + _number(candidate.get("sells_m5"))
+        if trade_count < policy.momentum_buy_min_trades:
+            failures.append(f"only {trade_count:.0f} five-minute trades, below momentum minimum {policy.momentum_buy_min_trades}")
+            codes.append("trade_count")
     if policy.require_medium_risk and risk not in {"MEDIUM", "MODERATE"}:
         failures.append("risk is outside permitted recovery band")
         codes.append("risk")

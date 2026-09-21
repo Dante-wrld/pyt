@@ -141,6 +141,8 @@ class Settings:
     min_entry_reward_risk_ratio: float = 2.0
     buy_now_min_ratio: float = 1.2
     momentum_buy_min_ratio: float = 1.5
+    momentum_buy_min_trades: int = 50
+    momentum_buy_min_liquidity_growth_pct: float = 20.0
     avoid_entry_momentum_pct: float = -8.0
     avoid_entry_sell_pressure_ratio: float = 2.0
     pushover_enabled: bool = False
@@ -341,6 +343,10 @@ class Settings:
             ),
             buy_now_min_ratio=_float("BUY_NOW_MIN_RATIO", 1.2),
             momentum_buy_min_ratio=_float("MOMENTUM_BUY_MIN_RATIO", 1.5),
+            momentum_buy_min_trades=_int("MOMENTUM_BUY_MIN_TRADES", 50),
+            momentum_buy_min_liquidity_growth_pct=_float(
+                "MOMENTUM_BUY_MIN_LIQUIDITY_GROWTH_PCT", 20.0
+            ),
             avoid_entry_momentum_pct=float(
                 os.getenv("AVOID_ENTRY_MOMENTUM_PCT", "-8")
             ),
@@ -857,6 +863,10 @@ class Settings:
             raise ValueError("BUY_NOW_MIN_RATIO must be positive")
         if self.momentum_buy_min_ratio <= 0:
             raise ValueError("MOMENTUM_BUY_MIN_RATIO must be positive")
+        if self.momentum_buy_min_trades < 0:
+            raise ValueError("MOMENTUM_BUY_MIN_TRADES must not be negative")
+        if self.momentum_buy_min_liquidity_growth_pct <= 0:
+            raise ValueError("MOMENTUM_BUY_MIN_LIQUIDITY_GROWTH_PCT must be positive")
         if self.avoid_entry_momentum_pct >= 0:
             raise ValueError("AVOID_ENTRY_MOMENTUM_PCT must be negative")
         if self.avoid_entry_sell_pressure_ratio <= 0:
