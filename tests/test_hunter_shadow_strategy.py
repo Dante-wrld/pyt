@@ -40,10 +40,19 @@ def test_momentum_buy_does_not_require_a_pullback():
     assert "pullback" not in result["failure_codes"]
 
 
-def test_momentum_buy_requires_rising_volume_not_just_steady():
+def test_momentum_buy_accepts_steady_volume_not_just_rising():
     result = assess_entry(
         candidate(decision="MOMENTUM BUY", price=1.0, peak_price=1.0,
                   pullback_from_peak_pct=0, volume_label="STEADY"),
+        ShadowRecoveryPolicy(),
+    )
+    assert result["state"] == "BUY_READY"
+
+
+def test_momentum_buy_still_rejects_falling_volume():
+    result = assess_entry(
+        candidate(decision="MOMENTUM BUY", price=1.0, peak_price=1.0,
+                  pullback_from_peak_pct=0, volume_label="FALLING"),
         ShadowRecoveryPolicy(),
     )
     assert result["state"] != "BUY_READY"

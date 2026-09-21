@@ -2569,7 +2569,7 @@ def test_pullback_low_resets_after_price_leaves_the_zone_above() -> None:
     candidate = book.add(initial, CoinIntelligence().score(initial), now=0)
     assert candidate is not None
 
-    def quote_at(price_multiplier: float, change_pct: float) -> MarketQuote:
+    def quote_at(price_multiplier: float, change_pct: float, volume: int = 16_000) -> MarketQuote:
         return MarketQuote(
             mint=initial.mint,
             symbol=initial.symbol,
@@ -2580,7 +2580,7 @@ def test_pullback_low_resets_after_price_leaves_the_zone_above() -> None:
             pair_created_at_ms=initial.pair_created_at_ms,
             buys_m5=40,
             sells_m5=20,
-            volume_m5_usd=16_000,
+            volume_m5_usd=volume,
             price_change_m5_pct=change_pct,
         )
 
@@ -2591,7 +2591,10 @@ def test_pullback_low_resets_after_price_leaves_the_zone_above() -> None:
     )
 
     # Price fully recovers back above the zone - the pullback episode ends.
-    book.update(quote_at(1.0, 5), now=6)
+    # Falling volume here keeps this above-zone step isolated from the
+    # separate MOMENTUM BUY path (see test_momentum_buy_* in this file),
+    # which would otherwise fire on this same strong, established move.
+    book.update(quote_at(1.0, 5, volume=10_000), now=6)
     assert candidate.decision in {"WAIT FOR PULLBACK", "PULLBACK STARTED"}
     assert candidate.pullback_low_price is None
 
@@ -2679,7 +2682,7 @@ def test_stale_entry_zone_re_anchors_to_a_new_peak() -> None:
     assert candidate is not None
     stale_zone_high = candidate.entry_zone_high
 
-    def quote_at(price_multiplier: float, change_pct: float) -> MarketQuote:
+    def quote_at(price_multiplier: float, change_pct: float, volume: int = 16_000) -> MarketQuote:
         return MarketQuote(
             mint=initial.mint,
             symbol=initial.symbol,
@@ -2690,13 +2693,15 @@ def test_stale_entry_zone_re_anchors_to_a_new_peak() -> None:
             pair_created_at_ms=initial.pair_created_at_ms,
             buys_m5=40,
             sells_m5=20,
-            volume_m5_usd=16_000,
+            volume_m5_usd=volume,
             price_change_m5_pct=change_pct,
         )
 
     # Runs far past the old zone to a fresh new high - the stale zone must
-    # not stay frozen 15x below current price.
-    book.update(quote_at(15.0, 20), now=3)
+    # not stay frozen 15x below current price. Falling volume keeps this
+    # isolated from the separate MOMENTUM BUY path (see test_momentum_buy_*
+    # in this file), which would otherwise fire on this same strong move.
+    book.update(quote_at(15.0, 20, volume=10_000), now=3)
     assert candidate.decision == "WAIT FOR PULLBACK"
     assert candidate.entry_zone_high > stale_zone_high
     assert candidate.entry_zone_low == pytest.approx(
@@ -2813,6 +2818,45 @@ def test_momentum_buy_fires_above_an_already_anchored_zone_without_re_anchoring(
         buys_m5=45,
         sells_m5=15,
         volume_m5_usd=20_000,
+        price_change_m5_pct=6,
+    )
+    book.update(just_above_zone, now=3)
+    assert candidate.decision == "MOMENTUM BUY"
+
+
+def test_momentum_buy_accepts_steady_volume_once_a_zone_is_already_anchored() -> None:
+    """Unlike a candidate's very first overextended observation (where
+    "steady" volume is trivially true - initial_volume_m5_usd is bootstrapped
+    from that same first quote), a candidate that has already survived one
+    full overextend-and-anchor cycle has real accumulated history behind a
+    steady reading, so it's accepted here even without volume accelerating
+    further - this is the exact case that motivated loosening the bar
+    (see test_momentum_buy_fires_on_a_fresh_extended_move_with_rising_volume
+    for why a first-observation candidate still requires RISING)."""
+    initial = market_quote(
+        liquidity=50_000, market_cap=100_000, buys=60, sells=20,
+        volume=15_000, change=15,
+    )
+    book = RecommendationBook(
+        pool_size=10, ttl_seconds=60, entry_confirmation_polls=1,
+        momentum_buy_min_ratio=1.5,
+    )
+    candidate = book.add(initial, CoinIntelligence().score(initial), now=0)
+    assert candidate is not None
+    zone_high = candidate.entry_zone_high
+    assert zone_high is not None
+
+    just_above_zone = MarketQuote(
+        mint=initial.mint,
+        symbol=initial.symbol,
+        price_sol=zone_high * 1.02,
+        liquidity_usd=initial.liquidity_usd,
+        market_cap_usd=initial.market_cap_usd,
+        pair_address=initial.pair_address,
+        pair_created_at_ms=initial.pair_created_at_ms,
+        buys_m5=45,
+        sells_m5=15,
+        volume_m5_usd=15_500,  # 15,500 / 15,000 = 1.033 -> STEADY, not RISING
         price_change_m5_pct=6,
     )
     book.update(just_above_zone, now=3)
@@ -3963,7 +4007,7 @@ def test_phone_notifications_deduplicate_and_respect_cooldown(
         pair_created_at_ms=initial.pair_created_at_ms,
         buys_m5=40,
         sells_m5=20,
-        volume_m5_usd=16_000,
+        volume_m5_usd=10_000,
         price_change_m5_pct=4,
     )
     book.update(above_zone, now=6)

@@ -505,25 +505,36 @@ class RecommendationBook:
         )
 
     def _momentum_buy_reason(
-        self, candidate: RecommendationCandidate
+        self, candidate: RecommendationCandidate, *, require_rising_volume: bool
     ) -> str | None:
-        """A strong, still-accelerating move with rising (not merely steady)
-        volume and firm buy pressure - the one setup the pullback-only path
-        can never reach, since it requires a real pullback to exist first.
-        Deliberately stricter than the pullback path's own bar (buy_now_min_
-        ratio): there is no dip-and-reclaim confirmation to lean on here, so
-        this is the sole gate standing between "genuine continuation" and
-        "buying a fading pump."""
+        """A strong move with firm buy pressure and (depending on context)
+        non-falling or actively rising volume - the one setup the
+        pullback-only path can never reach, since it requires a real pullback
+        to exist first. Deliberately stricter than the pullback path's own
+        bar (buy_now_min_ratio): there is no dip-and-reclaim confirmation to
+        lean on here, so buy_sell_ratio is the main gate standing between
+        "genuine continuation" and "buying a fading pump".
+
+        require_rising_volume=True is for a candidate on its very first
+        overextended observation: initial_volume_m5_usd is bootstrapped from
+        that same observation, so volume_label is trivially "STEADY" (ratio
+        exactly 1.0) regardless of the token's real behavior - not real
+        evidence yet, so only a genuinely rising reading counts. A candidate
+        that already has an anchored zone has necessarily survived at least
+        one full overextend-and-anchor cycle already, so its STEADY reading
+        reflects real, accumulated history and is accepted too.
+        """
         if candidate.momentum_label not in {"RISING", "STRONG"}:
             return None
-        if candidate.volume_label != "RISING":
+        required_volume = {"RISING"} if require_rising_volume else {"STEADY", "RISING"}
+        if candidate.volume_label not in required_volume:
             return None
         if candidate.buy_sell_ratio < self.momentum_buy_min_ratio:
             return None
         return (
             f"momentum continuation: {candidate.momentum_label.lower()} price "
-            f"action with rising volume and a {candidate.buy_sell_ratio:.2f} "
-            "buy/sell ratio"
+            f"action with {candidate.volume_label.lower()} volume and a "
+            f"{candidate.buy_sell_ratio:.2f} buy/sell ratio"
         )
 
     def _refresh_decision(self, candidate: RecommendationCandidate) -> None:
@@ -554,7 +565,9 @@ class RecommendationBook:
         zone_high = candidate.entry_zone_high
         if zone_low is not None and zone_high is not None:
             if candidate.current_price > zone_high:
-                momentum_reason = self._momentum_buy_reason(candidate)
+                momentum_reason = self._momentum_buy_reason(
+                    candidate, require_rising_volume=False
+                )
                 if momentum_reason is not None:
                     self._propose_entry(candidate, "MOMENTUM BUY", momentum_reason)
                     return
@@ -654,7 +667,9 @@ class RecommendationBook:
             )
         )
         if overextended:
-            momentum_reason = self._momentum_buy_reason(candidate)
+            momentum_reason = self._momentum_buy_reason(
+                candidate, require_rising_volume=True
+            )
             if momentum_reason is not None:
                 self._propose_entry(candidate, "MOMENTUM BUY", momentum_reason)
                 return

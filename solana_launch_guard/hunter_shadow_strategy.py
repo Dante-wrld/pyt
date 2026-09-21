@@ -108,9 +108,10 @@ def assess_entry(candidate: dict[str, Any], policy: ShadowRecoveryPolicy) -> dic
     risk = str(candidate.get("risk_label") or "UNKNOWN").upper()
     # A momentum-continuation candidate is, by definition, still extending
     # rather than pulling back - the pullback requirement below would always
-    # fail it. It carries its own, stricter volume and buy-pressure bar
-    # instead (rising volume, not merely non-falling; a higher buy/sell
-    # ratio) since it has no dip-and-reclaim confirmation to lean on.
+    # fail it. It carries its own, stricter buy-pressure bar instead (a
+    # higher buy/sell ratio) since it has no dip-and-reclaim confirmation to
+    # lean on. Volume just needs to not be actively falling - same bar the
+    # pullback path uses - not necessarily accelerating.
     is_momentum_buy = candidate.get("decision") == "MOMENTUM BUY"
     failures = []
     codes = []
@@ -126,8 +127,7 @@ def assess_entry(candidate: dict[str, Any], policy: ShadowRecoveryPolicy) -> dic
     if liquidity < policy.min_liquidity_usd or (baseline > 0 and liquidity / baseline * 100 < policy.min_liquidity_retention_pct):
         failures.append("liquidity below floor or retention requirement")
         codes.append("liquidity")
-    required_volume = {"RISING"} if is_momentum_buy else {"STEADY", "RISING"}
-    if volume not in required_volume or _number(candidate.get("buys_m5")) <= 0:
+    if volume not in {"STEADY", "RISING"} or _number(candidate.get("buys_m5")) <= 0:
         failures.append("volume/trading activity does not support recovery")
         codes.append("volume")
     required_ratio = policy.momentum_buy_min_ratio if is_momentum_buy else policy.buy_sell_ratio
