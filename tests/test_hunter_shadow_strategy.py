@@ -3,7 +3,7 @@ import time
 
 from solana_launch_guard.agent_capital import CapitalBook
 from solana_launch_guard.agents import AgentRole
-from solana_launch_guard.agent_cli import shadow_once
+from solana_launch_guard.agent_cli import funnel_report, shadow_once
 from solana_launch_guard.hunter_shadow_strategy import ShadowRecoveryPolicy, assess_entry, assess_exit
 
 
@@ -34,6 +34,53 @@ def test_zero_confirmations_and_absent_activity_remain_watch():
     result = assess_entry(candidate(entry_confirmation_count=0, volume_label="UNKNOWN"), ShadowRecoveryPolicy())
     assert result["decision"] == "WATCH"
     assert "entry confirmations 0/3" in result["reasons"]
+
+
+def test_assess_entry_reports_stable_failure_codes_alongside_human_reasons():
+    """The human-readable reasons embed live numbers (e.g. "entry
+    confirmations 0/3") and can't be aggregated by simple string counting.
+    failure_codes gives each failure a fixed tag for exactly that purpose.
+    """
+    review = assess_entry(
+        candidate(risk_label="HIGH", price=0.97, peak_price=1.0,
+                  pullback_from_peak_pct=3),
+        ShadowRecoveryPolicy(),
+    )
+    assert set(review["failure_codes"]) == {"pullback", "risk"}
+
+
+def test_funnel_report_counts_decisions_and_hunter_entry_blockers(
+    tmp_path, monkeypatch
+):
+    """A strategy question like "why isn't the trial buying anything?"
+    needs real counts across both the recommendation engine's own decision
+    and the stricter, independent policy that actually gates a live buy -
+    a candidate can fail the second silently with no trace anywhere else.
+    """
+    snapshot_path = tmp_path / "recommendations.json"
+    snapshot_path.write_text(json.dumps({
+        "generated_at": time.time(),
+        "tracked_candidates": [
+            candidate(),  # passes every check: BUY_READY
+            candidate(decision="WAIT FOR PULLBACK", price=0.97, peak_price=1.0,
+                      pullback_from_peak_pct=3),
+            candidate(decision="PULLBACK STARTED", risk_label="HIGH"),
+        ],
+    }))
+    monkeypatch.setenv("RECOMMENDATION_SNAPSHOT_PATH", str(snapshot_path))
+
+    report = funnel_report()
+
+    assert report["total_candidates"] == 3
+    assert report["recommendation_decision_counts"] == {
+        "BUY ZONE": 1, "WAIT FOR PULLBACK": 1, "PULLBACK STARTED": 1,
+    }
+    assert report["hunter_entry_state_counts"] == {
+        "BUY_READY": 1, "WATCH": 1, "RECOVERY_CONFIRMING": 1,
+    }
+    assert report["hunter_entry_blocking_reasons"] == {
+        "no_decision": 2, "pullback": 1, "risk": 1,
+    }
 
 
 def test_confirmed_recovery_becomes_buy_ready_but_risk_failure_blocks():

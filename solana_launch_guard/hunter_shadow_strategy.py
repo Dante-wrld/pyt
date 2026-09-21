@@ -86,24 +86,34 @@ def assess_entry(candidate: dict[str, Any], policy: ShadowRecoveryPolicy) -> dic
     volume = str(candidate.get("volume_label") or "UNKNOWN").upper()
     risk = str(candidate.get("risk_label") or "UNKNOWN").upper()
     failures = []
+    codes = []
     if price <= 0 or pullback < policy.pullback_pct:
         failures.append(f"meaningful pullback missing ({pullback:.1f}%/{policy.pullback_pct:.1f}%)")
+        codes.append("pullback")
     if momentum not in {"RISING", "STRONG"} or _number(candidate.get("price_change_m5_pct"), -1) <= 0:
         failures.append("short-term momentum has not turned upward")
+        codes.append("momentum")
     if liquidity < policy.min_liquidity_usd or (baseline > 0 and liquidity / baseline * 100 < policy.min_liquidity_retention_pct):
         failures.append("liquidity below floor or retention requirement")
+        codes.append("liquidity")
     if volume not in {"STEADY", "RISING"} or _number(candidate.get("buys_m5")) <= 0:
         failures.append("volume/trading activity does not support recovery")
+        codes.append("volume")
     if _number(candidate.get("buy_sell_ratio")) < policy.buy_sell_ratio:
         failures.append("buyer-to-seller ratio below recovery minimum")
+        codes.append("buy_sell_ratio")
     if risk not in {"MEDIUM", "MODERATE"} or candidate.get("decision") == "AVOID":
         failures.append("risk is outside permitted recovery band")
+        codes.append("risk")
     if _number(candidate.get("signal_score")) < policy.min_score:
         failures.append("signal score below minimum")
+        codes.append("signal_score")
     if count < required:
         failures.append(f"entry confirmations {count}/{required}")
+        codes.append("confirmations")
     if candidate.get("decision") not in {"BUY ZONE", "BUY NOW"}:
         failures.append("recommendation has no final buy decision")
+        codes.append("no_decision")
     if not failures:
         state = "BUY_READY"
     elif pullback < policy.pullback_pct:
@@ -120,6 +130,7 @@ def assess_entry(candidate: dict[str, Any], policy: ShadowRecoveryPolicy) -> dic
         "risk": risk, "liquidity": "ACCEPTABLE" if liquidity >= policy.min_liquidity_usd else "LOW",
         "volume": volume, "entry_confirmations": f"{count}/{required}",
         "reasons": failures or ["pullback confirmed; momentum and activity support recovery; confirmations complete"],
+        "failure_codes": codes,
     }
 
 

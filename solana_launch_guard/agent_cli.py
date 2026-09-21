@@ -87,6 +87,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="inspect the separate, persistent live-trial budget without initiating trades",
     )
     group.add_argument(
+        "--funnel-report", action="store_true",
+        help="count currently tracked candidates by recommendation decision and, "
+             "for each, by the live hunter entry policy's state and blocking reasons",
+    )
+    group.add_argument(
         "--live-trial-stop", action="store_true",
         help="write a durable operator stop and halt the current live trial",
     )
@@ -264,6 +269,54 @@ def _snapshot_is_fresh(snapshot: dict[str, object], *, now: float | None = None)
     except (TypeError, ValueError):
         return False
     return 0 <= age <= 15
+
+
+def funnel_report() -> dict[str, object]:
+    """Count currently tracked candidates by recommendation decision, and by
+    the live hunter entry policy's own state and blocking reasons.
+
+    The recommendation engine's decision (WAIT FOR PULLBACK, PULLBACK
+    STARTED, BUY ZONE, ...) already shows up in the recommendation
+    dashboard and phone alerts. It is not what gates a live hunter buy -
+    decide_hunter_entry re-checks every fresh candidate against a second,
+    stricter policy (assess_entry), and a candidate can fail that silently
+    with no visible trace anywhere else. This aggregates both layers so a
+    strategy question ("why isn't the trial buying anything?") can be
+    answered from real counts instead of guessing which single gate is
+    actually starving entries.
+    """
+    recommendations = _read_json(
+        os.getenv("RECOMMENDATION_SNAPSHOT_PATH", "launch_guard_recommendations.json")
+    )
+    tracked_raw = recommendations.get("tracked_candidates", [])
+    candidates: list[dict[str, object]] = [
+        item for item in (tracked_raw if isinstance(tracked_raw, list) else [])
+        if isinstance(item, dict)
+    ]
+    policy = ShadowRecoveryPolicy.from_env()
+    decision_counts: dict[str, int] = {}
+    entry_state_counts: dict[str, int] = {}
+    blocking_reason_counts: dict[str, int] = {}
+    for candidate in candidates:
+        decision = str(candidate.get("decision") or "UNKNOWN")
+        decision_counts[decision] = decision_counts.get(decision, 0) + 1
+        review = assess_entry(candidate, policy)
+        state = str(review["state"])
+        entry_state_counts[state] = entry_state_counts.get(state, 0) + 1
+        if state != "BUY_READY":
+            for code in review["failure_codes"]:
+                blocking_reason_counts[code] = blocking_reason_counts.get(code, 0) + 1
+    return {
+        "generated_at": recommendations.get("generated_at"),
+        "total_candidates": len(candidates),
+        "recommendation_decision_counts": decision_counts,
+        "hunter_entry_state_counts": entry_state_counts,
+        "hunter_entry_blocking_reasons": dict(
+            sorted(
+                blocking_reason_counts.items(), key=lambda item: item[1], reverse=True
+            )
+        ),
+    }
 
 
 def shadow_core_loop(book: CapitalBook, *, interval_seconds: int = 60) -> None:
@@ -575,6 +628,8 @@ def main() -> None:
             result = book.public_status()
         elif args.shadow_performance:
             result = book.performance()
+        elif args.funnel_report:
+            result = funnel_report()
         elif args.live_trial_status or args.live_trial_stop or args.live_trial_report:
             from .live_trial_ledger import LiveTrialLedger
 
