@@ -35,7 +35,9 @@ class LiveEntryDecision:
     candidate: dict[str, Any]
 
 
-def _fresh_candidates(snapshot: dict, *, now: float) -> list[dict]:
+def _fresh_candidates(
+    snapshot: dict, *, now: float, min_liquidity_usd: float = 50_000.0
+) -> list[dict]:
     try:
         age = now - float(snapshot.get("generated_at") or 0)
     except (TypeError, ValueError):
@@ -57,12 +59,12 @@ def _fresh_candidates(snapshot: dict, *, now: float) -> list[dict]:
             liquidity = float(candidate.get("liquidity_usd") or 0)
         except (TypeError, ValueError):
             continue
-        if math.isfinite(quote_age) and 0 <= quote_age <= 15 and math.isfinite(liquidity) and liquidity >= 50_000:
+        if math.isfinite(quote_age) and 0 <= quote_age <= 15 and math.isfinite(liquidity) and liquidity >= min_liquidity_usd:
             result.append(candidate)
     return result
 
 
-def _live_arbiter(max_quote_age_seconds: int = 15) -> RiskArbiter:
+def _live_arbiter(max_quote_age_seconds: int = 15, min_liquidity_usd: float = 50_000.0) -> RiskArbiter:
     # Live is enabled only for this explicitly constructed trial arbiter; the
     # ordinary shadow arbiter remains paper/shadow-only.
     #
@@ -80,7 +82,7 @@ def _live_arbiter(max_quote_age_seconds: int = 15) -> RiskArbiter:
     # genuine staleness bound.
     return RiskArbiter(RiskPolicy(
         allowed_modes=("live",), max_order_usd=5, max_position_pct=100,
-        max_open_positions=2, min_liquidity_usd=50_000,
+        max_open_positions=2, min_liquidity_usd=min_liquidity_usd,
         max_price_impact_pct=3, max_quote_age_seconds=max_quote_age_seconds,
     ))
 
@@ -96,7 +98,10 @@ def decide_hunter_entry(
     if ledger.unresolved():
         raise TrialHalted("unresolved order requires on-chain reconciliation")
     policy = ShadowRecoveryPolicy.from_env()
-    assessed = [(c, assess_entry(c, policy)) for c in _fresh_candidates(snapshot, now=at)]
+    assessed = [
+        (c, assess_entry(c, policy))
+        for c in _fresh_candidates(snapshot, now=at, min_liquidity_usd=policy.min_liquidity_usd)
+    ]
     ready = [c for c, review in assessed if review["state"] == "BUY_READY"]
     if not ready:
         # A candidate can already show BUY ZONE/BUY NOW in the recommendation
@@ -129,7 +134,7 @@ def decide_hunter_entry(
     candidate = ready[0]
     liquidity = float(candidate["liquidity_usd"])
     review = assess_entry(candidate, policy)
-    coordinator = AgentCoordinator(model, _live_arbiter())
+    coordinator = AgentCoordinator(model, _live_arbiter(min_liquidity_usd=policy.min_liquidity_usd))
     proposal, arbitration = coordinator.ask(
         AgentRecord("hunter-v1", AgentRole.OPPORTUNITY_HUNTER),
         {"mode": "live_trial", "candidate": candidate,
@@ -152,7 +157,8 @@ def decide_hunter_entry(
         return None
     # Centre of the decision must still pass deterministic entry checks after
     # model latency; an old model output never becomes permission to trade.
-    if not _fresh_candidates(snapshot, now=time.time()) or assess_entry(candidate, policy)["state"] != "BUY_READY":
+    if (not _fresh_candidates(snapshot, now=time.time(), min_liquidity_usd=policy.min_liquidity_usd)
+        or assess_entry(candidate, policy)["state"] != "BUY_READY"):
         ledger.log(agent="hunter-v1", mint=proposal.mint, state="BLOCKED", reason="candidate is stale")
         return None
     approved_cents = min(round(arbitration.approved_usd * 100),
@@ -179,7 +185,10 @@ def can_submit(ledger: LiveTrialLedger, *, mint: str, snapshot: dict,
     ):
         raise TrialHalted("another live order is unresolved")
     policy = ShadowRecoveryPolicy.from_env()
-    matching = [c for c in _fresh_candidates(snapshot, now=time.time()) if c["mint"] == mint]
+    matching = [
+        c for c in _fresh_candidates(snapshot, now=time.time(), min_liquidity_usd=policy.min_liquidity_usd)
+        if c["mint"] == mint
+    ]
     return bool(matching and assess_entry(matching[0], policy)["state"] == "BUY_READY")
 
 

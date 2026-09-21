@@ -66,6 +66,25 @@ def test_recovery_model_and_arbiter_gate_before_reservation(tmp_path, monkeypatc
     book.close()
 
 
+def test_liquidity_floor_follows_policy_not_a_hardcoded_fifty_thousand(tmp_path, monkeypatch):
+    """_fresh_candidates and _live_arbiter used to hardcode a $50,000
+    liquidity floor, completely independent of INTELLIGENCE_MIN_LIQUIDITY_USD
+    - a candidate above the configured policy floor but below $50,000 (a real
+    case: MAZE at ~$32,900 liquidity, confirmed MOMENTUM BUY, never even
+    reached assess_entry) was silently dropped before evaluation, with no
+    ledger entry at all. The floor must track policy.min_liquidity_usd."""
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    monkeypatch.setenv("INTELLIGENCE_MIN_LIQUIDITY_USD", "10000")
+    book = LiveTrialLedger(tmp_path / "trial.sqlite")
+    book.start()
+    model = Model(requested=5)
+    decision = decide_hunter_entry(snapshot(liquidity=32_900), model=model, ledger=book)
+    assert model.calls == 1
+    assert decision is not None
+    assert decision.approved_cents == 500
+    book.close()
+
+
 def test_buy_zone_candidate_that_fails_the_stricter_entry_policy_is_logged(tmp_path, monkeypatch):
     """A candidate can already show BUY ZONE/BUY NOW in the recommendation
     feed (and so have already sent a phone alert) while still failing
