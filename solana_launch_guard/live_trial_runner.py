@@ -91,9 +91,19 @@ def decide_hunter_entry(
     if ledger.unresolved():
         raise TrialHalted("unresolved order requires on-chain reconciliation")
     policy = ShadowRecoveryPolicy.from_env()
-    ready = [c for c in _fresh_candidates(snapshot, now=at)
-             if assess_entry(c, policy)["state"] == "BUY_READY"]
+    assessed = [(c, assess_entry(c, policy)) for c in _fresh_candidates(snapshot, now=at)]
+    ready = [c for c, review in assessed if review["state"] == "BUY_READY"]
     if not ready:
+        # A candidate can already show BUY ZONE/BUY NOW in the recommendation
+        # feed (and so have already sent a phone alert) while still failing
+        # this stricter, independent live-entry policy. Without this, that
+        # gap is invisible - it silently returns None with no ledger entry
+        # at all, leaving "why didn't the trial buy that?" unanswerable from
+        # --live-trial-status alone.
+        for candidate, review in assessed:
+            if candidate.get("decision") in {"BUY ZONE", "BUY NOW"} and review["state"] != "BUY_READY":
+                ledger.log(agent="hunter-v1", mint=str(candidate.get("mint") or ""),
+                           state="BUY_ZONE_SKIPPED", reason="; ".join(review["reasons"]))
         return None
     status = ledger.status(now=at)["agents"]["hunter-v1"]
     if status["remaining_buy_cap_cents"] <= 0 or status["open_positions"] >= 2:

@@ -61,6 +61,24 @@ def test_recovery_model_and_arbiter_gate_before_reservation(tmp_path, monkeypatc
     book.close()
 
 
+def test_buy_zone_candidate_that_fails_the_stricter_entry_policy_is_logged(tmp_path, monkeypatch):
+    """A candidate can already show BUY ZONE/BUY NOW in the recommendation
+    feed (and so have already sent a phone alert) while still failing
+    decide_hunter_entry's stricter, independent policy. That gap must not
+    vanish silently - it needs a ledger entry explaining why, or
+    --live-trial-status can't answer "why didn't the trial buy that?".
+    """
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    book = LiveTrialLedger(tmp_path / "trial.sqlite")
+    book.start()
+    assert decide_hunter_entry(snapshot(confirmations=0), model=Model(), ledger=book) is None
+    skipped = [d for d in book.status()["recent_decisions"] if d["state"] == "BUY_ZONE_SKIPPED"]
+    assert len(skipped) == 1
+    assert skipped[0]["mint"] == MINT
+    assert "confirmations" in skipped[0]["reason"]
+    book.close()
+
+
 def test_model_cannot_increase_capital_or_buy_other_mint(tmp_path, monkeypatch):
     monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
     book = LiveTrialLedger(tmp_path / "trial.sqlite")
