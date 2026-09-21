@@ -44,6 +44,7 @@ class ShadowRecoveryPolicy:
     min_liquidity_retention_pct: float = 80.0
     min_score: int = 65
     buy_sell_ratio: float = 1.2
+    momentum_buy_min_ratio: float = 1.5
     trailing_activation_pct: float = 20.0
     trailing_stop_pct: float = 12.0
     momentum_exit_pct: float = -8.0
@@ -68,6 +69,7 @@ class ShadowRecoveryPolicy:
             min_liquidity_retention_pct=get("ENTRY_MIN_LIQUIDITY_RETENTION_PCT", 80),
             min_score=int(get("ENTRY_MIN_SIGNAL_SCORE", 65)),
             buy_sell_ratio=get("BUY_NOW_MIN_RATIO", 1.2),
+            momentum_buy_min_ratio=get("MOMENTUM_BUY_MIN_RATIO", 1.5),
             trailing_activation_pct=get("TRAILING_ACTIVATION_PCT", 20),
             trailing_stop_pct=get("TRAILING_STOP_PCT", 12),
             momentum_exit_pct=get("MOMENTUM_EXIT_PCT", -8),
@@ -104,9 +106,18 @@ def assess_entry(candidate: dict[str, Any], policy: ShadowRecoveryPolicy) -> dic
     momentum = str(candidate.get("momentum_label") or "UNKNOWN").upper()
     volume = str(candidate.get("volume_label") or "UNKNOWN").upper()
     risk = str(candidate.get("risk_label") or "UNKNOWN").upper()
+    # A momentum-continuation candidate is, by definition, still extending
+    # rather than pulling back - the pullback requirement below would always
+    # fail it. It carries its own, stricter volume and buy-pressure bar
+    # instead (rising volume, not merely non-falling; a higher buy/sell
+    # ratio) since it has no dip-and-reclaim confirmation to lean on.
+    is_momentum_buy = candidate.get("decision") == "MOMENTUM BUY"
     failures = []
     codes = []
-    if price <= 0 or pullback < policy.pullback_pct:
+    if price <= 0:
+        failures.append("no usable price")
+        codes.append("pullback")
+    elif not is_momentum_buy and pullback < policy.pullback_pct:
         failures.append(f"meaningful pullback missing ({pullback:.1f}%/{policy.pullback_pct:.1f}%)")
         codes.append("pullback")
     if momentum not in {"RISING", "STRONG"} or _number(candidate.get("price_change_m5_pct"), -1) <= 0:
@@ -115,10 +126,12 @@ def assess_entry(candidate: dict[str, Any], policy: ShadowRecoveryPolicy) -> dic
     if liquidity < policy.min_liquidity_usd or (baseline > 0 and liquidity / baseline * 100 < policy.min_liquidity_retention_pct):
         failures.append("liquidity below floor or retention requirement")
         codes.append("liquidity")
-    if volume not in {"STEADY", "RISING"} or _number(candidate.get("buys_m5")) <= 0:
+    required_volume = {"RISING"} if is_momentum_buy else {"STEADY", "RISING"}
+    if volume not in required_volume or _number(candidate.get("buys_m5")) <= 0:
         failures.append("volume/trading activity does not support recovery")
         codes.append("volume")
-    if _number(candidate.get("buy_sell_ratio")) < policy.buy_sell_ratio:
+    required_ratio = policy.momentum_buy_min_ratio if is_momentum_buy else policy.buy_sell_ratio
+    if _number(candidate.get("buy_sell_ratio")) < required_ratio:
         failures.append("buyer-to-seller ratio below recovery minimum")
         codes.append("buy_sell_ratio")
     if policy.require_medium_risk and risk not in {"MEDIUM", "MODERATE"}:
@@ -133,7 +146,7 @@ def assess_entry(candidate: dict[str, Any], policy: ShadowRecoveryPolicy) -> dic
     if count < required:
         failures.append(f"entry confirmations {count}/{required}")
         codes.append("confirmations")
-    if candidate.get("decision") not in {"BUY ZONE", "BUY NOW"}:
+    if candidate.get("decision") not in {"BUY ZONE", "BUY NOW", "MOMENTUM BUY"}:
         failures.append("recommendation has no final buy decision")
         codes.append("no_decision")
     if not failures:

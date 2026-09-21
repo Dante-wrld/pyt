@@ -114,7 +114,7 @@ def decide_hunter_entry(
         # "don't repeat, but don't go silent either" approach.
         skip_reasons = buy_zone_skip_reasons if buy_zone_skip_reasons is not None else {}
         for candidate, review in assessed:
-            if candidate.get("decision") in {"BUY ZONE", "BUY NOW"} and review["state"] != "BUY_READY":
+            if candidate.get("decision") in {"BUY ZONE", "BUY NOW", "MOMENTUM BUY"} and review["state"] != "BUY_READY":
                 mint = str(candidate.get("mint") or "")
                 reason = "; ".join(review["reasons"])
                 if skip_reasons.get(mint) == reason:

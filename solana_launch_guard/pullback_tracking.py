@@ -50,7 +50,7 @@ class PullbackTracker:
 
     @staticmethod
     def _state(candidate: RecommendationCandidate) -> str:
-        if candidate.decision in {"BUY NOW", "BUY ZONE"}:
+        if candidate.decision in {"BUY NOW", "BUY ZONE", "MOMENTUM BUY"}:
             return "confirmed_entry"
         if candidate.decision == "ENTRY PENDING":
             return "confirmation_pending"

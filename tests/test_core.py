@@ -2580,7 +2580,7 @@ def test_pullback_low_resets_after_price_leaves_the_zone_above() -> None:
             pair_created_at_ms=initial.pair_created_at_ms,
             buys_m5=40,
             sells_m5=20,
-            volume_m5_usd=18_000,
+            volume_m5_usd=16_000,
             price_change_m5_pct=change_pct,
         )
 
@@ -2690,7 +2690,7 @@ def test_stale_entry_zone_re_anchors_to_a_new_peak() -> None:
             pair_created_at_ms=initial.pair_created_at_ms,
             buys_m5=40,
             sells_m5=20,
-            volume_m5_usd=18_000,
+            volume_m5_usd=16_000,
             price_change_m5_pct=change_pct,
         )
 
@@ -2710,6 +2710,113 @@ def test_stale_entry_zone_re_anchors_to_a_new_peak() -> None:
     assert candidate.decision == "WATCH"
     book.update(quote_at(15.0 * 0.96, 1), now=9)
     assert candidate.decision == "BUY ZONE"
+
+
+def test_momentum_buy_fires_on_a_fresh_extended_move_with_rising_volume() -> None:
+    """A token that extends straight up without ever giving back into a
+    pullback zone must not be permanently unbuyable just because the
+    pullback-only path requires a dip that may never come - given genuinely
+    strong, independently-confirmed evidence (rising volume, firm buy
+    pressure), it qualifies through a separate, stricter momentum path.
+    """
+    initial = market_quote(
+        liquidity=50_000, market_cap=100_000, buys=60, sells=20,
+        volume=15_000, change=1,
+    )
+    book = RecommendationBook(
+        pool_size=10, ttl_seconds=60, entry_confirmation_polls=1,
+        momentum_buy_min_ratio=1.5,
+    )
+    candidate = book.add(initial, CoinIntelligence().score(initial), now=0)
+    assert candidate is not None
+    assert candidate.entry_zone_low is None
+
+    strong_move = MarketQuote(
+        mint=initial.mint,
+        symbol=initial.symbol,
+        price_sol=initial.price_sol * 1.10,
+        liquidity_usd=initial.liquidity_usd,
+        market_cap_usd=initial.market_cap_usd,
+        pair_address=initial.pair_address,
+        pair_created_at_ms=initial.pair_created_at_ms,
+        buys_m5=45,
+        sells_m5=15,
+        volume_m5_usd=20_000,
+        price_change_m5_pct=6,
+    )
+    book.update(strong_move, now=3)
+    assert candidate.decision == "MOMENTUM BUY"
+    assert candidate.entry_zone_low is None
+    assert "momentum continuation" in candidate.decision_reason
+
+
+def test_momentum_buy_does_not_fire_on_a_fading_pump() -> None:
+    """The same extended move without rising volume - a token grinding
+    higher on fading interest - must not qualify: this is exactly the
+    "buying a top" scenario the strict volume bar exists to exclude."""
+    initial = market_quote(
+        liquidity=50_000, market_cap=100_000, buys=60, sells=20,
+        volume=15_000, change=1,
+    )
+    book = RecommendationBook(
+        pool_size=10, ttl_seconds=60, entry_confirmation_polls=1,
+        momentum_buy_min_ratio=1.5,
+    )
+    candidate = book.add(initial, CoinIntelligence().score(initial), now=0)
+    assert candidate is not None
+
+    fading_move = MarketQuote(
+        mint=initial.mint,
+        symbol=initial.symbol,
+        price_sol=initial.price_sol * 1.10,
+        liquidity_usd=initial.liquidity_usd,
+        market_cap_usd=initial.market_cap_usd,
+        pair_address=initial.pair_address,
+        pair_created_at_ms=initial.pair_created_at_ms,
+        buys_m5=45,
+        sells_m5=15,
+        volume_m5_usd=10_000,  # falling from the 15,000 baseline
+        price_change_m5_pct=6,
+    )
+    book.update(fading_move, now=3)
+    assert candidate.decision != "MOMENTUM BUY"
+    assert candidate.entry_zone_low is not None
+
+
+def test_momentum_buy_fires_above_an_already_anchored_zone_without_re_anchoring() -> None:
+    """A token that already has an anchored zone from an earlier
+    overextension, and is now grinding above it without yet running far
+    enough to re-anchor (see test_stale_entry_zone_re_anchors_to_a_new_peak),
+    should still qualify via the momentum path given strong enough evidence -
+    this is the case a purely re-anchor-based fix could never reach."""
+    initial = market_quote(
+        liquidity=50_000, market_cap=100_000, buys=60, sells=20,
+        volume=15_000, change=15,
+    )
+    book = RecommendationBook(
+        pool_size=10, ttl_seconds=60, entry_confirmation_polls=1,
+        momentum_buy_min_ratio=1.5,
+    )
+    candidate = book.add(initial, CoinIntelligence().score(initial), now=0)
+    assert candidate is not None
+    zone_high = candidate.entry_zone_high
+    assert zone_high is not None
+
+    just_above_zone = MarketQuote(
+        mint=initial.mint,
+        symbol=initial.symbol,
+        price_sol=zone_high * 1.02,  # above the zone, well under the 8% re-anchor trigger
+        liquidity_usd=initial.liquidity_usd,
+        market_cap_usd=initial.market_cap_usd,
+        pair_address=initial.pair_address,
+        pair_created_at_ms=initial.pair_created_at_ms,
+        buys_m5=45,
+        sells_m5=15,
+        volume_m5_usd=20_000,
+        price_change_m5_pct=6,
+    )
+    book.update(just_above_zone, now=3)
+    assert candidate.decision == "MOMENTUM BUY"
 
 
 def test_entry_requires_three_consecutive_confirmations() -> None:
@@ -3856,7 +3963,7 @@ def test_phone_notifications_deduplicate_and_respect_cooldown(
         pair_created_at_ms=initial.pair_created_at_ms,
         buys_m5=40,
         sells_m5=20,
-        volume_m5_usd=18_000,
+        volume_m5_usd=16_000,
         price_change_m5_pct=4,
     )
     book.update(above_zone, now=6)

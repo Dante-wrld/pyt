@@ -151,6 +151,7 @@ class LaunchGuard(
                 settings.min_entry_reward_risk_ratio
             ),
             buy_now_min_ratio=settings.buy_now_min_ratio,
+            momentum_buy_min_ratio=settings.momentum_buy_min_ratio,
             avoid_momentum_pct=settings.avoid_entry_momentum_pct,
             avoid_sell_pressure_ratio=(
                 settings.avoid_entry_sell_pressure_ratio

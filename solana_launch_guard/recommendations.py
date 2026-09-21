@@ -104,6 +104,7 @@ class RecommendationCandidate:
     def decision_priority(self) -> int:
         return {
             "BUY ZONE": 4,
+            "MOMENTUM BUY": 4,
             "BUY NOW": 3,
             "ENTRY PENDING": 2,
             "PULLBACK STARTED": 2,
@@ -228,6 +229,7 @@ class RecommendationBook:
         moonshot_take_profit_pct: float = 5_000.0,
         min_entry_reward_risk_ratio: float = 2.0,
         buy_now_min_ratio: float = 1.2,
+        momentum_buy_min_ratio: float = 1.5,
         avoid_momentum_pct: float = -8.0,
         avoid_sell_pressure_ratio: float = 2.0,
         min_liquidity_usd: float = 5_000.0,
@@ -251,6 +253,7 @@ class RecommendationBook:
         self.moonshot_take_profit_pct = moonshot_take_profit_pct
         self.min_entry_reward_risk_ratio = min_entry_reward_risk_ratio
         self.buy_now_min_ratio = buy_now_min_ratio
+        self.momentum_buy_min_ratio = momentum_buy_min_ratio
         self.avoid_momentum_pct = avoid_momentum_pct
         self.avoid_sell_pressure_ratio = avoid_sell_pressure_ratio
         self.min_liquidity_usd = min_liquidity_usd
@@ -501,6 +504,28 @@ class RecommendationBook:
             f"checks: {reason}"
         )
 
+    def _momentum_buy_reason(
+        self, candidate: RecommendationCandidate
+    ) -> str | None:
+        """A strong, still-accelerating move with rising (not merely steady)
+        volume and firm buy pressure - the one setup the pullback-only path
+        can never reach, since it requires a real pullback to exist first.
+        Deliberately stricter than the pullback path's own bar (buy_now_min_
+        ratio): there is no dip-and-reclaim confirmation to lean on here, so
+        this is the sole gate standing between "genuine continuation" and
+        "buying a fading pump."""
+        if candidate.momentum_label not in {"RISING", "STRONG"}:
+            return None
+        if candidate.volume_label != "RISING":
+            return None
+        if candidate.buy_sell_ratio < self.momentum_buy_min_ratio:
+            return None
+        return (
+            f"momentum continuation: {candidate.momentum_label.lower()} price "
+            f"action with rising volume and a {candidate.buy_sell_ratio:.2f} "
+            "buy/sell ratio"
+        )
+
     def _refresh_decision(self, candidate: RecommendationCandidate) -> None:
         liquidity = candidate.liquidity_usd or 0.0
         initial_liquidity = candidate.initial_liquidity_usd or liquidity
@@ -529,6 +554,10 @@ class RecommendationBook:
         zone_high = candidate.entry_zone_high
         if zone_low is not None and zone_high is not None:
             if candidate.current_price > zone_high:
+                momentum_reason = self._momentum_buy_reason(candidate)
+                if momentum_reason is not None:
+                    self._propose_entry(candidate, "MOMENTUM BUY", momentum_reason)
+                    return
                 # A token that keeps making new highs needs its zone to
                 # follow: re-anchor once price has run far enough past the
                 # existing zone to represent a fresh overextension. Without
@@ -625,6 +654,10 @@ class RecommendationBook:
             )
         )
         if overextended:
+            momentum_reason = self._momentum_buy_reason(candidate)
+            if momentum_reason is not None:
+                self._propose_entry(candidate, "MOMENTUM BUY", momentum_reason)
+                return
             candidate.entry_zone_low = candidate.current_price * (
                 1 - self.pullback_zone_max_pct / 100
             )

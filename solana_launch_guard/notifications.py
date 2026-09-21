@@ -126,7 +126,7 @@ class DecisionNotifier:
         decisions: tuple[str, ...],
         min_score: int,
         cooldown_seconds: float,
-        high_priority_decisions: tuple[str, ...] = ("BUY NOW", "BUY ZONE"),
+        high_priority_decisions: tuple[str, ...] = ("BUY NOW", "BUY ZONE", "MOMENTUM BUY"),
         clock: Callable[[], float] = time.time,
     ) -> None:
         self.client = client
@@ -362,6 +362,7 @@ def format_candidate_notification(
     presentation = {
         "BUY NOW": ("🟢", "QUALIFIED ENTRY", "magic"),
         "BUY ZONE": ("🟢", "ENTRY ZONE REACHED", "cashregister"),
+        "MOMENTUM BUY": ("🟢", "MOMENTUM CONTINUATION", "cashregister"),
         "ENTRY PENDING": ("🟡", "ENTRY CONFIRMING", "pushover"),
         "PULLBACK STARTED": ("🔵", "PULLBACK STARTED", "siren"),
         "WAIT FOR PULLBACK": ("🔵", "WAIT FOR PULLBACK", "pushover"),

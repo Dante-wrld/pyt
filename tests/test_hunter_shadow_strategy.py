@@ -30,6 +30,37 @@ def test_falling_pullback_is_never_buy_ready():
     assert "momentum" in " ".join(result["reasons"])
 
 
+def test_momentum_buy_does_not_require_a_pullback():
+    result = assess_entry(
+        candidate(decision="MOMENTUM BUY", price=1.0, peak_price=1.0,
+                  pullback_from_peak_pct=0, volume_label="RISING"),
+        ShadowRecoveryPolicy(),
+    )
+    assert result["state"] == "BUY_READY"
+    assert "pullback" not in result["failure_codes"]
+
+
+def test_momentum_buy_requires_rising_volume_not_just_steady():
+    result = assess_entry(
+        candidate(decision="MOMENTUM BUY", price=1.0, peak_price=1.0,
+                  pullback_from_peak_pct=0, volume_label="STEADY"),
+        ShadowRecoveryPolicy(),
+    )
+    assert result["state"] != "BUY_READY"
+    assert "volume" in result["failure_codes"]
+
+
+def test_momentum_buy_requires_a_higher_buy_sell_ratio_than_the_pullback_path():
+    # 1.3 clears the pullback path's 1.2 bar but not momentum's stricter 1.5.
+    result = assess_entry(
+        candidate(decision="MOMENTUM BUY", price=1.0, peak_price=1.0,
+                  pullback_from_peak_pct=0, volume_label="RISING", buy_sell_ratio=1.3),
+        ShadowRecoveryPolicy(),
+    )
+    assert result["state"] != "BUY_READY"
+    assert "buy_sell_ratio" in result["failure_codes"]
+
+
 def test_zero_confirmations_and_absent_activity_remain_watch():
     result = assess_entry(candidate(entry_confirmation_count=0, volume_label="UNKNOWN"), ShadowRecoveryPolicy())
     assert result["decision"] == "WATCH"
