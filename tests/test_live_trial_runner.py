@@ -12,6 +12,11 @@ from solana_launch_guard.execution import USDC_MINT
 MINT = "A" * 44  # synthetic Base58-looking test mint
 
 
+def _no_legacy_claim() -> SimpleNamespace:
+    """A store.connection stub reporting no pre-existing legacy-key claim."""
+    return SimpleNamespace(execute=lambda *a, **k: SimpleNamespace(fetchone=lambda: None))
+
+
 def snapshot(*, confirmations=3, momentum="RISING", liquidity=60000):
     now = time.time()
     return {"generated_at": now, "candidates": [{
@@ -136,6 +141,7 @@ def test_execution_reserves_before_broadcast_and_requires_chain_deltas(tmp_path,
                                    output_amount_raw=100_000_000)
 
     class Store:
+        connection = _no_legacy_claim()
         def begin_auto_buy_execution(self, **kwargs):
             sequence.append("claim")
             return True
@@ -185,6 +191,7 @@ def test_portfolio_owned_exit_can_exceed_five_dollars_without_bypassing_guards(t
                                    output_amount_raw=10_000_000)
 
     class Store:
+        connection = _no_legacy_claim()
         def begin_auto_sell_execution(self, **kwargs):
             return True
         def complete_auto_sell_execution(self, **kwargs):
@@ -235,6 +242,8 @@ def test_a_different_trial_session_can_still_sell_a_mint_the_last_session_claime
         event_key), shared across trial sessions like the real main
         database actually is - only one LiveTrialLedger per test in the
         other tests here, so nothing else exercises that sharing."""
+        connection = _no_legacy_claim()
+
         def __init__(self):
             self.claimed: set[str] = set()
 

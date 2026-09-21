@@ -156,15 +156,14 @@ class MultichainMixin(LaunchGuardState):
             # run_multichain_feed excludes tokenized stocks from becoming
             # trading candidates (pullback/momentum sniping logic doesn't
             # fit a real stock's price action); a wallet transfer of one -
-            # ordinary Robinhood brokerage activity reflected on-chain, not
-            # a launch to snipe - must not bypass that exclusion.
-            stock_symbols = (
-                await self.oracle.robinhood_stock_token_symbols()
-                if transfer.chain == "robinhood" else None
-            )
-            if stock_symbols is not None and _is_stock_token_symbol(
-                quote.symbol, stock_symbols
-            ):
+            # ordinary brokerage activity reflected on-chain, not a launch
+            # to snipe - must not bypass that exclusion. Checked for every
+            # chain, not just "robinhood": tokenized-stock symbols (e.g.
+            # Backed Finance's xStocks) also show up on other chains, and
+            # launch_guard_ingestion.py's equivalent check is chain-agnostic
+            # too, so this must not be narrower than that.
+            stock_symbols = await self.oracle.robinhood_stock_token_symbols()
+            if _is_stock_token_symbol(quote.symbol, stock_symbols):
                 LOGGER.info(
                     "%s REJECT %-10s contract=%s reason=tokenized stock symbol",
                     transfer.chain.upper(),

@@ -47,13 +47,16 @@ def _is_stock_token_symbol(
     if normalized in stock_symbols:
         return True
     if (
-        len(normalized) > 1
+        len(normalized) > 2
         and normalized.endswith("x")
         and normalized[:-1] in stock_symbols
     ):
         # Backed Finance's xStocks convention on Solana: a bare "x" suffix,
         # no "w" prefix (e.g. NVDAx for NVIDIA) - confirmed against the
         # actual on-chain token, distinct from the wrapped pattern below.
+        # Requires at least a 2-character ticker before the "x" so this
+        # doesn't collide with single-letter tickers (F, T, C, X, ...) that
+        # happen to be a prefix of an unrelated two-letter meme symbol.
         return True
     return (
         len(normalized) > 2

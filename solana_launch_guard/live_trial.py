@@ -72,10 +72,10 @@ def _snapshot_is_fresh(snapshot: dict) -> bool:
         age = time.time() - float(snapshot.get("generated_at") or 0)
     except (ValueError, TypeError):
         return False
-    # Same 30s bound as _live_arbiter()'s max_quote_age_seconds, and for the
-    # same reason: cycle() checks this snapshot again after a model.propose()
-    # round trip (e.g. hunter-v1's eligibility check runs after portfolio-v1
-    # has already evaluated its own proposal in the same cycle), so a bound
+    # Same 30s bound as _live_arbiter()'s exit-path max_quote_age_seconds
+    # (live_trial_runner.py passes 30 explicitly there; its default is a
+    # tighter 15 for the entry path), and for the same reason: _eligible_exit
+    # re-checks this snapshot after a model.propose() round trip, so a bound
     # this tight can fail purely from that latency rather than genuine
     # staleness.
     return math.isfinite(age) and 0 <= age <= 30
@@ -111,12 +111,13 @@ def _write_report(ledger: LiveTrialLedger) -> None:
     os.replace(temporary, path)
 
 
-def _eligible_exit(snapshot: dict, mint: str) -> bool:
+def _signal_decision(snapshot: dict, mint: str) -> str | None:
+    """The fresh sell-worthy decision for `mint`, or None if not eligible."""
     if not _snapshot_is_fresh(snapshot):
-        return False
+        return None
     signals = snapshot.get("signals")
     if not isinstance(signals, list):
-        return False
+        return None
     for row in signals:
         if (
             not isinstance(row, dict)
@@ -130,8 +131,12 @@ def _eligible_exit(snapshot: dict, mint: str) -> bool:
         except (TypeError, ValueError):
             continue
         if math.isfinite(price) and price > 0:
-            return True
-    return False
+            return row.get("decision")
+    return None
+
+
+def _eligible_exit(snapshot: dict, mint: str) -> bool:
+    return _signal_decision(snapshot, mint) is not None
 
 
 def _sell_choice(raw: dict, mint: str, value: float, signal: str,
@@ -218,7 +223,8 @@ async def _track_exit_block_streak(
 async def cycle(*, ledger: LiveTrialLedger, settings: Settings, rpc: SolanaRpc,
                 model, store: SQLiteStore,
                 oracle: DexScreenerOracle,
-                exit_block_streaks: dict[str, int]) -> None:
+                exit_block_streaks: dict[str, int],
+                buy_zone_skip_reasons: dict[str, str]) -> None:
     ledger.assert_active()
     if ledger.unresolved():
         raise TrialHalted("unresolved order; stop for chain reconciliation")
@@ -273,6 +279,7 @@ async def cycle(*, ledger: LiveTrialLedger, settings: Settings, rpc: SolanaRpc,
                 max_price_impact_pct=min(5, settings.auto_sell_max_price_impact_pct),
                 max_slippage_bps=min(500, settings.auto_sell_max_slippage_bps),
                 current_exit_allowed=lambda mint=mint: _eligible_exit(_read_portfolio(), mint),
+                current_decision=lambda mint=mint: _signal_decision(_read_portfolio(), mint),
             )
             await _track_exit_block_streak(
                 settings, exit_block_streaks, owner=owner, mint=mint,
@@ -354,11 +361,17 @@ async def cycle(*, ledger: LiveTrialLedger, settings: Settings, rpc: SolanaRpc,
                       message=f"{position['agent']}: {position['mint']} chain-confirmed; {result['proceeds_usdc_raw']/1_000_000:.2f} USDC; {'; '.join(review['reasons'])[:100]}")
         return
     if unpriced_position or not _snapshot_is_fresh(portfolio):
-        ledger.log(agent="hunter-v1", mint="", state="BUY_BLOCKED",
-                   reason="owned position cannot be priced or portfolio monitor is stale")
+        # These are reported together in one gate because both mean "system
+        # health is uncertain, don't risk a new buy" - but the reason text
+        # names the one that actually applied instead of always naming both,
+        # so "why isn't it buying" is answerable without reading the code.
+        reason = ("an owned position's fresh USD quote is unavailable" if unpriced_position
+                  else "portfolio monitor snapshot is stale")
+        ledger.log(agent="hunter-v1", mint="", state="BUY_BLOCKED", reason=reason)
         return
     recommendations = _read_recommendations()
-    decision = decide_hunter_entry(recommendations, model=model, ledger=ledger)
+    decision = decide_hunter_entry(recommendations, model=model, ledger=ledger,
+                                   buy_zone_skip_reasons=buy_zone_skip_reasons)
     if decision is not None:
         result = await execute_hunter_entry(decision, ledger=ledger, rpc=rpc,
                                             buyer=buyer, store=store, wallet=wallet,
@@ -402,6 +415,7 @@ async def supervise(*, interval_seconds: int = 30) -> dict:
         oracle = DexScreenerOracle()
         consecutive_cycle_failures = 0
         exit_block_streaks: dict[str, int] = {}
+        buy_zone_skip_reasons: dict[str, str] = {}
         while ledger.status()["status"] == "ACTIVE":
             require_exclusive_trial_flags()
             if monitor.poll() is not None:
@@ -409,7 +423,8 @@ async def supervise(*, interval_seconds: int = 30) -> dict:
             try:
                 await cycle(ledger=ledger, settings=settings, rpc=rpc,
                             model=model, store=store, oracle=oracle,
-                            exit_block_streaks=exit_block_streaks)
+                            exit_block_streaks=exit_block_streaks,
+                            buy_zone_skip_reasons=buy_zone_skip_reasons)
                 consecutive_cycle_failures = 0
             except TrialHalted:
                 raise

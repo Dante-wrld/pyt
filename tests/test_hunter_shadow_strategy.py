@@ -103,20 +103,31 @@ def test_confirmed_reversal_and_liquidity_collapse_take_priority_over_partial():
     assert assess_exit(position, candidate(price=3.5), ShadowRecoveryPolicy())["state"] == "TAKE_PARTIAL"
 
 
-def test_trailing_stop_alone_exits_a_considerable_rise_that_reverses():
+def test_trailing_stop_exits_a_considerable_rise_that_reverses_with_selling_pressure():
     """A token that rose considerably (>=20% from entry) and has already
-    pulled back >=12% from its peak must exit on that alone - it must not
-    wait for extra sell-pressure or volume-falling confirmation.
-    live_trial.py's own quotes never populate volume_label (always
-    "UNKNOWN" there), so requiring it made trailing protection dead in the
-    one place that matters most.
+    pulled back >=12% from its peak exits once corroborated by real selling
+    pressure (sells_m5 > buys_m5, populated by both live_trial.py's and
+    agent_cli.py's callers even when volume_label is "UNKNOWN") or a falling
+    volume label - it must not exit on the pullback alone, which can be a
+    single noisy tick on thin liquidity rather than a genuine reversal.
     """
     position = {"entry_price": 1, "highest_price_since_entry": 1.3}
-    row = candidate(price=1.1, price_change_m5_pct=-2, buys_m5=10, sells_m5=8,
+    row = candidate(price=1.1, price_change_m5_pct=-2, buys_m5=8, sells_m5=10,
                      volume_label="UNKNOWN")
     review = assess_exit(position, row, ShadowRecoveryPolicy())
     assert review["state"] == "EXIT"
     assert "trailing" in " ".join(review["reasons"]).lower()
+
+
+def test_trailing_stop_without_selling_pressure_only_warns():
+    """The same pullback without corroborating sell pressure or a falling
+    volume label is a warning, not an exit - it awaits confirmation next
+    cycle rather than selling on a single noisy tick."""
+    position = {"entry_price": 1, "highest_price_since_entry": 1.3}
+    row = candidate(price=1.1, price_change_m5_pct=-2, buys_m5=10, sells_m5=8,
+                     volume_label="UNKNOWN")
+    review = assess_exit(position, row, ShadowRecoveryPolicy())
+    assert review["state"] == "REVERSAL_WARNING"
 
 
 def test_stagnant_position_exits_after_grace_window_with_no_rise():

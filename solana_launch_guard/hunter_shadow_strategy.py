@@ -9,6 +9,7 @@ import math
 import os
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 
@@ -18,6 +19,21 @@ def _number(value: Any, default: float = 0.0) -> float:
     except (TypeError, ValueError):
         return default
     return result if math.isfinite(result) else default
+
+
+def _epoch(value: Any) -> float:
+    """Accept either a numeric epoch (live_trial) or an ISO-8601 string
+    (shadow's CapitalBook.mark_shadow_position uses datetime.isoformat())."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        pass
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value).timestamp()
+        except ValueError:
+            return 0.0
+    return 0.0
 
 
 @dataclass(frozen=True)
@@ -39,10 +55,12 @@ class ShadowRecoveryPolicy:
     min_sell_usd: float = 2.0
     stagnation_window_seconds: float = 300.0
     stagnation_min_gain_pct: float = 3.0
+    require_medium_risk: bool = True
 
     @classmethod
     def from_env(cls) -> ShadowRecoveryPolicy:
         get = lambda name, default: float(os.getenv(name, str(default)))
+        get_bool = lambda name, default: os.getenv(name, str(default)).strip().lower() in {"true", "1", "yes", "on"}
         policy = cls(
             pullback_pct=get("PULLBACK_ZONE_MIN_PCT", 4),
             confirmations=int(get("ENTRY_CONFIRMATION_POLLS", 3)),
@@ -61,6 +79,7 @@ class ShadowRecoveryPolicy:
             stagnation_min_gain_pct=get("STAGNATION_MIN_GAIN_PCT", 3),
             second_stage_fraction=get("AUTO_SELL_SECOND_STAGE_FRACTION", 0.5),
             min_sell_usd=get("PORTFOLIO_MIN_SELL_VALUE_USD", 2),
+            require_medium_risk=get_bool("ENTRY_REQUIRE_MEDIUM_RISK", True),
         )
         if (policy.confirmations < 3 or policy.pullback_pct <= 0
                 or not 0 < policy.trailing_stop_pct < 100
@@ -102,9 +121,12 @@ def assess_entry(candidate: dict[str, Any], policy: ShadowRecoveryPolicy) -> dic
     if _number(candidate.get("buy_sell_ratio")) < policy.buy_sell_ratio:
         failures.append("buyer-to-seller ratio below recovery minimum")
         codes.append("buy_sell_ratio")
-    if risk not in {"MEDIUM", "MODERATE"} or candidate.get("decision") == "AVOID":
+    if policy.require_medium_risk and risk not in {"MEDIUM", "MODERATE"}:
         failures.append("risk is outside permitted recovery band")
         codes.append("risk")
+    if candidate.get("decision") == "AVOID":
+        failures.append("recommendation decision is AVOID")
+        codes.append("avoid_decision")
     if _number(candidate.get("signal_score")) < policy.min_score:
         failures.append("signal score below minimum")
         codes.append("signal_score")
@@ -148,11 +170,12 @@ def assess_exit(
     drawdown = (peak - price) / peak * 100
     liquidity = _number(quote.get("liquidity_usd"))
     baseline = _number(position.get("entry_liquidity_usd"))
+    momentum_known = quote.get("price_change_m5_pct") is not None
     momentum = _number(quote.get("price_change_m5_pct"))
     sells = _number(quote.get("sells_m5"))
     buys = _number(quote.get("buys_m5"))
     volume_label = str(quote.get("volume_label") or "UNKNOWN").upper()
-    opened_at = _number(position.get("opened_at"))
+    opened_at = _epoch(position.get("opened_at"))
     # opened_at missing/invalid -> age 0, so the stagnation check below never
     # fires on data we don't actually have (never infer missing data as
     # grounds for an exit, same principle as the rest of this module).
@@ -171,6 +194,7 @@ def assess_exit(
     stagnant = (
         age_seconds >= policy.stagnation_window_seconds
         and gain < policy.stagnation_min_gain_pct
+        and momentum_known
         and momentum <= 0
     )
     reasons = [f"return {gain:+.2f}%", f"post-entry peak drawdown {drawdown:.2f}%", f"momentum {momentum:+.2f}%"]
@@ -180,25 +204,22 @@ def assess_exit(
     elif trend_break and (trailing_break or drawdown >= policy.trailing_stop_pct or quote.get("decision") == "EXIT WARNING"):
         state = "EXIT"
         reasons.append("confirmed reversal: momentum, selling and peak/structure evidence")
-    elif trailing_break:
-        # A >=20% rise that has already pulled back >=12% from its peak is
-        # exit-worthy on its own; it must not wait for extra sell-pressure
-        # or volume-falling confirmation. live_trial.py's own quotes never
-        # populate volume_label (always "UNKNOWN" there), so requiring it
-        # made trailing protection dead in the one place that matters most.
-        # PortfolioAdvisor.evaluate()'s PROTECT PROFIT (portfolio.py) makes
-        # the same call on the same evidence, without extra confirmation.
+    elif trailing_break and (sells > buys or volume_label == "FALLING"):
+        # A >=20% rise that has already pulled back >=12% from its peak,
+        # corroborated by real sell pressure (sells_m5/buys_m5 are populated
+        # by both live_trial.py and agent_cli.py's callers even when
+        # volume_label itself is "UNKNOWN") or a falling volume label.
         state = "EXIT"
-        reasons.append("trailing stop: price pulled back from a considerable peak")
+        reasons.append("trailing stop: price pulled back from a considerable peak, confirmed by selling pressure")
     elif stagnant:
         state = "EXIT"
         reasons.append(
             f"no sign of a rise {age_seconds / 60:.0f} min after entry "
             f"(gain {gain:+.2f}%, momentum {momentum:+.2f}%, volume {volume_label})"
         )
-    elif trend_break:
-        # trailing_break alone always exits above, so only a trend break
-        # without a qualifying trailing pullback can still reach here.
+    elif trend_break or trailing_break:
+        # One reversal condition without corroboration from the other -
+        # await confirmation rather than exit on a single noisy signal.
         state = "REVERSAL_WARNING"
         reasons.append("one reversal condition; awaiting corroboration")
     elif gain > 0:

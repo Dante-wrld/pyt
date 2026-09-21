@@ -62,28 +62,33 @@ def _fresh_candidates(snapshot: dict, *, now: float) -> list[dict]:
     return result
 
 
-def _live_arbiter() -> RiskArbiter:
+def _live_arbiter(max_quote_age_seconds: int = 15) -> RiskArbiter:
     # Live is enabled only for this explicitly constructed trial arbiter; the
     # ordinary shadow arbiter remains paper/shadow-only.
     #
-    # max_quote_age_seconds is checked after cycle() has already awaited a
-    # full model.propose() round trip to get an exit/entry proposal, so the
-    # elapsed time it measures always includes that call's latency, not just
-    # market-data staleness. 15s left too little headroom for a normal LLM
-    # response and caused a live exit to fail this check - and, unlike the
-    # softer freshness gate checked just before it, that halts the whole
-    # trial rather than just skipping the one exit. 30s keeps this a real,
-    # tight bound while giving the round trip room to complete.
+    # The 15s default is genuine market-data staleness: decide_hunter_entry
+    # builds its RiskSnapshot before calling model.propose(), so this bound
+    # never has to absorb that call's latency. The exit path is different -
+    # execute_live_exit's callers compute quote_age_seconds AFTER a
+    # model.propose() round trip, so that elapsed time always includes the
+    # call's latency, not just market-data staleness; 15s there left too
+    # little headroom for a normal LLM response and caused a live exit to
+    # fail this check, which (unlike the softer freshness gate checked just
+    # before it) halts the whole trial rather than just skipping the one
+    # exit. Callers on the exit path pass max_quote_age_seconds=30 to give
+    # the round trip room to complete without loosening the entry path's
+    # genuine staleness bound.
     return RiskArbiter(RiskPolicy(
         allowed_modes=("live",), max_order_usd=5, max_position_pct=100,
         max_open_positions=2, min_liquidity_usd=50_000,
-        max_price_impact_pct=3, max_quote_age_seconds=30,
+        max_price_impact_pct=3, max_quote_age_seconds=max_quote_age_seconds,
     ))
 
 
 def decide_hunter_entry(
     snapshot: dict, *, model, ledger: LiveTrialLedger,
     now: float | None = None,
+    buy_zone_skip_reasons: dict[str, str] | None = None,
 ) -> LiveEntryDecision | None:
     """Require a BUY_READY recovery, model proposal, then live arbitration."""
     at = time.time() if now is None else now
@@ -100,10 +105,23 @@ def decide_hunter_entry(
         # gap is invisible - it silently returns None with no ledger entry
         # at all, leaving "why didn't the trial buy that?" unanswerable from
         # --live-trial-status alone.
+        #
+        # But logging this on every cycle a candidate stays stuck (routine -
+        # e.g. waiting on liquidity/volume for several cycles) would grow the
+        # ledger unbounded and crowd PROPOSAL/CONFIRMED-BUY rows out of the
+        # last-10 recent_decisions view. Only log when the reason actually
+        # changes for that mint, mirroring _track_exit_block_streak's
+        # "don't repeat, but don't go silent either" approach.
+        skip_reasons = buy_zone_skip_reasons if buy_zone_skip_reasons is not None else {}
         for candidate, review in assessed:
             if candidate.get("decision") in {"BUY ZONE", "BUY NOW"} and review["state"] != "BUY_READY":
-                ledger.log(agent="hunter-v1", mint=str(candidate.get("mint") or ""),
-                           state="BUY_ZONE_SKIPPED", reason="; ".join(review["reasons"]))
+                mint = str(candidate.get("mint") or "")
+                reason = "; ".join(review["reasons"])
+                if skip_reasons.get(mint) == reason:
+                    continue
+                skip_reasons[mint] = reason
+                ledger.log(agent="hunter-v1", mint=mint,
+                           state="BUY_ZONE_SKIPPED", reason=reason)
         return None
     status = ledger.status(now=at)["agents"]["hunter-v1"]
     if status["remaining_buy_cap_cents"] <= 0 or status["open_positions"] >= 2:
@@ -235,7 +253,17 @@ async def execute_hunter_entry(
     ledger.log(agent="hunter-v1", mint=decision.mint, state="RESERVED",
                reason=f"reserved {decision.approved_cents} cents before possible broadcast")
     try:
-        if not store.begin_auto_buy_execution(
+        # A trial session that started before the ledger-scoped key format was
+        # introduced may already hold this mint's claim under the old,
+        # unscoped key. That claim predates this process and is invisible to
+        # the scoped lookup below, so check it explicitly - otherwise a
+        # restart against the same still-open trial could re-buy a mint it
+        # already bought.
+        legacy_intent_key = f"live-trial:hunter:{decision.mint}"
+        legacy_claimed = store.connection.execute(
+            "SELECT 1 FROM auto_buy_executions WHERE event_key = ?", (legacy_intent_key,),
+        ).fetchone()
+        if legacy_claimed or not store.begin_auto_buy_execution(
             event_key=intent_key, token_address=decision.mint, symbol=intent.symbol,
             funding_source=intent.funding_source, input_usdc_raw=amount_raw,
             expected_output_raw=preflight.prepared.expected_output_raw,
@@ -296,6 +324,7 @@ async def execute_live_exit(
     decision: str, position_value_usd: float, quote_age_seconds: float,
     liquidity_usd: float, fraction: float, rpc, seller, store, wallet: str,
     current_exit_allowed: Callable[[], bool],
+    current_decision: Callable[[], str | None] | None = None,
     minimum_sell_usd: float = 2.0,
     max_price_impact_pct: float = 5.0,
     max_slippage_bps: int = 500,
@@ -310,13 +339,26 @@ async def execute_live_exit(
         raise ValueError("invalid partial profit stage")
     if not math.isfinite(fraction) or not 0 < fraction <= 1:
         raise ValueError("invalid owned position exit fraction")
-    if not current_exit_allowed():
+
+    def _exit_signal_stale() -> bool:
+        # The eligibility gate alone tolerates a relabel between any
+        # sell-worthy decision (a routine relabel, not a change of mind) but
+        # `fraction` was sized for the ORIGINAL decision, computed once
+        # before this reservation began. If the signal has since escalated
+        # from a partial (TAKE_PARTIAL) to a full exit (EXIT WARNING), that
+        # stale, too-small fraction must not be allowed to execute - block
+        # so the next cycle proposes a fresh, correctly-sized full exit.
+        if current_decision is None or decision != "TAKE_PARTIAL":
+            return False
+        return current_decision() == "EXIT WARNING"
+
+    if not current_exit_allowed() or _exit_signal_stale():
         raise TrialHalted("EXIT BLOCKED: exit signal expired or changed before reservation")
     ledger.assert_active()
     if (seller.max_price_impact_pct > max_price_impact_pct
         or seller.max_slippage_bps > max_slippage_bps):
         raise TrialHalted("live seller exceeds guarded price impact or slippage limits")
-    approval = _live_arbiter().evaluate_live_exit(
+    approval = _live_arbiter(max_quote_age_seconds=30).evaluate_live_exit(
         position_value_usd * fraction,
         RiskSnapshot(mode="live", current_position_usd=position_value_usd,
                      quote_age_seconds=quote_age_seconds,
@@ -379,13 +421,23 @@ async def execute_live_exit(
         or prepared.quoted_slippage_bps is None
         or prepared.quoted_slippage_bps > max_slippage_bps):
         raise TrialHalted("EXIT BLOCKED: exact quote impact or slippage exceeds live limits")
-    if not current_exit_allowed():
+    if not current_exit_allowed() or _exit_signal_stale():
         raise TrialHalted("EXIT BLOCKED: exit signal changed during sell simulation")
     ledger.reserve_sell(intent=key, agent=agent, mint=mint)
     ledger.log(agent=agent, mint=mint, state="RESERVED",
                reason=f"exit {decision}; token amount {prepared.input_amount_raw}")
     try:
-        if not store.begin_auto_sell_execution(
+        # Same migration hazard as the buy path: a claim recorded before the
+        # ledger-scoped key format was introduced is invisible to the scoped
+        # lookup below, so check the legacy key explicitly before claiming -
+        # otherwise a restart against the same still-open trial could re-sell
+        # a stage that was already sold.
+        legacy_key = (f"live-trial:{agent}:sell:{mint}:{decision}"
+                     + (f":{stage_key}" if stage_key else ""))
+        legacy_claimed = store.connection.execute(
+            "SELECT 1 FROM auto_sell_executions WHERE event_key = ?", (legacy_key,),
+        ).fetchone()
+        if legacy_claimed or not store.begin_auto_sell_execution(
             event_key=key, chain="solana", token_address=mint,
             symbol=plan.symbol, stage=plan.stage, requested_raw=prepared.input_amount_raw,
             expected_output_raw=prepared.expected_output_raw,
@@ -393,7 +445,8 @@ async def execute_live_exit(
         ):
             raise TrialHalted("sell intent was already claimed in main execution database")
         updated = await rpc.token_balance(wallet, mint)
-        if updated.raw_amount != balance.raw_amount or not current_exit_allowed():
+        if (updated.raw_amount != balance.raw_amount or not current_exit_allowed()
+            or _exit_signal_stale()):
             raise TrialHalted("wallet balance or exit signal changed before broadcast")
         ledger.assert_active()
         sale = await seller.execute(prepared)
