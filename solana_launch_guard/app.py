@@ -287,7 +287,36 @@ class LaunchGuard(
             )
         self._restore_auto_buy_discovery_candidates()
 
+    async def _purge_restored_stock_token_candidates(self) -> None:
+        """Drop pullback-restored candidates that are tokenized stocks.
+
+        PullbackTracker.restore() runs synchronously in __init__, before
+        the Robinhood stock-symbol registry can be fetched, so a candidate
+        persisted to disk before that registry (or this exclusion) existed
+        can still be sitting in self.recommendations.candidates here - the
+        same exclusion the fresh-quote paths apply, applied once at
+        startup to whatever restore() already loaded.
+        """
+        if not self.recommendations.candidates:
+            return
+        stock_symbols = await self.oracle.robinhood_stock_token_symbols()
+        if stock_symbols is None:
+            return
+        stale = [
+            key
+            for key, candidate in self.recommendations.candidates.items()
+            if _is_stock_token_symbol(candidate.symbol, stock_symbols)
+        ]
+        for key in stale:
+            LOGGER.info(
+                "PURGE %-10s key=%s reason=tokenized stock symbol (restored)",
+                self.recommendations.candidates[key].symbol,
+                key,
+            )
+            del self.recommendations.candidates[key]
+
     async def run(self, mode: str) -> None:
+        await self._purge_restored_stock_token_candidates()
         tasks: list[asyncio.Task[Any]] = []
         if mode != "portfolio":
             tasks.append(asyncio.create_task(self.run_price_monitor()))

@@ -65,8 +65,10 @@ from solana_launch_guard.portfolio import (
     build_portfolio_snapshot,
     format_portfolio_dashboard,
 )
+from solana_launch_guard.pullback_tracking import PullbackTracker
 from solana_launch_guard.recommendations import (
     RecommendationBook,
+    RecommendationCandidate,
     build_snapshot,
     format_dashboard,
     format_recommendations,
@@ -4040,6 +4042,52 @@ def test_xstocks_suffix_symbols_are_excluded() -> None:
     assert _is_stock_token_symbol("NVDAx", symbols) is True
     assert _is_stock_token_symbol("nvdax", symbols) is True
     assert _is_stock_token_symbol("SOLx", symbols) is False
+
+
+def test_restored_pullback_candidate_that_is_a_tokenized_stock_is_purged(
+    tmp_path: Path,
+) -> None:
+    """PullbackTracker.restore() runs synchronously in LaunchGuard.__init__,
+    before the Robinhood stock-symbol registry can be fetched, so a
+    candidate persisted to disk before the stock exclusion existed (or
+    before this run) can still be sitting in guard.recommendations after
+    construction. The exclusion must also be applied once the registry is
+    available, at the start of run(), to whatever restore() already
+    loaded.
+    """
+    database = tmp_path / "restored-stock-candidate.db"
+    snapshot_path = tmp_path / "recommendations.json"
+    config = settings(database, recommendation_snapshot_path=str(snapshot_path))
+
+    now = time.time()
+    seed_book = RecommendationBook(ttl_seconds=1800)
+    stock_candidate = RecommendationCandidate(
+        mint="Xsc9qvGR1efVDFGLrVsmkzv3qi45LTBjeUKSPmx9qEh", symbol="NVDAx",
+        chain="solana", tier="CORE", intelligence_score=90,
+        initial_price=224.85, current_price=224.85, price_currency="USD",
+        liquidity_usd=60_000, initial_liquidity_usd=60_000,
+        volume_m5_usd=100, initial_volume_m5_usd=100, buys_m5=10, sells_m5=2,
+        price_change_m5_pct=-1, buy_sell_ratio=5, observed_at=now, updated_at=now,
+        peak_price=224.85, entry_zone_low=200, entry_zone_high=230,
+        decision="WATCH", decision_reason="waiting for price and buyer confirmation",
+        entry_confirmation_required=3,
+    )
+    seed_book.candidates[stock_candidate.key] = stock_candidate
+    PullbackTracker(snapshot_path).record(seed_book, now=now)
+
+    store = SQLiteStore(str(database))
+    guard = LaunchGuard(config, store)
+    assert stock_candidate.key in guard.recommendations.candidates
+
+    class FakeOracle:
+        async def robinhood_stock_token_symbols(self) -> frozenset[str]:
+            return frozenset({"nvda"})
+
+    guard.oracle = FakeOracle()  # type: ignore[assignment]
+    asyncio.run(guard._purge_restored_stock_token_candidates())
+
+    assert stock_candidate.key not in guard.recommendations.candidates
+    store.close()
 
 
 def test_evm_transfer_of_a_tokenized_stock_is_not_added_as_a_candidate(
