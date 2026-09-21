@@ -51,7 +51,7 @@ from solana_launch_guard.execution import (
 )
 from solana_launch_guard.intelligence import CoinIntelligence
 from solana_launch_guard.market import DexScreenerOracle, MarketQuote
-from solana_launch_guard.multichain import EvmRpc, HyperCoreWatcher
+from solana_launch_guard.multichain import EvmRpc, EvmTransfer, HyperCoreWatcher
 from solana_launch_guard.notifications import (
     DecisionNotifier,
     PortfolioNotifier,
@@ -4028,6 +4028,58 @@ def test_stock_symbols_and_wrapped_stock_symbols_are_excluded() -> None:
     assert _is_stock_token_symbol("NVDA", symbols) is True
     assert _is_stock_token_symbol("wNVDAx", symbols) is True
     assert _is_stock_token_symbol("MEME", symbols) is False
+
+
+def test_evm_transfer_of_a_tokenized_stock_is_not_added_as_a_candidate(
+    tmp_path: Path,
+) -> None:
+    """run_multichain_feed already excludes tokenized stocks from becoming
+    trading candidates - pullback/momentum sniping logic doesn't fit a real
+    stock's price action. A wallet transfer of one (ordinary Robinhood
+    brokerage activity reflected on-chain, not a launch to snipe) must not
+    bypass that same exclusion.
+    """
+    database = tmp_path / "evm-transfer-stock.db"
+    config = settings(database)
+    store = SQLiteStore(str(database))
+    guard = LaunchGuard(config, store)
+
+    stock_quote = MarketQuote(
+        mint="0xStockContract",
+        symbol="NVDA",
+        price_sol=0,
+        price_usd=0.25,
+        chain="robinhood",
+        liquidity_usd=50_000,
+        market_cap_usd=100_000,
+        pair_address="0xPair",
+        pair_created_at_ms=1,
+        buys_m5=60,
+        sells_m5=20,
+        volume_m5_usd=15_000,
+        price_change_m5_pct=15,
+    )
+
+    class FakeOracle:
+        async def quote(
+            self, mint: str, *, chain: str = "solana"
+        ) -> MarketQuote | None:
+            return stock_quote
+
+        async def robinhood_stock_token_symbols(self) -> frozenset[str]:
+            return frozenset({"nvda"})
+
+    guard.oracle = FakeOracle()  # type: ignore[assignment]
+    transfer = EvmTransfer(
+        chain="robinhood", wallet="0xWallet", transaction_hash="0xTx",
+        block_number=1, log_index=0, contract="0xStockContract",
+        symbol="NVDA", direction="BUY", token_amount=1,
+    )
+
+    asyncio.run(guard.handle_evm_transfer(transfer))
+
+    assert stock_quote.recommendation_key not in guard.recommendations.candidates
+    store.close()
 
 
 def test_robinhood_recommendation_shows_contract_and_fomo_link() -> None:

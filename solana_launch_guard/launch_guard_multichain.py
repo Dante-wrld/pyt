@@ -153,9 +153,28 @@ class MultichainMixin(LaunchGuardState):
             transfer.transaction_hash,
         )
         if quote is not None:
-            result = self.intelligence.score(quote)
-            if result.accepted:
-                self.recommendations.add(quote, result)
+            # run_multichain_feed excludes tokenized stocks from becoming
+            # trading candidates (pullback/momentum sniping logic doesn't
+            # fit a real stock's price action); a wallet transfer of one -
+            # ordinary Robinhood brokerage activity reflected on-chain, not
+            # a launch to snipe - must not bypass that exclusion.
+            stock_symbols = (
+                await self.oracle.robinhood_stock_token_symbols()
+                if transfer.chain == "robinhood" else None
+            )
+            if stock_symbols is not None and _is_stock_token_symbol(
+                quote.symbol, stock_symbols
+            ):
+                LOGGER.info(
+                    "%s REJECT %-10s contract=%s reason=tokenized stock symbol",
+                    transfer.chain.upper(),
+                    quote.symbol,
+                    transfer.contract,
+                )
+            else:
+                result = self.intelligence.score(quote)
+                if result.accepted:
+                    self.recommendations.add(quote, result)
 
     async def handle_hypercore_fill(self, fill: HyperCoreFill) -> None:
         direction = "BUY" if fill.side.upper() == "B" else "SELL"
