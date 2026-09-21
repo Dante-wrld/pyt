@@ -120,8 +120,15 @@ class ReadOnlyRpc:
         if method not in self.METHODS:
             raise ValueError("Only read-only RPC methods are permitted")
         data = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).encode()
+        # Cloudflare (fronting the Robinhood Chain RPC) returns HTTP 403 for
+        # urllib's default "Python-urllib/x.y" User-Agent while identical
+        # requests with a curl-style one pass - confirmed against the live
+        # endpoint, and the same fix already exists for market discovery in
+        # robinhood_swap.py's MARKET_HEADERS. Without this every call is
+        # blocked before it reaches the provider at all.
+        headers = {"Content-Type": "application/json", "User-Agent": "curl/8.0"}
         try:
-            with urlopen(Request(self.url, data=data, headers={"Content-Type": "application/json"}), timeout=15, context=ssl.create_default_context(cafile=certifi.where())) as response:
+            with urlopen(Request(self.url, data=data, headers=headers), timeout=15, context=ssl.create_default_context(cafile=certifi.where())) as response:
                 result = json.load(response)
         except HTTPError as exc:
             raise ValueError(f"Robinhood RPC {method}: HTTP {exc.code}; check provider access or rate limits") from None

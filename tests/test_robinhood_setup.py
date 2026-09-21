@@ -38,6 +38,34 @@ def test_rpc_cannot_broadcast():
         ReadOnlyRpc("https://example.com")("eth_sendRawTransaction", [])
 
 
+def test_rpc_sets_a_curl_style_user_agent_to_pass_cloudflare(monkeypatch):
+    """Cloudflare in front of the Robinhood Chain RPC returns HTTP 403 for
+    urllib's default "Python-urllib/x.y" User-Agent (confirmed against the
+    live endpoint: an identical request with curl's UA succeeds). Every
+    call must send a curl-style UA instead, or it never reaches the
+    provider at all.
+    """
+    captured = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return b'{"jsonrpc":"2.0","id":1,"result":"0x1237"}'
+
+    def fake_urlopen(request, timeout, context):
+        captured["user_agent"] = request.get_header("User-agent")
+        return FakeResponse()
+
+    monkeypatch.setattr("solana_launch_guard.robinhood_setup.urlopen", fake_urlopen)
+    assert ReadOnlyRpc("https://example.com")("eth_chainId", []) == "0x1237"
+    assert captured["user_agent"] == "curl/8.0"
+
+
 def test_noninteractive_import_rejected(monkeypatch):
     monkeypatch.setattr("sys.stdin.isatty", lambda: False)
     with pytest.raises(ValueError, match="interactive"):
