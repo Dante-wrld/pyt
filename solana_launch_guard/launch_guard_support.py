@@ -41,9 +41,19 @@ def auto_buy_discovery_rejection(
 def _is_stock_token_symbol(
     symbol: str, stock_symbols: frozenset[str]
 ) -> bool:
-    """Conservatively recognize direct and wrapped Robinhood stock symbols."""
+    """Conservatively recognize direct, xStocks-suffixed, and wrapped
+    Robinhood stock symbols."""
     normalized = symbol.strip().casefold()
     if normalized in stock_symbols:
+        return True
+    if (
+        len(normalized) > 1
+        and normalized.endswith("x")
+        and normalized[:-1] in stock_symbols
+    ):
+        # Backed Finance's xStocks convention on Solana: a bare "x" suffix,
+        # no "w" prefix (e.g. NVDAx for NVIDIA) - confirmed against the
+        # actual on-chain token, distinct from the wrapped pattern below.
         return True
     return (
         len(normalized) > 2

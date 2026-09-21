@@ -4030,6 +4030,18 @@ def test_stock_symbols_and_wrapped_stock_symbols_are_excluded() -> None:
     assert _is_stock_token_symbol("MEME", symbols) is False
 
 
+def test_xstocks_suffix_symbols_are_excluded() -> None:
+    """Backed Finance's xStocks convention on Solana is a bare "x" suffix
+    with no "w" prefix (e.g. NVDAx for NVIDIA) - confirmed against the
+    actual on-chain token, distinct from the wrapped w...x pattern.
+    """
+    symbols = frozenset({"nvda", "spy"})
+
+    assert _is_stock_token_symbol("NVDAx", symbols) is True
+    assert _is_stock_token_symbol("nvdax", symbols) is True
+    assert _is_stock_token_symbol("SOLx", symbols) is False
+
+
 def test_evm_transfer_of_a_tokenized_stock_is_not_added_as_a_candidate(
     tmp_path: Path,
 ) -> None:
