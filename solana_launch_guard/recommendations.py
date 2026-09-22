@@ -10,6 +10,8 @@ from typing import Any
 from .intelligence import IntelligenceResult
 from .market import MarketQuote
 
+ACTIONABLE_BUY_DECISIONS = frozenset({"MOMENTUM BUY", "BUY ZONE", "BUY NOW", "EARLY BUY"})
+
 CHAIN_LABELS = {
     "solana": "SOL",
     "ethereum": "ETH",
@@ -444,6 +446,25 @@ class RecommendationBook:
             if len(unique) >= limit:
                 break
         return unique
+
+    def ranked_for_execution(self, limit: int = 10) -> list[RecommendationCandidate]:
+        """Like ranked(), but for the snapshot a live trial reads for buy
+        decisions rather than for display. recommendation_limit exists to
+        keep a human-facing dashboard readable, not to gate what a trial
+        is allowed to act on - a genuinely buy-worthy candidate (MOMENTUM
+        BUY, BUY ZONE, BUY NOW, EARLY BUY) can be pushed out of the top N
+        by unrelated higher-scoring candidates and, for EARLY BUY
+        specifically, its low rise_pct is *the point* of the signal, not a
+        reason to rank it last. Union in any actionable candidate the
+        ranked cut dropped so it's never silently invisible to the trial.
+        """
+        top = self.ranked(limit)
+        seen = {c.key for c in top}
+        overflow = [
+            c for c in self.candidates.values()
+            if c.decision in ACTIONABLE_BUY_DECISIONS and c.key not in seen
+        ]
+        return top + overflow
 
     def _trim(self) -> None:
         if len(self.candidates) <= self.pool_size:

@@ -2771,6 +2771,52 @@ def test_early_buy_requires_its_own_higher_liquidity_floor() -> None:
     assert candidate.decision != "EARLY BUY"
 
 
+def test_ranked_for_execution_does_not_drop_an_actionable_candidate() -> None:
+    """recommendation_limit caps the display dashboard at a small number,
+    but hunter-v1's live-trial buy decision reads this same exported list -
+    a genuinely buy-worthy candidate (here, EARLY BUY) must never be
+    silently pushed out of it by higher-scoring, higher-rise_pct
+    candidates crowding the top of the ranking, or the live trial can
+    never even see it to act on."""
+    book = RecommendationBook(pool_size=10, ttl_seconds=60, entry_confirmation_polls=1)
+
+    def quote_for(mint: str, symbol: str, *, change: float) -> MarketQuote:
+        return MarketQuote(
+            mint=mint, symbol=symbol, price_sol=0.000001, price_usd=0.000001,
+            liquidity_usd=50_000, market_cap_usd=100_000, chain="solana",
+            pair_address=f"Pair{mint}", pair_created_at_ms=1,
+            buys_m5=60, sells_m5=20, volume_m5_usd=15_000, price_change_m5_pct=change,
+        )
+
+    # Three strong MOMENTUM BUY candidates that will crowd the top of the
+    # ranking (decision_priority 4, high rise_pct).
+    for i in range(3):
+        mint, symbol = f"Mint{i}", f"SYM{i}"
+        initial = quote_for(mint, symbol, change=1)
+        book.add(initial, CoinIntelligence().score(initial), now=0)
+        strong_move = MarketQuote(
+            mint=mint, symbol=symbol, price_sol=0.0000011, price_usd=0.0000011,
+            liquidity_usd=50_000, market_cap_usd=100_000, chain="solana",
+            pair_address=f"Pair{mint}", pair_created_at_ms=1,
+            buys_m5=45, sells_m5=15, volume_m5_usd=20_000, price_change_m5_pct=6,
+        )
+        book.update(strong_move, now=3)
+
+    # One EARLY BUY candidate - low rise_pct by design, so it loses the
+    # ranking tiebreak within its own priority tier every time.
+    early = quote_for("MintEarly", "EARLYSYM", change=0)
+    candidate = book.add(early, CoinIntelligence().score(early), now=0)
+    assert candidate is not None
+    assert candidate.decision == "EARLY BUY"
+
+    top_two = book.ranked(2)
+    assert all(c.decision == "MOMENTUM BUY" for c in top_two)
+    assert not any(c.mint == "MintEarly" for c in top_two)
+
+    executable = book.ranked_for_execution(2)
+    assert any(c.mint == "MintEarly" for c in executable)
+
+
 def test_early_buy_does_not_fire_on_a_token_actively_falling() -> None:
     """Still being within the starting-price window is not itself a reason
     to buy - a token actively declining in the last five minutes (here,

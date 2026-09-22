@@ -130,11 +130,10 @@ class RecommendationMonitorMixin(LaunchGuardState):
                     price_prefix,
                     candidate.entry_zone_high or 0,
                 )
-            ranked = self.recommendations.ranked(
-                self.settings.recommendation_limit
-            )
             snapshot = build_snapshot(
-                ranked,
+                self.recommendations.ranked_for_execution(
+                    self.settings.recommendation_limit
+                ),
                 tracked_candidates=list(self.recommendations.candidates.values()),
                 pending_count=(
                     len(self.candidate_tasks) + self.multichain_pending_count
