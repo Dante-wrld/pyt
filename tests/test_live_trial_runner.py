@@ -580,6 +580,123 @@ def test_portfolio_owned_exit_can_exceed_five_dollars_without_bypassing_guards(t
     book.close()
 
 
+def _sell_seller():
+    return SimpleNamespace(
+        max_price_impact_pct=3, max_slippage_bps=300,
+        preflight=lambda plan, rpc: _sell_preflight(plan),
+        execute=lambda prepared: _sell_execute(),
+    )
+
+
+async def _sell_preflight(plan):
+    return SimpleNamespace(prepared=SimpleNamespace(
+        input_amount_raw=plan.amount_raw, minimum_output_raw=9_000_000,
+        expected_output_raw=10_000_000, quoted_price_impact_pct=-1.0, quoted_slippage_bps=100,
+    ))
+
+
+async def _sell_execute():
+    return SimpleNamespace(signature="sell-signature", input_amount_raw=100_000_000,
+                           output_amount_raw=10_000_000)
+
+
+def _sell_store_stub():
+    return SimpleNamespace(
+        connection=_no_legacy_claim(),
+        begin_auto_sell_execution=lambda **kwargs: True,
+        complete_auto_sell_execution=lambda **kwargs: None,
+    )
+
+
+def test_sell_balance_drop_after_reservation_reconciles_instead_of_halting(tmp_path, monkeypatch):
+    """The operator selling manually in the gap between reservation and
+    broadcast - exactly what happened live with BlueRio - must not halt
+    the whole trial; the ledger should recognize less is left to sell and
+    move on, mirroring the buy-side fix for the same failure shape."""
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    book = LiveTrialLedger(tmp_path / "trial.sqlite")
+    book.start()
+    _confirmed_position(book, quantity_raw=100_000_000)
+    wallet = "synthetic-owner"
+
+    class Rpc:
+        calls = 0
+        async def token_balance(self, owner, mint):
+            Rpc.calls += 1
+            return SimpleNamespace(raw_amount=100_000_000 if Rpc.calls <= 1 else 40_000_000, decimals=6)
+
+    with pytest.raises(ValueError, match="likely sold outside the trial"):
+        asyncio.run(execute_live_exit(
+            ledger=book, agent="hunter-v1", mint=MINT, symbol="TEST", decision="SELL",
+            position_value_usd=12, quote_age_seconds=2, liquidity_usd=60_000, fraction=1,
+            rpc=Rpc(), seller=_sell_seller(), store=_sell_store_stub(), wallet=wallet,
+            current_exit_allowed=lambda: True,
+        ))
+    assert not book.unresolved()
+    remaining = next(p for p in book.positions("hunter-v1") if p["mint"] == MINT)
+    assert remaining["quantity_raw"] == 40_000_000
+    book.close()
+
+
+def test_sell_balance_increase_after_reservation_still_halts(tmp_path, monkeypatch):
+    """An *increase* over the pre-reservation balance has no manual-sell
+    explanation and stays a genuine halt for manual reconciliation."""
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    book = LiveTrialLedger(tmp_path / "trial.sqlite")
+    book.start()
+    _confirmed_position(book, quantity_raw=100_000_000)
+    wallet = "synthetic-owner"
+
+    class Rpc:
+        calls = 0
+        async def token_balance(self, owner, mint):
+            Rpc.calls += 1
+            return SimpleNamespace(raw_amount=100_000_000 if Rpc.calls <= 1 else 150_000_000, decimals=6)
+
+    with pytest.raises(TrialHalted, match="balance increased"):
+        asyncio.run(execute_live_exit(
+            ledger=book, agent="hunter-v1", mint=MINT, symbol="TEST", decision="SELL",
+            position_value_usd=12, quote_age_seconds=2, liquidity_usd=60_000, fraction=1,
+            rpc=Rpc(), seller=_sell_seller(), store=_sell_store_stub(), wallet=wallet,
+            current_exit_allowed=lambda: True,
+        ))
+    assert book.unresolved()
+    assert book.unresolved()[0]["state"] == "RESERVED"
+    book.close()
+
+
+def test_sell_signal_expiring_after_reservation_releases_instead_of_halting(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    book = LiveTrialLedger(tmp_path / "trial.sqlite")
+    book.start()
+    _confirmed_position(book, quantity_raw=100_000_000)
+    wallet = "synthetic-owner"
+
+    class Rpc:
+        async def token_balance(self, owner, mint):
+            return SimpleNamespace(raw_amount=100_000_000, decimals=6)
+
+    allow_calls = []
+    def flaky_exit_allowed():
+        allow_calls.append(1)
+        # Allowed for the two pre-broadcast checks (before and right after
+        # reservation); revoked only for the final post-reservation recheck
+        # this test targets.
+        return len(allow_calls) <= 2
+
+    with pytest.raises(ValueError, match="exit signal expired or changed"):
+        asyncio.run(execute_live_exit(
+            ledger=book, agent="hunter-v1", mint=MINT, symbol="TEST", decision="SELL",
+            position_value_usd=12, quote_age_seconds=2, liquidity_usd=60_000, fraction=1,
+            rpc=Rpc(), seller=_sell_seller(), store=_sell_store_stub(), wallet=wallet,
+            current_exit_allowed=flaky_exit_allowed,
+        ))
+    assert not book.unresolved()
+    remaining = next(p for p in book.positions("hunter-v1") if p["mint"] == MINT)
+    assert remaining["quantity_raw"] == 100_000_000
+    book.close()
+
+
 def test_a_different_trial_session_can_still_sell_a_mint_the_last_session_claimed(tmp_path, monkeypatch):
     """A stopped-and-restarted trial (a fresh ledger file) must not inherit
     a stale claim on the shared main execution database from a different

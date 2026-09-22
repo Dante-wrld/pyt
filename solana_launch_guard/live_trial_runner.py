@@ -505,9 +505,29 @@ async def execute_live_exit(
         ):
             raise TrialHalted("sell intent was already claimed in main execution database")
         updated = await rpc.token_balance(wallet, mint)
-        if (updated.raw_amount != balance.raw_amount or not current_exit_allowed()
-            or _exit_signal_stale()):
-            raise TrialHalted("wallet balance or exit signal changed before broadcast")
+        if updated.raw_amount < balance.raw_amount:
+            # Same reasoning as the pre-reservation check above: a wallet
+            # balance drop here is what an operator selling manually outside
+            # the trial looks like (this reservation's own sell never
+            # broadcast, so nothing this trial did caused the discrepancy).
+            # Routine, not an emergency - reconcile and release instead of
+            # halting the whole trial. An *increase* has no such explanation
+            # and still halts below.
+            if tracked:
+                ledger.reconcile_external_reduction(
+                    agent=agent, mint=mint, wallet_quantity_raw=updated.raw_amount,
+                    wallet_decimals=updated.decimals,
+                )
+            ledger.log(agent=agent, mint=mint, state="POSITION_RECONCILED",
+                       reason=f"wallet balance dropped from {balance.raw_amount} to "
+                              f"{updated.raw_amount} before broadcast; treating as a sell outside the trial")
+            ledger.transition(key, "FAILED")
+            raise ValueError("wallet balance dropped before broadcast; likely sold outside the trial")
+        if updated.raw_amount > balance.raw_amount:
+            raise TrialHalted("wallet balance increased before broadcast; manual reconciliation required")
+        if not current_exit_allowed() or _exit_signal_stale():
+            ledger.transition(key, "FAILED")
+            raise ValueError("exit signal expired or changed before broadcast; reservation released")
         ledger.assert_active()
         sale = await seller.execute(prepared)
         ledger.transition(key, "SUBMITTED", signature=sale.signature)
