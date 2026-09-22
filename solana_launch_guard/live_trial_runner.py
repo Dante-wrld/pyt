@@ -83,7 +83,7 @@ def _live_arbiter(max_quote_age_seconds: int = 15, min_liquidity_usd: float = 50
     return RiskArbiter(RiskPolicy(
         allowed_modes=("live",), max_order_usd=5, max_position_pct=100,
         max_open_positions=2, min_liquidity_usd=min_liquidity_usd,
-        max_price_impact_pct=3, max_quote_age_seconds=max_quote_age_seconds,
+        max_price_impact_pct=9, max_quote_age_seconds=max_quote_age_seconds,
     ))
 
 
@@ -234,7 +234,7 @@ async def execute_hunter_entry(
     if decision.agent != "hunter-v1" or not SOLANA_ADDRESS.fullmatch(decision.mint):
         raise ValueError("only a validated hunter Solana mint is eligible")
     ledger.assert_active()
-    if buyer.max_price_impact_pct > 3 or buyer.max_slippage_bps > 300:
+    if buyer.max_price_impact_pct > 9 or buyer.max_slippage_bps > 1700:
         raise TrialHalted("live buyer exceeds guarded price impact or slippage limits")
     amount_raw = decision.approved_cents * 10_000  # 1 cent = 10,000 USDC raw units
     usdc = await rpc.token_balance(wallet, USDC_MINT)

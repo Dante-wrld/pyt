@@ -262,8 +262,8 @@ async def cycle(*, ledger: LiveTrialLedger, settings: Settings, rpc: SolanaRpc,
         raise TrialHalted("wallet signer unavailable; stop new buys") from exc
     client = JupiterSwapClient(api_key=settings.jupiter_api_key)
     buyer = SolanaAutoBuyer(client=client, signer=signer,
-                            max_price_impact_pct=min(3, settings.auto_buy_max_price_impact_pct),
-                            max_slippage_bps=min(300, settings.auto_buy_max_slippage_bps))
+                            max_price_impact_pct=min(9, settings.auto_buy_max_price_impact_pct),
+                            max_slippage_bps=min(1700, settings.auto_buy_max_slippage_bps))
     seller = SolanaAutoSeller(client=client, signer=signer,
                               max_price_impact_pct=min(5, settings.auto_sell_max_price_impact_pct),
                               max_slippage_bps=min(500, settings.auto_sell_max_slippage_bps))
@@ -510,8 +510,8 @@ async def preflight(*, sell_mint: str, sell_decision: str = "SELL") -> dict:
         raise TrialHalted("wallet has less than $5 USDC for the trial buy simulation")
     buyer = SolanaAutoBuyer(
         client=JupiterSwapClient(api_key=settings.jupiter_api_key), signer=signer,
-        max_price_impact_pct=min(3, settings.auto_buy_max_price_impact_pct),
-        max_slippage_bps=min(300, settings.auto_buy_max_slippage_bps),
+        max_price_impact_pct=min(9, settings.auto_buy_max_price_impact_pct),
+        max_slippage_bps=min(1700, settings.auto_buy_max_slippage_bps),
     )
     buy = await buyer.preflight(BuyIntent(
         mint=WRAPPED_SOL_MINT, symbol="WSOL", event_key="live-trial:preflight-only",
