@@ -876,6 +876,7 @@ class Settings:
         allowed_alerts = {
             "BUY NOW",
             "BUY ZONE",
+            "MOMENTUM BUY",
             "ENTRY PENDING",
             "PULLBACK STARTED",
             "WAIT FOR PULLBACK",
