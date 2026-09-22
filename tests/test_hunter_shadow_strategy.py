@@ -73,6 +73,45 @@ def test_momentum_buy_still_rejects_falling_volume():
     assert "volume" in result["failure_codes"]
 
 
+def test_early_buy_does_not_require_momentum_or_pullback():
+    """The whole point of an early-buy candidate is that it hasn't proven a
+    move yet - neither a pullback nor upward momentum can be required of it,
+    unlike every other buy path."""
+    result = assess_entry(
+        candidate(decision="EARLY BUY", price=1.0, peak_price=1.0,
+                  pullback_from_peak_pct=0, momentum_label="STABLE",
+                  price_change_m5_pct=0, buys_m5=10, sells_m5=8, buy_sell_ratio=1.25),
+        ShadowRecoveryPolicy(),
+    )
+    assert result["state"] == "BUY_READY"
+    assert "pullback" not in result["failure_codes"]
+    assert "momentum" not in result["failure_codes"]
+
+
+def test_early_buy_requires_a_minimum_trade_count():
+    # buys_m5=8, sells_m5=5 -> 13 total, below the 15 minimum, even though
+    # the ratio (1.6) clears its own (deliberately weaker) bar.
+    result = assess_entry(
+        candidate(decision="EARLY BUY", price=1.0, peak_price=1.0,
+                  pullback_from_peak_pct=0, momentum_label="STABLE",
+                  price_change_m5_pct=0, buys_m5=8, sells_m5=5, buy_sell_ratio=1.6),
+        ShadowRecoveryPolicy(),
+    )
+    assert result["state"] != "BUY_READY"
+    assert "trade_count" in result["failure_codes"]
+
+
+def test_early_buy_requires_its_own_weaker_ratio():
+    result = assess_entry(
+        candidate(decision="EARLY BUY", price=1.0, peak_price=1.0,
+                  pullback_from_peak_pct=0, momentum_label="STABLE",
+                  price_change_m5_pct=0, buys_m5=10, sells_m5=10, buy_sell_ratio=1.0),
+        ShadowRecoveryPolicy(),
+    )
+    assert result["state"] != "BUY_READY"
+    assert "buy_sell_ratio" in result["failure_codes"]
+
+
 def test_momentum_buy_fires_via_liquidity_growth_despite_a_low_ratio():
     result = assess_entry(
         candidate(decision="MOMENTUM BUY", price=1.0, peak_price=1.0,

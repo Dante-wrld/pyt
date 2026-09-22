@@ -71,7 +71,8 @@ def _fresh_candidates(
     return result
 
 
-def _live_arbiter(max_quote_age_seconds: int = 15, min_liquidity_usd: float = 50_000.0) -> RiskArbiter:
+def _live_arbiter(max_quote_age_seconds: int = 15, min_liquidity_usd: float = 50_000.0,
+                  max_order_usd: float = 5) -> RiskArbiter:
     # Live is enabled only for this explicitly constructed trial arbiter; the
     # ordinary shadow arbiter remains paper/shadow-only.
     #
@@ -88,7 +89,7 @@ def _live_arbiter(max_quote_age_seconds: int = 15, min_liquidity_usd: float = 50
     # the round trip room to complete without loosening the entry path's
     # genuine staleness bound.
     return RiskArbiter(RiskPolicy(
-        allowed_modes=("live",), max_order_usd=5, max_position_pct=100,
+        allowed_modes=("live",), max_order_usd=max_order_usd, max_position_pct=100,
         max_open_positions=2, min_liquidity_usd=min_liquidity_usd,
         max_price_impact_pct=9, max_quote_age_seconds=max_quote_age_seconds,
         # Default (3% of $30 equity = $0.90) was smaller than a single
@@ -136,7 +137,7 @@ def decide_hunter_entry(
         # "don't repeat, but don't go silent either" approach.
         skip_reasons = buy_zone_skip_reasons if buy_zone_skip_reasons is not None else {}
         for candidate, review in assessed:
-            if candidate.get("decision") in {"BUY ZONE", "BUY NOW", "MOMENTUM BUY"} and review["state"] != "BUY_READY":
+            if candidate.get("decision") in {"BUY ZONE", "BUY NOW", "MOMENTUM BUY", "EARLY BUY"} and review["state"] != "BUY_READY":
                 mint = str(candidate.get("mint") or "")
                 reason = "; ".join(review["reasons"])
                 if skip_reasons.get(mint) == reason:
@@ -171,12 +172,18 @@ def decide_hunter_entry(
         return None
     liquidity = float(candidate["liquidity_usd"])
     review = assess_entry(candidate, policy)
-    coordinator = AgentCoordinator(model, _live_arbiter(min_liquidity_usd=policy.min_liquidity_usd))
+    # An early-buy entry has no proven move behind it yet (that's the whole
+    # trade-off: a better price in exchange for less evidence), so it gets
+    # half the normal order size until it's earned a full-size position the
+    # way a confirmed pullback or momentum entry already has.
+    order_cap_usd = 2.5 if candidate.get("decision") == "EARLY BUY" else 5
+    coordinator = AgentCoordinator(
+        model, _live_arbiter(min_liquidity_usd=policy.min_liquidity_usd, max_order_usd=order_cap_usd))
     proposal, arbitration = coordinator.ask(
         AgentRecord("hunter-v1", AgentRole.OPPORTUNITY_HUNTER),
         {"mode": "live_trial", "candidate": candidate,
          "recovery_review": review,
-         "maximum_order_usd": 5,
+         "maximum_order_usd": order_cap_usd,
          "remaining_gross_budget_usd": status["remaining_buy_cap_cents"] / 100},
         RiskSnapshot(mode="live", equity_usd=30,
                      open_positions=status["open_positions"],
@@ -210,7 +217,7 @@ def decide_hunter_entry(
         return None
     approved_cents = min(round(arbitration.approved_usd * 100),
                          round(proposal.requested_usd * 100),
-                         status["remaining_buy_cap_cents"], 500)
+                         status["remaining_buy_cap_cents"], round(order_cap_usd * 100))
     requested_cents = round(proposal.requested_usd * 100)
     if not 0 < approved_cents <= requested_cents:
         return None

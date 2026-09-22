@@ -47,6 +47,8 @@ class ShadowRecoveryPolicy:
     momentum_buy_min_ratio: float = 1.5
     momentum_buy_min_trades: int = 50
     momentum_buy_min_liquidity_growth_pct: float = 20.0
+    early_buy_min_ratio: float = 1.1
+    early_buy_min_trades: int = 15
     trailing_activation_pct: float = 20.0
     trailing_stop_pct: float = 12.0
     momentum_exit_pct: float = -8.0
@@ -76,6 +78,8 @@ class ShadowRecoveryPolicy:
             momentum_buy_min_liquidity_growth_pct=get(
                 "MOMENTUM_BUY_MIN_LIQUIDITY_GROWTH_PCT", 20.0
             ),
+            early_buy_min_ratio=get("EARLY_BUY_MIN_RATIO", 1.1),
+            early_buy_min_trades=int(get("EARLY_BUY_MIN_TRADES", 15)),
             trailing_activation_pct=get("TRAILING_ACTIVATION_PCT", 20),
             trailing_stop_pct=get("TRAILING_STOP_PCT", 12),
             momentum_exit_pct=get("MOMENTUM_EXIT_PCT", -8),
@@ -118,16 +122,26 @@ def assess_entry(candidate: dict[str, Any], policy: ShadowRecoveryPolicy) -> dic
     # higher buy/sell ratio) since it has no dip-and-reclaim confirmation to
     # lean on. Volume just needs to not be actively falling - same bar the
     # pullback path uses - not necessarily accelerating.
+    #
+    # An early-buy candidate is still close to its starting price by design
+    # - it has neither a pullback to measure nor (usually) any upward
+    # momentum yet, since the whole point is buying before a move has
+    # happened. It carries its own, deliberately weaker buy-pressure and
+    # trade-count bar in exchange for accepting that lack of evidence.
     is_momentum_buy = candidate.get("decision") == "MOMENTUM BUY"
+    is_early_buy = candidate.get("decision") == "EARLY BUY"
     failures = []
     codes = []
     if price <= 0:
         failures.append("no usable price")
         codes.append("pullback")
-    elif not is_momentum_buy and pullback < policy.pullback_pct:
+    elif not is_momentum_buy and not is_early_buy and pullback < policy.pullback_pct:
         failures.append(f"meaningful pullback missing ({pullback:.1f}%/{policy.pullback_pct:.1f}%)")
         codes.append("pullback")
-    if momentum not in {"RISING", "STRONG"} or _number(candidate.get("price_change_m5_pct"), -1) <= 0:
+    if not is_early_buy and (
+        momentum not in {"RISING", "STRONG"}
+        or _number(candidate.get("price_change_m5_pct"), -1) <= 0
+    ):
         failures.append("short-term momentum has not turned upward")
         codes.append("momentum")
     if liquidity < policy.min_liquidity_usd or (baseline > 0 and liquidity / baseline * 100 < policy.min_liquidity_retention_pct):
@@ -136,7 +150,11 @@ def assess_entry(candidate: dict[str, Any], policy: ShadowRecoveryPolicy) -> dic
     if volume not in {"STEADY", "RISING"} or _number(candidate.get("buys_m5")) <= 0:
         failures.append("volume/trading activity does not support recovery")
         codes.append("volume")
-    required_ratio = policy.momentum_buy_min_ratio if is_momentum_buy else policy.buy_sell_ratio
+    required_ratio = (
+        policy.momentum_buy_min_ratio if is_momentum_buy
+        else policy.early_buy_min_ratio if is_early_buy
+        else policy.buy_sell_ratio
+    )
     ratio_confirmed = _number(candidate.get("buy_sell_ratio")) >= required_ratio
     if is_momentum_buy:
         # A near-even transaction count can still mask a genuine pump if
@@ -152,12 +170,18 @@ def assess_entry(candidate: dict[str, Any], policy: ShadowRecoveryPolicy) -> dic
             failures.append("buyer-to-seller ratio below minimum and liquidity is not growing enough")
             codes.append("buy_sell_ratio")
     elif not ratio_confirmed:
-        failures.append("buyer-to-seller ratio below recovery minimum")
+        failures.append("buyer-to-seller ratio below early-buy minimum" if is_early_buy
+                        else "buyer-to-seller ratio below recovery minimum")
         codes.append("buy_sell_ratio")
     if is_momentum_buy:
         trade_count = _number(candidate.get("buys_m5")) + _number(candidate.get("sells_m5"))
         if trade_count < policy.momentum_buy_min_trades:
             failures.append(f"only {trade_count:.0f} five-minute trades, below momentum minimum {policy.momentum_buy_min_trades}")
+            codes.append("trade_count")
+    if is_early_buy:
+        trade_count = _number(candidate.get("buys_m5")) + _number(candidate.get("sells_m5"))
+        if trade_count < policy.early_buy_min_trades:
+            failures.append(f"only {trade_count:.0f} five-minute trades, below early-buy minimum {policy.early_buy_min_trades}")
             codes.append("trade_count")
     if policy.require_medium_risk and risk not in {"MEDIUM", "MODERATE"}:
         failures.append("risk is outside permitted recovery band")
@@ -171,7 +195,7 @@ def assess_entry(candidate: dict[str, Any], policy: ShadowRecoveryPolicy) -> dic
     if count < required:
         failures.append(f"entry confirmations {count}/{required}")
         codes.append("confirmations")
-    if candidate.get("decision") not in {"BUY ZONE", "BUY NOW", "MOMENTUM BUY"}:
+    if candidate.get("decision") not in {"BUY ZONE", "BUY NOW", "MOMENTUM BUY", "EARLY BUY"}:
         failures.append("recommendation has no final buy decision")
         codes.append("no_decision")
     if not failures:

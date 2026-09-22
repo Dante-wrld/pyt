@@ -18,7 +18,7 @@ def _no_legacy_claim() -> SimpleNamespace:
 
 
 def snapshot(*, confirmations=3, momentum="RISING", liquidity=60000,
-             price=.005, planned_target_price=None):
+             price=.005, planned_target_price=None, decision="BUY NOW"):
     now = time.time()
     return {"generated_at": now, "candidates": [{
         "chain": "solana", "mint": MINT, "symbol": "TEST",
@@ -30,7 +30,7 @@ def snapshot(*, confirmations=3, momentum="RISING", liquidity=60000,
         "momentum_label": momentum, "price_change_m5_pct": 2,
         "volume_label": "RISING", "buys_m5": 20, "sells_m5": 10,
         "buy_sell_ratio": 2, "risk_label": "MEDIUM", "signal_score": 90,
-        "decision": "BUY NOW",
+        "decision": decision,
     }]}
 
 
@@ -245,6 +245,18 @@ def test_model_cannot_increase_capital_or_buy_other_mint(tmp_path, monkeypatch):
             raw["mint"] = "B" * 44
             return raw
     assert decide_hunter_entry(snapshot(), model=Other(), ledger=book) is None
+    book.close()
+
+
+def test_early_buy_entry_is_capped_at_half_the_normal_order_size(tmp_path, monkeypatch):
+    """An early-buy entry has no proven move behind it yet, so it earns
+    only half the normal $5 order size, even if the model requests more."""
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    book = LiveTrialLedger(tmp_path / "trial.sqlite")
+    book.start()
+    decision = decide_hunter_entry(snapshot(decision="EARLY BUY"), model=Model(requested=5), ledger=book)
+    assert decision is not None
+    assert decision.approved_cents == 250
     book.close()
 
 

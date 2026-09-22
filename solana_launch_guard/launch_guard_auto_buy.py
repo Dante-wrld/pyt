@@ -30,7 +30,7 @@ class AutoBuyMixin(LaunchGuardState):
         if (
             not self.settings.auto_buy_enabled
             or candidate.chain != "solana"
-            or candidate.decision not in {"BUY NOW", "BUY ZONE", "MOMENTUM BUY"}
+            or candidate.decision not in {"BUY NOW", "BUY ZONE", "MOMENTUM BUY", "EARLY BUY"}
             or candidate.mint in self.settings.auto_buy_excluded_mints
         ):
             return

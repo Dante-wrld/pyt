@@ -2717,6 +2717,60 @@ def test_stale_entry_zone_re_anchors_to_a_new_peak() -> None:
     assert candidate.decision == "BUY ZONE"
 
 
+def test_early_buy_fires_for_a_fresh_candidate_still_near_its_starting_price() -> None:
+    """A brand-new candidate with real activity and no proven move yet
+    qualifies through the deliberately weaker early-buy path, rather than
+    waiting for either a pullback cycle or a momentum confirmation."""
+    initial = market_quote(
+        liquidity=50_000, market_cap=100_000, buys=60, sells=20,
+        volume=15_000, change=0,
+    )
+    book = RecommendationBook(pool_size=10, ttl_seconds=60, entry_confirmation_polls=1)
+    candidate = book.add(initial, CoinIntelligence().score(initial), now=0)
+    assert candidate is not None
+    assert candidate.decision == "EARLY BUY"
+    assert candidate.entry_zone_low is None
+    assert "starting price" in candidate.decision_reason
+
+
+def test_early_buy_does_not_fire_once_price_has_moved_well_off_its_start() -> None:
+    """Once price has drifted well past its starting point, that's no
+    longer 'still close to the start' - MOMENTUM BUY or the pullback path
+    are the right tools for a token that has already moved."""
+    initial = market_quote(
+        liquidity=50_000, market_cap=100_000, buys=60, sells=20,
+        volume=15_000, change=0,
+    )
+    book = RecommendationBook(pool_size=10, ttl_seconds=60, entry_confirmation_polls=1)
+    candidate = book.add(initial, CoinIntelligence().score(initial), now=0)
+    assert candidate is not None
+    assert candidate.decision == "EARLY BUY"
+
+    dipped = MarketQuote(
+        mint=initial.mint, symbol=initial.symbol,
+        price_sol=initial.price_sol * 0.85,
+        liquidity_usd=initial.liquidity_usd, market_cap_usd=initial.market_cap_usd,
+        pair_address=initial.pair_address, pair_created_at_ms=initial.pair_created_at_ms,
+        buys_m5=60, sells_m5=20, volume_m5_usd=15_000, price_change_m5_pct=-2,
+    )
+    book.update(dipped, now=3)
+    assert candidate.decision != "EARLY BUY"
+
+
+def test_early_buy_requires_its_own_higher_liquidity_floor() -> None:
+    """A brand-new token has no track record at all, so early-buy holds it
+    to a higher liquidity bar than the general AVOID floor - thin enough to
+    clear that floor but not this one should not qualify."""
+    initial = market_quote(
+        liquidity=8_000, market_cap=100_000, buys=60, sells=20,
+        volume=15_000, change=0,
+    )
+    book = RecommendationBook(pool_size=10, ttl_seconds=60, entry_confirmation_polls=1)
+    candidate = book.add(initial, CoinIntelligence().score(initial), now=0)
+    assert candidate is not None
+    assert candidate.decision != "EARLY BUY"
+
+
 def test_momentum_buy_fires_on_a_fresh_extended_move_with_rising_volume() -> None:
     """A token that extends straight up without ever giving back into a
     pullback zone must not be permanently unbuyable just because the
@@ -2981,7 +3035,7 @@ def test_entry_requires_three_consecutive_confirmations() -> None:
     assert candidate.entry_confirmation_count == 2
 
     book.update(quote, now=10)
-    assert candidate.decision == "BUY NOW"
+    assert candidate.decision == "EARLY BUY"
     assert candidate.entry_confirmation_count == 3
     assert "confirmed for 3 consecutive checks" in candidate.decision_reason
     assert candidate.planned_entry_price == pytest.approx(quote.price_sol)
@@ -3006,7 +3060,7 @@ def test_auto_buy_discovery_requires_confirmed_fresh_liquid_signal(
     assert candidate is not None
     book.update(quote, now=5)
     book.update(quote, now=10)
-    assert candidate.decision == "BUY NOW"
+    assert candidate.decision == "EARLY BUY"
 
     config = settings(
         tmp_path / "discovery.db",
@@ -3047,7 +3101,7 @@ def test_auto_buy_discovery_arms_a_new_qualified_mint(
     book.update(quote, now=now + 5)
     book.update(quote, now=now + 10)
     candidate.updated_at = time.time()
-    assert candidate.decision == "BUY NOW"
+    assert candidate.decision == "EARLY BUY"
 
     store = SQLiteStore(str(tmp_path / "discovery-arm.db"))
     config = settings(
@@ -3117,7 +3171,7 @@ def test_entry_decision_avoids_heavy_selloff() -> None:
     )
     candidate = book.add(initial, CoinIntelligence().score(initial), now=0)
     assert candidate is not None
-    assert candidate.decision == "BUY NOW"
+    assert candidate.decision == "EARLY BUY"
 
     selloff = MarketQuote(
         mint=initial.mint,
@@ -4912,7 +4966,7 @@ def test_discovery_candidates_use_wall_clock_without_manual_timestamp(
         auto_buy_discovery=True,
     )
 
-    assert candidate.decision == "BUY NOW"
+    assert candidate.decision == "EARLY BUY"
     assert auto_buy_discovery_rejection(candidate, config) is None
 
 

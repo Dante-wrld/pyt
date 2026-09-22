@@ -15,7 +15,7 @@ def auto_buy_discovery_rejection(
     """Return the first reason an automatic-discovery candidate is blocked."""
     if candidate.chain != "solana":
         return "only Solana candidates can be purchased"
-    if candidate.decision not in {"BUY NOW", "BUY ZONE", "MOMENTUM BUY"}:
+    if candidate.decision not in {"BUY NOW", "BUY ZONE", "MOMENTUM BUY", "EARLY BUY"}:
         return "candidate does not have a final buy decision"
     if candidate.mint in settings.auto_buy_excluded_mints:
         return "mint is excluded from automatic discovery"

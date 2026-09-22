@@ -106,6 +106,7 @@ class RecommendationCandidate:
             "BUY ZONE": 4,
             "MOMENTUM BUY": 4,
             "BUY NOW": 3,
+            "EARLY BUY": 3,
             "ENTRY PENDING": 2,
             "PULLBACK STARTED": 2,
             "WAIT FOR PULLBACK": 2,
@@ -235,6 +236,10 @@ class RecommendationBook:
         avoid_momentum_pct: float = -8.0,
         avoid_sell_pressure_ratio: float = 2.0,
         min_liquidity_usd: float = 5_000.0,
+        early_buy_max_deviation_pct: float = 8.0,
+        early_buy_min_ratio: float = 1.1,
+        early_buy_min_trades: int = 15,
+        early_buy_min_liquidity_usd: float = 15_000.0,
     ) -> None:
         self.pool_size = pool_size
         self.ttl_seconds = ttl_seconds
@@ -261,6 +266,10 @@ class RecommendationBook:
         self.avoid_momentum_pct = avoid_momentum_pct
         self.avoid_sell_pressure_ratio = avoid_sell_pressure_ratio
         self.min_liquidity_usd = min_liquidity_usd
+        self.early_buy_max_deviation_pct = early_buy_max_deviation_pct
+        self.early_buy_min_ratio = early_buy_min_ratio
+        self.early_buy_min_trades = early_buy_min_trades
+        self.early_buy_min_liquidity_usd = early_buy_min_liquidity_usd
         self.candidates: dict[str, RecommendationCandidate] = {}
         self._buy_zone_alerts: set[str] = set()
         self._pullback_alerts: set[str] = set()
@@ -568,6 +577,30 @@ class RecommendationBook:
             f"and {evidence}"
         )
 
+    def _early_buy_reason(self, candidate: RecommendationCandidate) -> str | None:
+        """A deliberately weaker bar than momentum continuation - the trade
+        here is accepting a token with no proven move yet in exchange for a
+        price still close to where we first saw it, rather than waiting for
+        either a full overextend-and-pullback cycle or a momentum
+        confirmation to complete. Only reachable while price is still near
+        initial_price (see the caller): this only judges whether there is
+        enough real activity to believe the pool isn't dead or a decoy, not
+        whether a trend already exists.
+        """
+        if abs(candidate.rise_pct) > self.early_buy_max_deviation_pct:
+            return None
+        if (candidate.liquidity_usd or 0) < self.early_buy_min_liquidity_usd:
+            return None
+        if candidate.buys_m5 + candidate.sells_m5 < self.early_buy_min_trades:
+            return None
+        if candidate.buy_sell_ratio < self.early_buy_min_ratio:
+            return None
+        return (
+            f"still within {self.early_buy_max_deviation_pct:.0f}% of its starting "
+            f"price ({candidate.rise_pct:+.1f}%) with {candidate.buys_m5 + candidate.sells_m5} "
+            f"five-minute trades and a {candidate.buy_sell_ratio:.2f} buy/sell ratio"
+        )
+
     def _refresh_decision(self, candidate: RecommendationCandidate) -> None:
         liquidity = candidate.liquidity_usd or 0.0
         initial_liquidity = candidate.initial_liquidity_usd or liquidity
@@ -718,6 +751,11 @@ class RecommendationBook:
                 "WAIT FOR PULLBACK",
                 "momentum is strong but price is extended",
             )
+            return
+
+        early_buy_reason = self._early_buy_reason(candidate)
+        if early_buy_reason is not None:
+            self._propose_entry(candidate, "EARLY BUY", early_buy_reason)
             return
 
         if (
