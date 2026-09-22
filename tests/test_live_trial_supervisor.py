@@ -52,6 +52,21 @@ def test_exit_choice_requires_matched_signal_mint_confidence_and_amount():
     assert _sell_choice(partial, "mint", 12, "TAKE_PARTIAL", .5) == ("TAKE_PARTIAL", 1 / 3)
 
 
+def test_full_liquidation_bypasses_the_two_dollar_floor_but_partial_sells_do_not():
+    """A position that crashed below the usual $2 minimum trade size still
+    needs to be fully sellable, or it gets stuck forever - but a
+    discretionary partial sell has no such justification, so it keeps the
+    $2 floor unchanged.
+    """
+    crashed = {"action": "SELL", "confidence": .8, "mint": "mint", "requested_usd": 0.12}
+    assert _sell_choice(crashed, "mint", 0.12, "EXIT_WARNING") == ("SELL", 1.0)
+    # Below even the small dust guard: still rejected.
+    assert _sell_choice({**crashed, "requested_usd": 0.001}, "mint", 0.001, "EXIT_WARNING") is None
+    # A partial sell of a crashed position stays floored at $2.
+    tiny_partial = {"action": "TAKE_PARTIAL", "confidence": .8, "mint": "mint", "requested_usd": 0.5}
+    assert _sell_choice(tiny_partial, "mint", 1.0, "TAKE_PARTIAL") is None
+
+
 def test_eligible_exit_tolerates_a_relabel_between_still_sell_worthy_decisions():
     """The portfolio monitor recomputes this label independently every ~15s;
     for a small, volatile position it can relabel between EXIT WARNING and
@@ -79,6 +94,33 @@ def test_eligible_exit_tolerates_a_relabel_between_still_sell_worthy_decisions()
     assert _eligible_exit(snapshot("PROTECT PROFIT"), "mint") is True
     assert _eligible_exit(snapshot("HOLD"), "mint") is False
     assert _eligible_exit(snapshot("REBOUND WATCH"), "mint") is False
+
+
+def test_eligible_exit_reads_raw_decision_for_a_position_crashed_below_sell_floor():
+    """PortfolioAdvisor forces `decision` to HOLD once a position's dollar
+    value drops below the sell floor, for notification purposes only - but
+    `raw_decision` still carries the true risk-based call, and live-trial
+    exit eligibility must key off that instead, or a crashed position can
+    never be liquidated again.
+    """
+    import time
+
+    def snapshot(decision: str, raw_decision: str | None) -> dict:
+        row = {
+            "chain": "solana",
+            "token_address": "mint",
+            "decision": decision,
+            "current_price": 0.001,
+        }
+        if raw_decision is not None:
+            row["raw_decision"] = raw_decision
+        return {"generated_at": time.time(), "signals": [row]}
+
+    assert _eligible_exit(snapshot("HOLD", "EXIT WARNING"), "mint") is True
+    assert _eligible_exit(snapshot("HOLD", "HOLD"), "mint") is False
+    # Older snapshot predating the field: falls back to `decision`.
+    assert _eligible_exit(snapshot("EXIT WARNING", None), "mint") is True
+    assert _eligible_exit(snapshot("HOLD", None), "mint") is False
 
 
 def test_editing_env_kill_switch_stops_existing_process(tmp_path, monkeypatch):

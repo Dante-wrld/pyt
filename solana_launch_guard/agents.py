@@ -128,8 +128,16 @@ class RiskArbiter:
         approved = min(amount_usd, self.policy.max_order_usd)
         return Arbitration(True, round(approved, 8), ("passed deterministic shadow exit checks",))
 
-    def evaluate_live_exit(self, amount_usd: float, state: RiskSnapshot) -> Arbitration:
-        """Assess an owned position exit without applying the new-buy dollar cap."""
+    def evaluate_live_exit(
+        self, amount_usd: float, state: RiskSnapshot, *, min_amount_usd: float = 2,
+    ) -> Arbitration:
+        """Assess an owned position exit without applying the new-buy dollar cap.
+
+        `min_amount_usd` defaults to the standard $2 floor for a
+        discretionary partial exit. A full liquidation of a position that
+        has already crashed below that floor passes a much smaller floor
+        instead - otherwise a crashed position can never be sold again.
+        """
         reasons = []
         if state.mode != "live" or "live" not in self.policy.allowed_modes:
             reasons.append("live exit is not enabled by this arbiter")
@@ -139,8 +147,8 @@ class RiskArbiter:
             reasons.append("market quote is stale")
         if not math.isfinite(state.quoted_price_impact_pct) or abs(state.quoted_price_impact_pct) > self.policy.max_price_impact_pct:
             reasons.append("quoted price impact exceeds policy limit")
-        if not math.isfinite(amount_usd) or amount_usd < 2 or amount_usd > state.current_position_usd:
-            reasons.append("requested exit is below $2 or exceeds owned position")
+        if not math.isfinite(amount_usd) or amount_usd < min_amount_usd or amount_usd > state.current_position_usd:
+            reasons.append(f"requested exit is below ${min_amount_usd:.2f} or exceeds owned position")
         if reasons:
             return Arbitration(False, 0, tuple(reasons))
         return Arbitration(True, round(amount_usd, 8), ("passed deterministic live exit checks",))

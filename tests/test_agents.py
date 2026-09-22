@@ -160,3 +160,19 @@ def test_live_exit_does_not_apply_new_buy_cap():
     assert not arbiter.evaluate_live_exit(13, state).approved
     assert not arbiter.evaluate_live_exit(1.99, state).approved
     assert not arbiter.evaluate_live_exit(12, RiskSnapshot(mode="live", current_position_usd=12, kill_switch=True)).approved
+
+
+def test_live_exit_min_amount_can_drop_below_two_dollars_for_a_full_liquidation():
+    """A position that crashed below the standard $2 floor still needs to
+    be sellable in full, or it gets stuck forever - the caller signals
+    that with a lower `min_amount_usd`, but the position-size ceiling
+    still applies."""
+    from solana_launch_guard.agents import RiskArbiter, RiskPolicy, RiskSnapshot
+
+    arbiter = RiskArbiter(RiskPolicy(allowed_modes=("live",), max_order_usd=5))
+    state = RiskSnapshot(mode="live", current_position_usd=0.15, quote_age_seconds=2)
+    assert not arbiter.evaluate_live_exit(0.15, state).approved
+    approval = arbiter.evaluate_live_exit(0.15, state, min_amount_usd=0.01)
+    assert approval.approved
+    assert approval.approved_usd == 0.15
+    assert not arbiter.evaluate_live_exit(0.001, state, min_amount_usd=0.01).approved

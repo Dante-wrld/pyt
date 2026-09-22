@@ -407,6 +407,13 @@ async def execute_live_exit(
         raise ValueError("invalid partial profit stage")
     if not math.isfinite(fraction) or not 0 < fraction <= 1:
         raise ValueError("invalid owned position exit fraction")
+    # A full liquidation (SELL/EMERGENCY_EXIT of the entire remaining
+    # position) isn't held to the usual $2 minimum-order-size floor - a
+    # position that crashed below that floor still needs to be sellable,
+    # or it gets stuck forever. It keeps a much smaller dust guard so a
+    # swap quoting essentially nothing (below gas cost) still doesn't
+    # fire. A discretionary partial sell keeps the full $2 floor.
+    is_full_liquidation = decision in {"SELL", "EMERGENCY_EXIT"} and fraction >= 0.999
 
     def _exit_signal_stale() -> bool:
         # The eligibility gate alone tolerates a relabel between any
@@ -431,6 +438,7 @@ async def execute_live_exit(
         RiskSnapshot(mode="live", current_position_usd=position_value_usd,
                      quote_age_seconds=quote_age_seconds,
                      liquidity_usd=liquidity_usd),
+        min_amount_usd=0.01 if is_full_liquidation else 2,
     )
     if not approval.approved:
         ledger.log(agent=agent, mint=mint, state="EXIT_BLOCKED", reason="; ".join(approval.reasons))
@@ -502,7 +510,7 @@ async def execute_live_exit(
     plan = replace(plan, event_key=key)
     preflight = await seller.preflight(plan, rpc)
     prepared = preflight.prepared
-    floor_raw = math.ceil(max(2.0, minimum_sell_usd) * 1_000_000)
+    floor_raw = math.ceil((0.01 if is_full_liquidation else max(2.0, minimum_sell_usd)) * 1_000_000)
     if prepared.minimum_output_raw < floor_raw:
         raise TrialHalted("EXIT BLOCKED: minimum quoted proceeds are below the configured sell floor")
     if (prepared.quoted_price_impact_pct is None

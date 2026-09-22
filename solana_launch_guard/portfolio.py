@@ -34,6 +34,7 @@ class PortfolioSignal:
     pnl_pct: float | None
     decision: str
     reason: str
+    raw_decision: str
     price_change_m5_pct: float | None
     buys_m5: int
     sells_m5: int
@@ -128,6 +129,7 @@ class PortfolioAdvisor:
                 pnl_pct=None,
                 decision="UNPRICED",
                 reason="market quote unavailable; no sell inference made",
+                raw_decision="UNPRICED",
                 price_change_m5_pct=None,
                 buys_m5=0,
                 sells_m5=0,
@@ -282,6 +284,13 @@ class PortfolioAdvisor:
             else:
                 reason = f"open P/L {pnl_pct:+.1f}%; risk triggers not reached"
 
+        # The pre-floor decision, kept apart from the notification-facing
+        # `decision` below: live-trial exit eligibility needs the true
+        # risk-based call even when the dollar value is too small for a
+        # human-facing alert, otherwise a position that crashes below the
+        # sell minimum can never be liquidated again.
+        raw_decision = decision
+
         # A holding below the app's sellable amount cannot act on exit advice.
         # A recovery across the floor still needs independent bearish evidence;
         # a model cannot establish that another rise is impossible.
@@ -309,6 +318,7 @@ class PortfolioAdvisor:
                 )
                 if not bearish:
                     decision = "HOLD"
+                    raw_decision = "HOLD"
                     reason = (
                         f"position recovered above ${self.min_sell_value_usd:.2f}; "
                         "waiting for both seller pressure and liquidity/peak deterioration"
@@ -325,6 +335,7 @@ class PortfolioAdvisor:
             pnl_pct=pnl_pct,
             decision=decision,
             reason=reason,
+            raw_decision=raw_decision,
             price_change_m5_pct=quote.price_change_m5_pct,
             buys_m5=quote.buys_m5,
             sells_m5=quote.sells_m5,

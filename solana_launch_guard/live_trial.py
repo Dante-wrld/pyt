@@ -114,26 +114,32 @@ def _write_report(ledger: LiveTrialLedger) -> None:
 
 
 def _signal_decision(snapshot: dict, mint: str) -> str | None:
-    """The fresh sell-worthy decision for `mint`, or None if not eligible."""
+    """The fresh sell-worthy decision for `mint`, or None if not eligible.
+
+    Checks `raw_decision` (the risk-based call before PortfolioAdvisor's
+    dollar-value floor override), not the notification-facing `decision` -
+    otherwise a position that crashes below the sell minimum reads as HOLD
+    forever and can never be liquidated, even though the true underlying
+    signal is bearish. Falls back to `decision` for an older snapshot that
+    predates this field.
+    """
     if not _snapshot_is_fresh(snapshot):
         return None
     signals = snapshot.get("signals")
     if not isinstance(signals, list):
         return None
     for row in signals:
-        if (
-            not isinstance(row, dict)
-            or row.get("chain") != "solana"
-            or row.get("token_address") != mint
-            or row.get("decision") not in SELL_WORTHY_DECISIONS
-        ):
+        if not isinstance(row, dict) or row.get("chain") != "solana" or row.get("token_address") != mint:
+            continue
+        effective_decision = row.get("raw_decision", row.get("decision"))
+        if effective_decision not in SELL_WORTHY_DECISIONS:
             continue
         try:
             price = float(row.get("current_price") or 0)
         except (TypeError, ValueError):
             continue
         if math.isfinite(price) and price > 0:
-            return row.get("decision")
+            return effective_decision
     return None
 
 
@@ -152,11 +158,19 @@ def _sell_choice(raw: dict, mint: str, value: float, signal: str,
         return None
     if (raw.get("mint") != mint or not 0.65 <= confidence <= 1
         or not math.isfinite(requested) or not math.isfinite(value)
-        or requested < 2 or requested > value * 1.01):
+        or requested > value * 1.01):
         return None
     normalized = signal.replace("_", " ")
-    if (action is TradeAction.SELL and normalized in {"EXIT WARNING", "EXIT", "EMERGENCY EXIT"}
-        and abs(requested - value) <= max(.05, .01 * value)):
+    is_full_liquidation = (action is TradeAction.SELL
+                           and normalized in {"EXIT WARNING", "EXIT", "EMERGENCY EXIT"}
+                           and abs(requested - value) <= max(.05, .01 * value))
+    # A full exit liquidates whatever remains, so it isn't floored at the
+    # usual $2 minimum trade size - a position that crashed below that
+    # floor still needs to be sellable. A discretionary partial sell has
+    # no such justification for going below $2: it can just wait.
+    if requested < (0.01 if is_full_liquidation else 2):
+        return None
+    if is_full_liquidation:
         return "SELL", 1.0
     if (action is TradeAction.TAKE_PARTIAL and normalized in {"TAKE PARTIAL", "PROTECT PROFIT"}
         and 0 < requested / value <= max_partial_fraction + 0.0001):
@@ -275,7 +289,7 @@ async def cycle(*, ledger: LiveTrialLedger, settings: Settings, rpc: SolanaRpc,
         for row in portfolio.get("signals", []):
             if not isinstance(row, dict) or row.get("chain") != "solana":
                 continue
-            signal = str(row.get("decision") or "")
+            signal = str(row.get("raw_decision", row.get("decision")) or "")
             if signal not in SELL_WORTHY_DECISIONS:
                 continue
             mint = str(row.get("token_address") or "")
@@ -284,7 +298,14 @@ async def cycle(*, ledger: LiveTrialLedger, settings: Settings, rpc: SolanaRpc,
                 liquidity = float(row.get("liquidity_usd") or 0)
             except (ValueError, TypeError):
                 continue
-            if not math.isfinite(value) or value < 2 or not math.isfinite(liquidity) or liquidity <= 0:
+            # EXIT WARNING liquidates the entire remaining position, so a
+            # value below the usual $2 floor must not block it - otherwise a
+            # position that crashes below the floor could never be sold
+            # again. TAKE PARTIAL / PROTECT PROFIT choose a discretionary
+            # size, so they keep the $2 floor: no reason to bother with a
+            # partial sell that small while the rest isn't going anywhere.
+            value_floor = 0.01 if signal == "EXIT WARNING" else 2
+            if not math.isfinite(value) or value < value_floor or not math.isfinite(liquidity) or liquidity <= 0:
                 continue
             raw = model.propose(role=AgentRole.PORTFOLIO_MANAGER,
                 context={"mode": "live_trial", "owned_position": row,

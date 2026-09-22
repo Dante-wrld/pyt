@@ -649,6 +649,81 @@ def test_portfolio_owned_exit_can_exceed_five_dollars_without_bypassing_guards(t
     book.close()
 
 
+def test_full_liquidation_of_a_crashed_position_clears_the_two_dollar_floor(tmp_path, monkeypatch):
+    """A position that crashed to a fraction of a dollar (observed live:
+    BONEPHIL fell to $0.115) must still be fully sellable end to end - the
+    deterministic arbiter check and the quoted-proceeds floor both have to
+    drop below $2 together for a full SELL, not just one of them."""
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    book = LiveTrialLedger(tmp_path / "trial.sqlite")
+    book.start()
+    wallet = "synthetic-owner"
+
+    class Rpc:
+        async def token_balance(self, owner, mint):
+            return SimpleNamespace(raw_amount=100_000_000, decimals=6)
+        async def get_transaction(self, signature):
+            def row(index, mint, amount):
+                return {"accountIndex": index, "mint": mint, "owner": wallet,
+                        "uiTokenAmount": {"amount": str(amount)}}
+            return {"meta": {"err": None,
+                    "preTokenBalances": [row(0, MINT, 100_000_000)],
+                    "postTokenBalances": [row(1, USDC_MINT, 150_000)]}}
+
+    class Seller:
+        max_price_impact_pct = 3
+        max_slippage_bps = 300
+        async def preflight(self, plan, rpc):
+            return SimpleNamespace(prepared=SimpleNamespace(input_amount_raw=plan.amount_raw,
+                minimum_output_raw=150_000, expected_output_raw=150_000,
+                quoted_price_impact_pct=-1.0, quoted_slippage_bps=100))
+        async def execute(self, prepared):
+            return SimpleNamespace(signature="sell-signature", input_amount_raw=100_000_000,
+                                   output_amount_raw=150_000)
+
+    class Store:
+        connection = _no_legacy_claim()
+        def begin_auto_sell_execution(self, **kwargs):
+            return True
+        def complete_auto_sell_execution(self, **kwargs):
+            pass
+
+    result = asyncio.run(execute_live_exit(
+        ledger=book, agent="portfolio-v1", mint=MINT, symbol="TEST",
+        decision="SELL", position_value_usd=0.15, quote_age_seconds=2,
+        liquidity_usd=60_000, fraction=1, rpc=Rpc(), seller=Seller(),
+        store=Store(), wallet=wallet, current_exit_allowed=lambda: True,
+    ))
+    assert result["proceeds_usdc_raw"] == 150_000
+    assert not book.unresolved()
+    book.close()
+
+
+def test_partial_sell_of_a_crashed_position_still_requires_the_two_dollar_floor(tmp_path, monkeypatch):
+    """Only a full liquidation gets the lowered floor - a discretionary
+    partial sell of a crashed position has no such justification and
+    should keep failing the deterministic $2 check."""
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    book = LiveTrialLedger(tmp_path / "trial.sqlite")
+    book.start()
+    wallet = "synthetic-owner"
+
+    class Rpc:
+        async def token_balance(self, owner, mint):
+            return SimpleNamespace(raw_amount=100_000_000, decimals=6)
+
+    seller = SimpleNamespace(max_price_impact_pct=3, max_slippage_bps=300)
+
+    with pytest.raises(TrialHalted, match="EXIT BLOCKED"):
+        asyncio.run(execute_live_exit(
+            ledger=book, agent="portfolio-v1", mint=MINT, symbol="TEST",
+            decision="TAKE_PARTIAL", position_value_usd=1.0, quote_age_seconds=2,
+            liquidity_usd=60_000, fraction=0.5, rpc=Rpc(), seller=seller,
+            store=None, wallet=wallet, current_exit_allowed=lambda: True,
+        ))
+    book.close()
+
+
 def _sell_seller():
     return SimpleNamespace(
         max_price_impact_pct=3, max_slippage_bps=300,

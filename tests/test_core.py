@@ -3162,6 +3162,7 @@ def test_owned_portfolio_exit_can_trigger_without_cost_basis(
         pnl_pct=None,
         decision="EXIT WARNING",
         reason="momentum reversal",
+        raw_decision="EXIT WARNING",
         price_change_m5_pct=-10,
         buys_m5=2,
         sells_m5=8,
@@ -3257,6 +3258,7 @@ def test_live_portfolio_exit_executes_one_persistent_chunk_per_poll(
         pnl_pct=None,
         decision="EXIT WARNING",
         reason="momentum reversal",
+        raw_decision="EXIT WARNING",
         price_change_m5_pct=-10,
         buys_m5=2,
         sells_m5=8,
@@ -3331,6 +3333,7 @@ def test_portfolio_sell_signal_requires_confirmation_across_restart(
         pnl_pct=None,
         decision="EXIT WARNING",
         reason="momentum reversal",
+        raw_decision="EXIT WARNING",
         price_change_m5_pct=-10,
         buys_m5=2,
         sells_m5=8,
@@ -3622,6 +3625,7 @@ def test_confirmed_full_exit_starts_rebuy_watch(tmp_path: Path) -> None:
         pnl_pct=None,
         decision="EXIT WARNING",
         reason="confirmed selloff",
+        raw_decision="EXIT WARNING",
         price_change_m5_pct=-10,
         buys_m5=2,
         sells_m5=8,
@@ -3717,6 +3721,7 @@ def test_confirmed_protect_profit_exit_also_starts_rebuy_watch(tmp_path: Path) -
         pnl_pct=140,
         decision="PROTECT PROFIT",
         reason="price is 15.0% below its monitored peak; open gain is 140.0%",
+        raw_decision="PROTECT PROFIT",
         price_change_m5_pct=-4,
         buys_m5=5,
         sells_m5=6,
@@ -3924,6 +3929,42 @@ def test_portfolio_advisor_uses_cost_basis_for_partial_profit() -> None:
     assert signal.decision == "TAKE PARTIAL"
     assert signal.pnl_pct == pytest.approx(35)
     assert signal.current_value_usd == pytest.approx(4.0)
+
+
+def test_portfolio_advisor_keeps_raw_decision_when_value_crashes_below_sell_floor() -> None:
+    """A position that crashes below the $2 sell floor still reads as HOLD
+    for notifications (unchanged), but `raw_decision` must keep the true
+    risk-based call so live-trial execution can still liquidate it."""
+    holding = OwnedHolding(
+        chain="solana",
+        token_address="MintCrashed111",
+        symbol="CRASH",
+        quantity=1_000,
+        entry_price=0.01,
+        price_currency="USD",
+    )
+    quote = MarketQuote(
+        mint=holding.token_address,
+        symbol=holding.symbol,
+        price_sol=0.0000001,
+        price_usd=0.001,
+        chain="solana",
+        liquidity_usd=50_000,
+        market_cap_usd=10_000,
+        pair_address="PairCrashed",
+        pair_created_at_ms=1,
+        buys_m5=10,
+        sells_m5=5,
+        volume_m5_usd=1_000,
+        price_change_m5_pct=0,
+    )
+
+    signal = PortfolioAdvisor().evaluate(holding, quote)
+
+    assert signal.current_value_usd == pytest.approx(1.0)
+    assert signal.decision == "HOLD"
+    assert "sell minimum" in signal.reason
+    assert signal.raw_decision == "EXIT WARNING"
 
 
 def test_portfolio_advisor_warns_on_momentum_reversal_without_cost_basis() -> None:
