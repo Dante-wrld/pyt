@@ -84,6 +84,14 @@ def _live_arbiter(max_quote_age_seconds: int = 15, min_liquidity_usd: float = 50
         allowed_modes=("live",), max_order_usd=5, max_position_pct=100,
         max_open_positions=2, min_liquidity_usd=min_liquidity_usd,
         max_price_impact_pct=9, max_quote_age_seconds=max_quote_age_seconds,
+        # Default (3% of $30 equity = $0.90) was smaller than a single
+        # normal stop-loss on a $5 position - tonight's real losses were
+        # $1.44-1.45 (28-34% drawdowns), so one trade always exhausted the
+        # whole day's allowance and blocked every other candidate for the
+        # rest of the day, including ones never even attempted. 10% ($3.00)
+        # absorbs about two bad trades before halting for the day instead
+        # of one.
+        max_daily_loss_pct=10,
     ))
 
 
@@ -91,6 +99,7 @@ def decide_hunter_entry(
     snapshot: dict, *, model, ledger: LiveTrialLedger,
     now: float | None = None,
     buy_zone_skip_reasons: dict[str, str] | None = None,
+    chase_first_target: dict[str, float] | None = None,
     current_snapshot: Callable[[], dict] | None = None,
 ) -> LiveEntryDecision | None:
     """Require a BUY_READY recovery, model proposal, then live arbitration."""
@@ -133,6 +142,26 @@ def decide_hunter_entry(
     if status["remaining_buy_cap_cents"] <= 0 or status["open_positions"] >= 2:
         return None
     candidate = ready[0]
+    mint = str(candidate.get("mint") or "")
+    # Freeze the target price the first time this mint becomes buyable, and
+    # compare every later retry against that frozen value, not the live one -
+    # the recommendation engine re-anchors planned_target_price to a new peak
+    # whenever price makes a fresh high, so comparing against the live value
+    # would let the target chase the price up forever and never trigger. A
+    # token still climbing toward the entry we originally planned for is
+    # exactly what we want to keep retrying on; one that's already blown
+    # past what we ourselves judged worth exiting at is not - we'd be buying
+    # at what would have been our own take-profit level.
+    chase_targets = chase_first_target if chase_first_target is not None else {}
+    frozen_target = chase_targets.setdefault(mint, candidate.get("planned_target_price"))
+    current_price = candidate.get("price")
+    if (frozen_target is not None and current_price is not None
+            and float(current_price) >= float(frozen_target)):
+        ledger.log(agent="hunter-v1", mint=mint, state="BLOCKED",
+                   reason=f"price {float(current_price):.12g} reached the original planned "
+                          f"target {float(frozen_target):.12g} before a fill; abandoning the "
+                          "chase rather than buying at what would have been our own exit level")
+        return None
     liquidity = float(candidate["liquidity_usd"])
     review = assess_entry(candidate, policy)
     coordinator = AgentCoordinator(model, _live_arbiter(min_liquidity_usd=policy.min_liquidity_usd))

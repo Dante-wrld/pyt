@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from solana_launch_guard.live_trial_ledger import LiveTrialLedger, TrialHalted
-from solana_launch_guard.live_trial_runner import can_submit, decide_hunter_entry, execute_hunter_entry, execute_live_exit
+from solana_launch_guard.live_trial_runner import _live_arbiter, can_submit, decide_hunter_entry, execute_hunter_entry, execute_live_exit
 from solana_launch_guard.execution import USDC_MINT
 
 
@@ -17,11 +17,13 @@ def _no_legacy_claim() -> SimpleNamespace:
     return SimpleNamespace(execute=lambda *a, **k: SimpleNamespace(fetchone=lambda: None))
 
 
-def snapshot(*, confirmations=3, momentum="RISING", liquidity=60000):
+def snapshot(*, confirmations=3, momentum="RISING", liquidity=60000,
+             price=.005, planned_target_price=None):
     now = time.time()
     return {"generated_at": now, "candidates": [{
         "chain": "solana", "mint": MINT, "symbol": "TEST",
-        "quoted_at": now, "price": .005, "peak_price": .006,
+        "quoted_at": now, "price": price, "peak_price": .006,
+        "planned_target_price": planned_target_price,
         "pullback_from_peak_pct": 16, "liquidity_usd": liquidity,
         "initial_liquidity_usd": liquidity,
         "entry_confirmation_count": confirmations, "entry_confirmation_required": 3,
@@ -125,6 +127,73 @@ def test_post_model_recheck_still_blocks_when_the_fresh_read_no_longer_qualifies
     assert decision is None
     skipped = [d for d in book.status()["recent_decisions"] if d["state"] == "BLOCKED"]
     assert skipped and "stale" in skipped[0]["reason"]
+    book.close()
+
+
+def test_live_arbiter_daily_loss_cap_absorbs_more_than_one_bad_trade():
+    """3% of $30 equity ($0.90) was smaller than a single real stop-loss
+    observed live (28-34% drawdowns on a $5 position, ~$1.40-1.75) - one
+    bad trade always exhausted the whole day's allowance."""
+    policy = _live_arbiter().policy
+    assert policy.max_daily_loss_pct == 10
+    assert 30 * policy.max_daily_loss_pct / 100 >= 3.0
+
+
+def test_chase_abandons_once_price_reaches_the_frozen_original_target(tmp_path, monkeypatch):
+    """Retrying a candidate that's already blown past the target we
+    originally planned to exit at means buying at what would have been
+    our own take-profit level - abandon instead of chasing forever."""
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    book = LiveTrialLedger(tmp_path / "trial.sqlite")
+    book.start()
+    model = Model()
+    chase_first_target: dict[str, float] = {}
+
+    below_target = snapshot(price=0.005, planned_target_price=0.007)
+    decision = decide_hunter_entry(
+        below_target, model=model, ledger=book, chase_first_target=chase_first_target,
+    )
+    assert decision is not None
+    assert chase_first_target[MINT] == 0.007
+    assert model.calls == 1
+
+    past_target = snapshot(price=0.008, planned_target_price=0.009)
+    decision2 = decide_hunter_entry(
+        past_target, model=model, ledger=book, chase_first_target=chase_first_target,
+    )
+    assert decision2 is None
+    # The model must not even be called once price has already passed the
+    # frozen target - there's no proposal worth asking for.
+    assert model.calls == 1
+    blocked = [d for d in book.status()["recent_decisions"] if d["state"] == "BLOCKED"]
+    assert blocked and "abandoning the chase" in blocked[0]["reason"]
+    book.close()
+
+
+def test_chase_keeps_retrying_against_the_frozen_target_even_if_it_reanchors_higher(tmp_path, monkeypatch):
+    """The recommendation engine re-anchors planned_target_price to a new
+    peak whenever price makes a fresh high - the frozen (first-seen) value
+    must be what's compared, or a genuinely still-climbing candidate would
+    never trigger the abandon check because the live target always chases
+    the price up with it."""
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    book = LiveTrialLedger(tmp_path / "trial.sqlite")
+    book.start()
+    model = Model()
+    chase_first_target: dict[str, float] = {}
+
+    first = snapshot(price=0.005, planned_target_price=0.007)
+    decide_hunter_entry(first, model=model, ledger=book, chase_first_target=chase_first_target)
+    assert chase_first_target[MINT] == 0.007
+
+    # Price and the live target both rose, but price (0.0065) is still
+    # below the *frozen* original target (0.007) - must keep retrying.
+    still_climbing = snapshot(price=0.0065, planned_target_price=0.012)
+    decision = decide_hunter_entry(
+        still_climbing, model=model, ledger=book, chase_first_target=chase_first_target,
+    )
+    assert decision is not None
+    assert chase_first_target[MINT] == 0.007  # unchanged, still frozen
     book.close()
 
 

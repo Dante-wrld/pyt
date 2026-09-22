@@ -251,7 +251,8 @@ async def cycle(*, ledger: LiveTrialLedger, settings: Settings, rpc: SolanaRpc,
                 model, store: SQLiteStore,
                 oracle: DexScreenerOracle,
                 exit_block_streaks: dict[str, int],
-                buy_zone_skip_reasons: dict[str, str]) -> None:
+                buy_zone_skip_reasons: dict[str, str],
+                chase_first_target: dict[str, float]) -> None:
     ledger.assert_active()
     if ledger.unresolved():
         raise TrialHalted("unresolved order; stop for chain reconciliation")
@@ -399,6 +400,7 @@ async def cycle(*, ledger: LiveTrialLedger, settings: Settings, rpc: SolanaRpc,
     recommendations = _read_recommendations()
     decision = decide_hunter_entry(recommendations, model=model, ledger=ledger,
                                    buy_zone_skip_reasons=buy_zone_skip_reasons,
+                                   chase_first_target=chase_first_target,
                                    current_snapshot=_read_recommendations)
     if decision is not None:
         result = await _guarded_entry(decision, ledger=ledger, rpc=rpc,
@@ -446,6 +448,7 @@ async def supervise(*, interval_seconds: int = 30) -> dict:
         consecutive_cycle_failures = 0
         exit_block_streaks: dict[str, int] = {}
         buy_zone_skip_reasons: dict[str, str] = {}
+        chase_first_target: dict[str, float] = {}
         while ledger.status()["status"] == "ACTIVE":
             require_exclusive_trial_flags()
             if monitor.poll() is not None:
@@ -454,7 +457,8 @@ async def supervise(*, interval_seconds: int = 30) -> dict:
                 await cycle(ledger=ledger, settings=settings, rpc=rpc,
                             model=model, store=store, oracle=oracle,
                             exit_block_streaks=exit_block_streaks,
-                            buy_zone_skip_reasons=buy_zone_skip_reasons)
+                            buy_zone_skip_reasons=buy_zone_skip_reasons,
+                            chase_first_target=chase_first_target)
                 consecutive_cycle_failures = 0
             except TrialHalted:
                 raise
