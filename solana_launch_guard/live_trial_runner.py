@@ -418,9 +418,27 @@ async def execute_live_exit(
     ledger.log(agent=agent, mint=mint, state="APPROVED",
                reason=f"{decision}: guarded owned-position exit of {approval.approved_usd:.2f} USD")
     balance = await rpc.token_balance(wallet, mint)
+    tracked = next((p for p in ledger.positions(agent) if p["mint"] == mint), None)
+    if tracked and balance.raw_amount < tracked["quantity_raw"]:
+        # A wallet balance below what the ledger tracks - including all the
+        # way to zero - is what an operator selling manually outside the
+        # trial looks like (observed live: the wallet held nothing left to
+        # exit right after the operator confirmed a manual sell). There's no
+        # proceeds data for a sale this ledger didn't execute, so nothing to
+        # record beyond bringing the tracked position back in line with
+        # on-chain reality - routine, not an emergency, so it doesn't halt.
+        # An *increase* above the tracked amount has no such explanation and
+        # still halts below.
+        ledger.reconcile_external_reduction(
+            agent=agent, mint=mint, wallet_quantity_raw=balance.raw_amount,
+            wallet_decimals=balance.decimals,
+        )
+        ledger.log(agent=agent, mint=mint, state="POSITION_RECONCILED",
+                   reason=f"wallet balance {balance.raw_amount} is below the tracked "
+                          f"{tracked['quantity_raw']}; treating as a sell outside the trial")
+        raise ValueError("position reduced or closed outside the trial; nothing left to exit here")
     if balance.raw_amount <= 0:
         raise TrialHalted("configured wallet has no tokens to exit")
-    tracked = next((p for p in ledger.positions(agent) if p["mint"] == mint), None)
     if tracked and (balance.raw_amount != tracked["quantity_raw"] or balance.decimals != tracked["decimals"]):
         raise TrialHalted("agent position and on-chain balance differ; manual reconciliation required")
     plan = PortfolioSignalExitPlanner(take_partial_fraction=fraction,

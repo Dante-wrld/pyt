@@ -313,6 +313,39 @@ class LiveTrialLedger:
             raise ValueError("position not found")
         return row
 
+    def reconcile_external_reduction(self, *, agent: str, mint: str,
+                                     wallet_quantity_raw: int, wallet_decimals: int) -> None:
+        """The wallet holds less of this mint than the ledger tracks (or none
+        at all) - typically an operator selling manually outside the trial,
+        same as observed live. No sell was executed on this ledger's own
+        behalf, so there's no proceeds/realized P&L to record; this only
+        brings the tracked position back in line with on-chain reality
+        (or drops it, if nothing remains) so the trial can keep running
+        instead of halting over someone else's trade."""
+        if wallet_quantity_raw < 0:
+            raise ValueError("wallet quantity cannot be negative")
+        self._begin()
+        try:
+            row = self.db.execute(
+                "SELECT quantity_raw FROM positions WHERE agent=? AND mint=?", (agent, mint)
+            ).fetchone()
+            if row is None:
+                raise ValueError("position not found")
+            if wallet_quantity_raw >= row[0]:
+                raise ValueError("reconciliation requires a genuine reduction in wallet balance")
+            if wallet_quantity_raw == 0:
+                self.db.execute("DELETE FROM positions WHERE agent=? AND mint=?", (agent, mint))
+            else:
+                self.db.execute(
+                    "UPDATE positions SET quantity_raw=?,decimals=?,updated_at=? "
+                    "WHERE agent=? AND mint=?",
+                    (wallet_quantity_raw, wallet_decimals, time.time(), agent, mint),
+                )
+            self.db.commit()
+        except BaseException:
+            self.db.rollback()
+            raise
+
     def confirm_sell(self, *, intent: str, signature: str, quantity_raw: int,
                      proceeds_cents: int, verified_on_chain: bool) -> None:
         """Credit proceeds only after a matching on-chain token and USDC delta."""

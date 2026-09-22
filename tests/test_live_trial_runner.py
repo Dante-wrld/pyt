@@ -450,6 +450,88 @@ def test_a_restart_at_the_same_ledger_path_can_still_buy_a_mint_the_last_session
     second.close()
 
 
+def _confirmed_position(book, *, agent="hunter-v1", mint=MINT, quantity_raw=12_290_598_152):
+    book.reserve_buy(intent=f"{agent}:buy", agent=agent, mint=mint,
+                     requested_cents=500, approved_cents=500)
+    book.transition(f"{agent}:buy", "SUBMITTED", signature="buy-sig")
+    book.confirm_buy(intent=f"{agent}:buy", signature="buy-sig", executed_cents=500,
+                     quantity_raw=quantity_raw, decimals=6, entry_price=0.0004068,
+                     entry_liquidity_usd=56528.68, verified_on_chain=True)
+
+
+def test_wallet_balance_dropping_to_zero_reconciles_instead_of_halting(tmp_path, monkeypatch):
+    """The operator selling a position manually - exactly what happened live
+    with CATEWALK - must not halt the whole trial; the ledger should just
+    recognize nothing is left to exit and move on."""
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    book = LiveTrialLedger(tmp_path / "trial.sqlite")
+    book.start()
+    _confirmed_position(book)
+
+    class Rpc:
+        async def token_balance(self, owner, mint):
+            return SimpleNamespace(raw_amount=0, decimals=6)
+
+    with pytest.raises(ValueError, match="outside the trial"):
+        asyncio.run(execute_live_exit(
+            ledger=book, agent="hunter-v1", mint=MINT, symbol="TEST", decision="SELL",
+            position_value_usd=12, quote_age_seconds=2, liquidity_usd=60_000, fraction=1,
+            rpc=Rpc(), seller=SimpleNamespace(max_price_impact_pct=3, max_slippage_bps=300),
+            store=None, wallet="synthetic-owner",
+            current_exit_allowed=lambda: True,
+        ))
+    assert not any(p["mint"] == MINT for p in book.positions("hunter-v1"))
+    book.close()
+
+
+def test_wallet_balance_partially_reduced_reconciles_the_remainder_instead_of_halting(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    book = LiveTrialLedger(tmp_path / "trial.sqlite")
+    book.start()
+    _confirmed_position(book, quantity_raw=10_000_000)
+
+    class Rpc:
+        async def token_balance(self, owner, mint):
+            return SimpleNamespace(raw_amount=4_000_000, decimals=6)
+
+    with pytest.raises(ValueError, match="outside the trial"):
+        asyncio.run(execute_live_exit(
+            ledger=book, agent="hunter-v1", mint=MINT, symbol="TEST", decision="SELL",
+            position_value_usd=12, quote_age_seconds=2, liquidity_usd=60_000, fraction=1,
+            rpc=Rpc(), seller=SimpleNamespace(max_price_impact_pct=3, max_slippage_bps=300),
+            store=None, wallet="synthetic-owner",
+            current_exit_allowed=lambda: True,
+        ))
+    remaining = next(p for p in book.positions("hunter-v1") if p["mint"] == MINT)
+    assert remaining["quantity_raw"] == 4_000_000
+    book.close()
+
+
+def test_wallet_balance_higher_than_tracked_still_halts(tmp_path, monkeypatch):
+    """An *increase* over what the ledger tracks has no manual-sell
+    explanation and stays a genuine halt for manual reconciliation."""
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    book = LiveTrialLedger(tmp_path / "trial.sqlite")
+    book.start()
+    _confirmed_position(book, quantity_raw=10_000_000)
+
+    class Rpc:
+        async def token_balance(self, owner, mint):
+            return SimpleNamespace(raw_amount=20_000_000, decimals=6)
+
+    with pytest.raises(TrialHalted, match="balance differ"):
+        asyncio.run(execute_live_exit(
+            ledger=book, agent="hunter-v1", mint=MINT, symbol="TEST", decision="SELL",
+            position_value_usd=12, quote_age_seconds=2, liquidity_usd=60_000, fraction=1,
+            rpc=Rpc(), seller=SimpleNamespace(max_price_impact_pct=3, max_slippage_bps=300),
+            store=None, wallet="synthetic-owner",
+            current_exit_allowed=lambda: True,
+        ))
+    remaining = next(p for p in book.positions("hunter-v1") if p["mint"] == MINT)
+    assert remaining["quantity_raw"] == 10_000_000
+    book.close()
+
+
 def test_portfolio_owned_exit_can_exceed_five_dollars_without_bypassing_guards(tmp_path, monkeypatch):
     monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
     book = LiveTrialLedger(tmp_path / "trial.sqlite")
