@@ -24,6 +24,13 @@ from dataclasses import replace
 
 SOLANA_ADDRESS = re.compile(r"[1-9A-HJ-NP-Za-km-z]{32,44}\Z")
 
+# Even an emergency liquidation (wider slippage/impact ceiling, no model
+# gate) must refuse a quote implying an implausible loss versus the
+# position's own marked value - that's the signature of a broken quote or
+# a stale/wrong oracle price, not a real market. This catches that case
+# regardless of which ceiling let the quote through in the first place.
+EMERGENCY_MIN_PROCEEDS_FRACTION = 0.25
+
 
 @dataclass(frozen=True)
 class LiveEntryDecision:
@@ -513,6 +520,14 @@ async def execute_live_exit(
     floor_raw = math.ceil((0.01 if is_full_liquidation else max(2.0, minimum_sell_usd)) * 1_000_000)
     if prepared.minimum_output_raw < floor_raw:
         raise TrialHalted("EXIT BLOCKED: minimum quoted proceeds are below the configured sell floor")
+    catastrophic_floor_raw = math.ceil(
+        position_value_usd * fraction * EMERGENCY_MIN_PROCEEDS_FRACTION * 1_000_000
+    )
+    if prepared.minimum_output_raw < catastrophic_floor_raw:
+        raise TrialHalted(
+            "EXIT BLOCKED: quoted proceeds imply an implausible loss versus "
+            "the marked position value; refusing as a likely pricing anomaly"
+        )
     if (prepared.quoted_price_impact_pct is None
         or abs(prepared.quoted_price_impact_pct) > max_price_impact_pct
         or prepared.quoted_slippage_bps is None

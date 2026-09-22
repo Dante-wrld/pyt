@@ -5,12 +5,15 @@ from types import SimpleNamespace
 import pytest
 
 from solana_launch_guard.live_trial import (
+    EMERGENCY_BLOCK_STREAK,
+    EMERGENCY_STOP_LOSS_PCT,
     EXIT_STUCK_ALERT_STREAK,
     BoundedTrialModel,
     _eligible_exit,
     _guarded_entry,
     _guarded_exit,
     _sell_choice,
+    _should_escalate_to_emergency,
     _track_exit_block_streak,
     require_exclusive_trial_flags,
 )
@@ -50,6 +53,34 @@ def test_exit_choice_requires_matched_signal_mint_confidence_and_amount():
     assert _sell_choice(partial, "mint", 12, "TAKE_PARTIAL") == ("TAKE_PARTIAL", 1 / 3)
     assert _sell_choice(partial, "mint", 12, "TAKE_PARTIAL", .25) is None
     assert _sell_choice(partial, "mint", 12, "TAKE_PARTIAL", .5) == ("TAKE_PARTIAL", 1 / 3)
+
+
+def test_emergency_escalation_requires_a_hard_stop_loss_plus_a_prior_block():
+    """A stop-loss breach alone (first attempt, no prior block) stays on the
+    normal path - the immediate fresh-quote retry gets a chance first."""
+    assert not _should_escalate_to_emergency(pnl_pct=-25, block_streak=0)
+    assert _should_escalate_to_emergency(pnl_pct=-EMERGENCY_STOP_LOSS_PCT - 1, block_streak=1)
+
+
+def test_emergency_escalation_does_not_trigger_for_a_profitable_position():
+    """A winning position waiting for a better fill has little to lose by
+    waiting, so weaker triggers (block streak alone) must not escalate it -
+    only a real stop-loss breach or a liquidity collapse can."""
+    assert not _should_escalate_to_emergency(pnl_pct=40, block_streak=10)
+    assert not _should_escalate_to_emergency(pnl_pct=None, block_streak=10)
+
+
+def test_emergency_escalation_triggers_on_repeated_blocks_while_underwater():
+    assert not _should_escalate_to_emergency(pnl_pct=-1, block_streak=EMERGENCY_BLOCK_STREAK - 1)
+    assert _should_escalate_to_emergency(pnl_pct=-1, block_streak=EMERGENCY_BLOCK_STREAK)
+    assert _should_escalate_to_emergency(pnl_pct=0, block_streak=EMERGENCY_BLOCK_STREAK)
+
+
+def test_emergency_escalation_liquidity_collapse_overrides_everything():
+    """A genuine liquidity collapse (hunter-v1's own deterministic
+    assess_exit signal) forces emergency handling even for a profitable,
+    never-blocked position - it threatens a winning position too."""
+    assert _should_escalate_to_emergency(pnl_pct=50, block_streak=0, liquidity_collapse=True)
 
 
 def test_full_liquidation_bypasses_the_two_dollar_floor_but_partial_sells_do_not():

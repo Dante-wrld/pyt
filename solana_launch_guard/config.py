@@ -189,6 +189,14 @@ class Settings:
     auto_sell_second_stage_fraction: float = 0.5
     auto_sell_max_price_impact_pct: float = 5.0
     auto_sell_max_slippage_bps: int = 500
+    # A deliberately wider ceiling used only for a deterministic emergency
+    # liquidation (hard stop-loss breach, liquidity collapse, or repeated
+    # normal-ceiling exit failures on a deteriorating position) - normal
+    # exits optimize execution quality, emergency exits optimize the
+    # probability of getting out at all. Still bounded, not unlimited:
+    # execute_live_exit's catastrophic-proceeds floor applies regardless.
+    emergency_sell_max_price_impact_pct: float = 35.0
+    emergency_sell_max_slippage_bps: int = 4000
     auto_sell_adaptive_chunks: bool = False
     auto_sell_min_chunk_fraction: float = 0.01
     auto_sell_max_chunk_attempts: int = 8
@@ -414,6 +422,12 @@ class Settings:
             auto_sell_max_slippage_bps=_int(
                 "AUTO_SELL_MAX_SLIPPAGE_BPS", 500
             ),
+            emergency_sell_max_price_impact_pct=_float(
+                "EMERGENCY_SELL_MAX_PRICE_IMPACT_PCT", 35.0
+            ),
+            emergency_sell_max_slippage_bps=_int(
+                "EMERGENCY_SELL_MAX_SLIPPAGE_BPS", 4000
+            ),
             auto_sell_adaptive_chunks=_bool(
                 "AUTO_SELL_ADAPTIVE_CHUNKS", False
             ),
@@ -628,6 +642,16 @@ class Settings:
         if not 1 <= self.auto_sell_max_slippage_bps <= 2_000:
             raise ValueError(
                 "AUTO_SELL_MAX_SLIPPAGE_BPS must be from 1 through 2000"
+            )
+        if not self.auto_sell_max_price_impact_pct < self.emergency_sell_max_price_impact_pct <= 90:
+            raise ValueError(
+                "EMERGENCY_SELL_MAX_PRICE_IMPACT_PCT must exceed the normal "
+                "ceiling and be at most 90"
+            )
+        if not self.auto_sell_max_slippage_bps < self.emergency_sell_max_slippage_bps <= 9_000:
+            raise ValueError(
+                "EMERGENCY_SELL_MAX_SLIPPAGE_BPS must exceed the normal "
+                "ceiling and be from 1 through 9000"
             )
         if not 0 < self.auto_sell_min_chunk_fraction <= 0.25:
             raise ValueError(

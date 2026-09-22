@@ -699,6 +699,40 @@ def test_full_liquidation_of_a_crashed_position_clears_the_two_dollar_floor(tmp_
     book.close()
 
 
+def test_catastrophic_floor_rejects_an_implausible_quote_even_in_emergency_mode(tmp_path, monkeypatch):
+    """A quote implying an 80%+ haircut versus the position's own marked
+    value is the signature of a broken quote or a stale oracle price, not
+    a real market - the wide emergency slippage/impact ceiling must not
+    let it through. Position marked at $10; quote offers only $1 (10% of
+    value, below the 25% catastrophic floor)."""
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    book = LiveTrialLedger(tmp_path / "trial.sqlite")
+    book.start()
+    wallet = "synthetic-owner"
+
+    class Rpc:
+        async def token_balance(self, owner, mint):
+            return SimpleNamespace(raw_amount=100_000_000, decimals=6)
+
+    class Seller:
+        max_price_impact_pct = 35
+        max_slippage_bps = 4000
+        async def preflight(self, plan, rpc):
+            return SimpleNamespace(prepared=SimpleNamespace(input_amount_raw=plan.amount_raw,
+                minimum_output_raw=1_000_000, expected_output_raw=1_000_000,
+                quoted_price_impact_pct=-5.0, quoted_slippage_bps=200))
+
+    with pytest.raises(TrialHalted, match="implausible loss"):
+        asyncio.run(execute_live_exit(
+            ledger=book, agent="portfolio-v1", mint=MINT, symbol="TEST",
+            decision="SELL", position_value_usd=10, quote_age_seconds=2,
+            liquidity_usd=60_000, fraction=1, rpc=Rpc(), seller=Seller(),
+            store=None, wallet=wallet, current_exit_allowed=lambda: True,
+            max_price_impact_pct=35, max_slippage_bps=4000,
+        ))
+    book.close()
+
+
 def test_partial_sell_of_a_crashed_position_still_requires_the_two_dollar_floor(tmp_path, monkeypatch):
     """Only a full liquidation gets the lowered floor - a discretionary
     partial sell of a crashed position has no such justification and

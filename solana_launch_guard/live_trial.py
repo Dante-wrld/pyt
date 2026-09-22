@@ -37,6 +37,29 @@ MAX_MODEL_REQUESTS = 100
 # that's a relabeling, not a change of mind, and must not block the exit.
 SELL_WORTHY_DECISIONS = ("EXIT WARNING", "TAKE PARTIAL", "PROTECT PROFIT")
 
+# Deterministic emergency-liquidation escalation. Normal exits optimize
+# execution quality (tight slippage/impact ceiling, model-approved sizing);
+# an emergency exit optimizes the probability of getting out at all, so it
+# skips the model round trip entirely and sells the full remaining position
+# at a much wider (but still bounded - see execute_live_exit's catastrophic
+# floor) ceiling. A position still in profit does not escalate on the
+# weaker triggers (a blocked normal attempt, or repeated failures) - only a
+# real stop-loss breach or a liquidity collapse can force it, since a
+# winning position waiting briefly for a better fill has little to lose.
+EMERGENCY_STOP_LOSS_PCT = 20
+EMERGENCY_BLOCK_STREAK = 2
+
+
+def _should_escalate_to_emergency(*, pnl_pct: float | None, block_streak: int,
+                                  liquidity_collapse: bool = False) -> bool:
+    if liquidity_collapse:
+        return True
+    if pnl_pct is None:
+        return False
+    if pnl_pct <= -EMERGENCY_STOP_LOSS_PCT and block_streak >= 1:
+        return True
+    return pnl_pct <= 0 and block_streak >= EMERGENCY_BLOCK_STREAK
+
 
 class BoundedTrialModel:
     """Persist a finite model-request cap before spending any API credits."""
@@ -284,6 +307,9 @@ async def cycle(*, ledger: LiveTrialLedger, settings: Settings, rpc: SolanaRpc,
     seller = SolanaAutoSeller(client=client, signer=signer,
                               max_price_impact_pct=min(8, settings.auto_sell_max_price_impact_pct),
                               max_slippage_bps=min(1500, settings.auto_sell_max_slippage_bps))
+    emergency_seller = SolanaAutoSeller(client=client, signer=signer,
+                                        max_price_impact_pct=settings.emergency_sell_max_price_impact_pct,
+                                        max_slippage_bps=settings.emergency_sell_max_slippage_bps)
     portfolio = _read_portfolio()
     if _snapshot_is_fresh(portfolio):
         for row in portfolio.get("signals", []):
@@ -307,26 +333,50 @@ async def cycle(*, ledger: LiveTrialLedger, settings: Settings, rpc: SolanaRpc,
             value_floor = 0.01 if signal == "EXIT WARNING" else 2
             if not math.isfinite(value) or value < value_floor or not math.isfinite(liquidity) or liquidity <= 0:
                 continue
-            raw = model.propose(role=AgentRole.PORTFOLIO_MANAGER,
-                context={"mode": "live_trial", "owned_position": row,
-                         "constraint": "Decide only a full SELL for EXIT WARNING or a TAKE_PARTIAL for TAKE PARTIAL / PROTECT PROFIT; HOLD is permitted. Never buy."})
-            ledger.log(agent="portfolio-v1", mint=mint, state="PROPOSAL", reason=str(raw.get("thesis") or "HOLD"))
-            permitted_fraction = (settings.auto_sell_take_partial_fraction if signal == "TAKE PARTIAL"
-                                  else settings.auto_sell_protect_profit_fraction)
-            chosen = _sell_choice(raw, mint, value, signal, permitted_fraction)
-            if chosen is None:
-                continue
+            try:
+                pnl_pct = float(row["pnl_pct"]) if row.get("pnl_pct") is not None else None
+            except (TypeError, ValueError):
+                pnl_pct = None
+            emergency = _should_escalate_to_emergency(
+                pnl_pct=pnl_pct, block_streak=exit_block_streaks.get(mint, 0),
+            )
+            if emergency:
+                # Deterministic: no model round trip, no confidence gate -
+                # the risk engine has final authority once a capital-
+                # preservation condition is crossed. Always a full exit.
+                thesis = (f"deterministic emergency escalation: pnl {pnl_pct:.1f}% "
+                          f"block streak {exit_block_streaks.get(mint, 0)}" if pnl_pct is not None
+                          else "deterministic emergency escalation")
+                ledger.log(agent="portfolio-v1", mint=mint, state="EMERGENCY_ESCALATION", reason=thesis)
+                chosen = ("SELL", 1.0)
+                active_seller = emergency_seller
+                active_max_impact = settings.emergency_sell_max_price_impact_pct
+                active_max_slippage = settings.emergency_sell_max_slippage_bps
+            else:
+                raw = model.propose(role=AgentRole.PORTFOLIO_MANAGER,
+                    context={"mode": "live_trial", "owned_position": row,
+                             "constraint": "Decide only a full SELL for EXIT WARNING or a TAKE_PARTIAL for TAKE PARTIAL / PROTECT PROFIT; HOLD is permitted. Never buy."})
+                thesis = str(raw.get("thesis") or "HOLD")
+                ledger.log(agent="portfolio-v1", mint=mint, state="PROPOSAL", reason=thesis)
+                permitted_fraction = (settings.auto_sell_take_partial_fraction if signal == "TAKE PARTIAL"
+                                      else settings.auto_sell_protect_profit_fraction)
+                chosen = _sell_choice(raw, mint, value, signal, permitted_fraction)
+                if chosen is None:
+                    continue
+                active_seller = seller
+                active_max_impact = min(8, settings.auto_sell_max_price_impact_pct)
+                active_max_slippage = min(1500, settings.auto_sell_max_slippage_bps)
             owner = next((p["agent"] for p in ledger.positions() if p["mint"] == mint), "portfolio-v1")
             result = await _guarded_exit(
                 ledger=ledger, agent=owner, mint=mint, requested_usd=value * chosen[1],
                 symbol=str(row.get("symbol") or mint[:8]),
                 decision=chosen[0], fraction=chosen[1],
                 position_value_usd=value, quote_age_seconds=time.time() - float(portfolio["generated_at"]),
-                liquidity_usd=liquidity, rpc=rpc, seller=seller, store=store, wallet=wallet,
+                liquidity_usd=liquidity, rpc=rpc, seller=active_seller, store=store, wallet=wallet,
                 minimum_sell_usd=max(settings.portfolio_min_sell_value_usd,
                                      settings.auto_sell_min_value_usd),
-                max_price_impact_pct=min(8, settings.auto_sell_max_price_impact_pct),
-                max_slippage_bps=min(1500, settings.auto_sell_max_slippage_bps),
+                max_price_impact_pct=active_max_impact,
+                max_slippage_bps=active_max_slippage,
                 current_exit_allowed=lambda mint=mint: _eligible_exit(_read_portfolio(), mint),
                 current_decision=lambda mint=mint: _signal_decision(_read_portfolio(), mint),
             )
@@ -337,7 +387,7 @@ async def cycle(*, ledger: LiveTrialLedger, settings: Settings, rpc: SolanaRpc,
             if result is None:
                 continue
             await _notify(settings, title=f"Launch Guard {chosen[0]}",
-                          message=f"{owner}: {mint} chain-confirmed; {result['proceeds_usdc_raw'] / 1_000_000:.2f} USDC; {str(raw.get('thesis') or signal)[:100]}")
+                          message=f"{owner}: {mint} chain-confirmed; {result['proceeds_usdc_raw'] / 1_000_000:.2f} USDC; {thesis[:100]}")
             # Do not risk another order from a snapshot made before this sale.
             return
     unpriced_position = False
@@ -365,12 +415,11 @@ async def cycle(*, ledger: LiveTrialLedger, settings: Settings, rpc: SolanaRpc,
         if review["state"] not in {"EXIT", "EMERGENCY_EXIT", "TAKE_PARTIAL"}:
             continue
         current_value = quote.price_usd * marked["quantity_raw"] / 10**marked["decimals"]
-        raw = model.propose(role=AgentRole.PORTFOLIO_MANAGER,
-            context={"mode": "live_trial", "owned_position": marked,
-                     "fresh_quote": market, "reversal_review": review,
-                     "constraint": "Choose SELL for EXIT/EMERGENCY_EXIT or TAKE_PARTIAL for TAKE_PARTIAL, or HOLD. No buys."})
+        gain_pct = ((quote.price_usd / marked["entry_price"] - 1) * 100
+                   if marked["entry_price"] > 0 else None)
         stage_key = ""
         partial_limit = 1.0
+        emergency = False
         if review["state"] == "TAKE_PARTIAL":
             if not marked["principal_recovered"]:
                 stage_key = "PRINCIPAL"
@@ -380,9 +429,29 @@ async def cycle(*, ledger: LiveTrialLedger, settings: Settings, rpc: SolanaRpc,
                 partial_limit = ShadowRecoveryPolicy.from_env().second_stage_fraction
             else:
                 continue
-        chosen = _sell_choice(raw, position["mint"], current_value, review["state"], partial_limit)
-        if chosen is None:
-            continue
+        else:
+            emergency = _should_escalate_to_emergency(
+                pnl_pct=gain_pct, block_streak=exit_block_streaks.get(position["mint"], 0),
+                liquidity_collapse=(review["state"] == "EMERGENCY_EXIT"),
+            )
+        if emergency:
+            ledger.log(agent=position["agent"], mint=position["mint"],
+                       state="EMERGENCY_ESCALATION", reason="; ".join(review["reasons"]))
+            chosen = ("SELL", 1.0)
+            active_seller = emergency_seller
+            active_max_impact = settings.emergency_sell_max_price_impact_pct
+            active_max_slippage = settings.emergency_sell_max_slippage_bps
+        else:
+            raw = model.propose(role=AgentRole.PORTFOLIO_MANAGER,
+                context={"mode": "live_trial", "owned_position": marked,
+                         "fresh_quote": market, "reversal_review": review,
+                         "constraint": "Choose SELL for EXIT/EMERGENCY_EXIT or TAKE_PARTIAL for TAKE_PARTIAL, or HOLD. No buys."})
+            chosen = _sell_choice(raw, position["mint"], current_value, review["state"], partial_limit)
+            if chosen is None:
+                continue
+            active_seller = seller
+            active_max_impact = min(8, settings.auto_sell_max_price_impact_pct)
+            active_max_slippage = min(1500, settings.auto_sell_max_slippage_bps)
         def fresh_exit() -> bool:
             # Sells need a new oracle quote in cycle; flag and ledger enforce
             # stop/deadline, while the seller creates another fresh market quote.
@@ -393,12 +462,12 @@ async def cycle(*, ledger: LiveTrialLedger, settings: Settings, rpc: SolanaRpc,
             stage_key=stage_key,
             symbol=quote.symbol, decision=chosen[0], fraction=chosen[1],
             position_value_usd=current_value, quote_age_seconds=time.time() - marked["updated_at"],
-            liquidity_usd=quote.liquidity_usd, rpc=rpc, seller=seller, store=store,
+            liquidity_usd=quote.liquidity_usd, rpc=rpc, seller=active_seller, store=store,
             wallet=wallet, current_exit_allowed=fresh_exit,
             minimum_sell_usd=max(settings.portfolio_min_sell_value_usd,
                                  settings.auto_sell_min_value_usd),
-            max_price_impact_pct=min(8, settings.auto_sell_max_price_impact_pct),
-            max_slippage_bps=min(1500, settings.auto_sell_max_slippage_bps),
+            max_price_impact_pct=active_max_impact,
+            max_slippage_bps=active_max_slippage,
         )
         await _track_exit_block_streak(
             settings, exit_block_streaks, owner=position["agent"],
