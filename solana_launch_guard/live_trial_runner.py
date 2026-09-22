@@ -365,8 +365,8 @@ async def execute_live_exit(
     current_exit_allowed: Callable[[], bool],
     current_decision: Callable[[], str | None] | None = None,
     minimum_sell_usd: float = 2.0,
-    max_price_impact_pct: float = 5.0,
-    max_slippage_bps: int = 500,
+    max_price_impact_pct: float = 8.0,
+    max_slippage_bps: int = 1500,
     stage_key: str = "",
 ) -> dict:
     """One owned-token exit; new-buy cap is inapplicable to existing holdings."""

@@ -265,8 +265,8 @@ async def cycle(*, ledger: LiveTrialLedger, settings: Settings, rpc: SolanaRpc,
                             max_price_impact_pct=min(9, settings.auto_buy_max_price_impact_pct),
                             max_slippage_bps=min(1700, settings.auto_buy_max_slippage_bps))
     seller = SolanaAutoSeller(client=client, signer=signer,
-                              max_price_impact_pct=min(5, settings.auto_sell_max_price_impact_pct),
-                              max_slippage_bps=min(500, settings.auto_sell_max_slippage_bps))
+                              max_price_impact_pct=min(8, settings.auto_sell_max_price_impact_pct),
+                              max_slippage_bps=min(1500, settings.auto_sell_max_slippage_bps))
     portfolio = _read_portfolio()
     if _snapshot_is_fresh(portfolio):
         for row in portfolio.get("signals", []):
@@ -301,8 +301,8 @@ async def cycle(*, ledger: LiveTrialLedger, settings: Settings, rpc: SolanaRpc,
                 liquidity_usd=liquidity, rpc=rpc, seller=seller, store=store, wallet=wallet,
                 minimum_sell_usd=max(settings.portfolio_min_sell_value_usd,
                                      settings.auto_sell_min_value_usd),
-                max_price_impact_pct=min(5, settings.auto_sell_max_price_impact_pct),
-                max_slippage_bps=min(500, settings.auto_sell_max_slippage_bps),
+                max_price_impact_pct=min(8, settings.auto_sell_max_price_impact_pct),
+                max_slippage_bps=min(1500, settings.auto_sell_max_slippage_bps),
                 current_exit_allowed=lambda mint=mint: _eligible_exit(_read_portfolio(), mint),
                 current_decision=lambda mint=mint: _signal_decision(_read_portfolio(), mint),
             )
@@ -373,8 +373,8 @@ async def cycle(*, ledger: LiveTrialLedger, settings: Settings, rpc: SolanaRpc,
             wallet=wallet, current_exit_allowed=fresh_exit,
             minimum_sell_usd=max(settings.portfolio_min_sell_value_usd,
                                  settings.auto_sell_min_value_usd),
-            max_price_impact_pct=min(5, settings.auto_sell_max_price_impact_pct),
-            max_slippage_bps=min(500, settings.auto_sell_max_slippage_bps),
+            max_price_impact_pct=min(8, settings.auto_sell_max_price_impact_pct),
+            max_slippage_bps=min(1500, settings.auto_sell_max_slippage_bps),
         )
         await _track_exit_block_streak(
             settings, exit_block_streaks, owner=position["agent"],
