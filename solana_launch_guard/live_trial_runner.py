@@ -31,6 +31,44 @@ SOLANA_ADDRESS = re.compile(r"[1-9A-HJ-NP-Za-km-z]{32,44}\Z")
 # regardless of which ceiling let the quote through in the first place.
 EMERGENCY_MIN_PROCEEDS_FRACTION = 0.25
 
+# A mint that has already lost money on this many consecutive round trips
+# this session gets refused a fresh buy outright, rather than trusting the
+# model to notice its own trade history and decline (observed live: the
+# same mint was bought and sold repeatedly, losing money each time, with
+# every fresh evaluation starting from a blank slate). One loss can be a
+# genuinely bad entry on an otherwise fine setup; two in a row on the same
+# mint is a real pattern worth refusing to repeat a third time.
+MINT_LOSS_STREAK_BLOCK = 2
+
+
+def _mint_round_trip_history(ledger: LiveTrialLedger, mint: str) -> dict[str, Any]:
+    """Realized P&L (cents) for every completed sell of this mint this
+    session, oldest first - used both to give the model real trade history
+    instead of evaluating each attempt from a blank slate, and to
+    deterministically block a mint that has already repeatedly lost money.
+    Not scoped to one agent: a hunter-v1-bought position's sell is
+    attributed to whichever agent owns the position, so mint-level history
+    naturally covers the whole round trip regardless of which decision
+    path triggered the exit.
+    """
+    rows = ledger.db.execute(
+        "SELECT realized_cents FROM orders WHERE mint=? AND side='SELL' "
+        "AND state='CONFIRMED' AND realized_cents IS NOT NULL ORDER BY created_at",
+        (mint,),
+    ).fetchall()
+    realized = [row[0] for row in rows]
+    streak = 0
+    for cents in reversed(realized):
+        if cents < 0:
+            streak += 1
+        else:
+            break
+    return {
+        "round_trips": len(realized),
+        "total_realized_usd": round(sum(realized) / 100, 2),
+        "consecutive_losses": streak,
+    }
+
 
 @dataclass(frozen=True)
 class LiveEntryDecision:
@@ -151,6 +189,13 @@ def decide_hunter_entry(
         return None
     candidate = ready[0]
     mint = str(candidate.get("mint") or "")
+    mint_history = _mint_round_trip_history(ledger, mint)
+    if mint_history["consecutive_losses"] >= MINT_LOSS_STREAK_BLOCK:
+        ledger.log(agent="hunter-v1", mint=mint, state="BLOCKED",
+                   reason=f"{mint_history['consecutive_losses']} consecutive losing round trips "
+                          f"on this mint this session (total {mint_history['total_realized_usd']:+.2f} "
+                          "USD); declining to repeat the pattern a third time")
+        return None
     # Freeze the target price the first time this mint becomes buyable, and
     # compare every later retry against that frozen value, not the live one -
     # the recommendation engine re-anchors planned_target_price to a new peak
@@ -184,7 +229,8 @@ def decide_hunter_entry(
         {"mode": "live_trial", "candidate": candidate,
          "recovery_review": review,
          "maximum_order_usd": order_cap_usd,
-         "remaining_gross_budget_usd": status["remaining_buy_cap_cents"] / 100},
+         "remaining_gross_budget_usd": status["remaining_buy_cap_cents"] / 100,
+         "mint_trade_history": mint_history},
         RiskSnapshot(mode="live", equity_usd=30,
                      open_positions=status["open_positions"],
                      daily_realized_pnl_usd=ledger.daily_realized_cents("hunter-v1", now=at) / 100,

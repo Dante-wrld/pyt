@@ -80,7 +80,14 @@ ROLE_BOUNDARIES: dict[AgentRole, str] = {
         "recovery_review instead, and propose BUY once count meets or "
         "exceeds required, regardless of the absolute number. Explain the "
         "failed confirmation when WATCH is chosen. Existing position "
-        "reviews are handled by the shadow ledger."
+        "reviews are handled by the shadow ledger. Weigh "
+        "mint_trade_history: if this exact mint already lost money on a "
+        "prior round trip this session, that is real evidence about how it "
+        "actually trades, not noise - factor it into your confidence and "
+        "thesis rather than evaluating the candidate as if it had no "
+        "history. A single prior loss does not by itself require WATCH, "
+        "but should raise the bar for how convincing the current setup "
+        "needs to be."
     ),
     AgentRole.PORTFOLIO_MANAGER: (
         "You may return HOLD, TAKE_PARTIAL, or SELL for an owned position. "

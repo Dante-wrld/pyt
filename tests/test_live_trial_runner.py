@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from solana_launch_guard.live_trial_ledger import LiveTrialLedger, TrialHalted
-from solana_launch_guard.live_trial_runner import LiveEntryDecision, _live_arbiter, can_submit, decide_hunter_entry, execute_hunter_entry, execute_live_exit
+from solana_launch_guard.live_trial_runner import LiveEntryDecision, _live_arbiter, _mint_round_trip_history, can_submit, decide_hunter_entry, execute_hunter_entry, execute_live_exit
 from solana_launch_guard.execution import USDC_MINT
 
 
@@ -245,6 +245,75 @@ def test_model_cannot_increase_capital_or_buy_other_mint(tmp_path, monkeypatch):
             raw["mint"] = "B" * 44
             return raw
     assert decide_hunter_entry(snapshot(), model=Other(), ledger=book) is None
+    book.close()
+
+
+def _seed_sell(book, *, mint=MINT, realized_cents, at):
+    """A synthetic completed sell order, as if a prior round trip on this
+    mint already closed this session - only the fields
+    _mint_round_trip_history actually reads."""
+    book.db.execute(
+        "INSERT INTO orders(intent,agent,side,mint,state,realized_cents,created_at) "
+        "VALUES(?,?,'SELL',?,'CONFIRMED',?,?)",
+        (f"seed:{mint}:{at}", "hunter-v1", mint, realized_cents, at),
+    )
+    book.db.commit()
+
+
+def test_mint_round_trip_history_computes_consecutive_loss_streak(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    book = LiveTrialLedger(tmp_path / "trial.sqlite")
+    book.start()
+    assert _mint_round_trip_history(book, MINT) == {
+        "round_trips": 0, "total_realized_usd": 0.0, "consecutive_losses": 0,
+    }
+    _seed_sell(book, realized_cents=-50, at=1)
+    _seed_sell(book, realized_cents=100, at=2)
+    _seed_sell(book, realized_cents=-30, at=3)
+    _seed_sell(book, realized_cents=-20, at=4)
+    history = _mint_round_trip_history(book, MINT)
+    assert history["round_trips"] == 4
+    assert history["total_realized_usd"] == pytest.approx(0.0)
+    # Only the trailing streak counts - the win at index 2 breaks it, even
+    # though there's an earlier loss before it.
+    assert history["consecutive_losses"] == 2
+    book.close()
+
+
+def test_decide_hunter_entry_blocks_a_mint_after_two_consecutive_losses(tmp_path, monkeypatch):
+    """A mint that has already lost money twice in a row this session gets
+    refused a fresh buy outright - the model never even gets a chance to
+    re-litigate it, mirroring how emergency-exit is deterministic rather
+    than trusting the model to notice its own trade history."""
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    book = LiveTrialLedger(tmp_path / "trial.sqlite")
+    book.start()
+    _seed_sell(book, realized_cents=-40, at=1)
+    _seed_sell(book, realized_cents=-60, at=2)
+    model = Model()
+    assert decide_hunter_entry(snapshot(), model=model, ledger=book) is None
+    assert model.calls == 0
+    book.close()
+
+
+def test_decide_hunter_entry_still_allows_a_buy_after_one_loss(tmp_path, monkeypatch):
+    """One prior loss on a mint is real evidence for the model to weigh,
+    not grounds to refuse it outright - only a repeated pattern (two in a
+    row) triggers the deterministic block."""
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    book = LiveTrialLedger(tmp_path / "trial.sqlite")
+    book.start()
+    _seed_sell(book, realized_cents=-40, at=1)
+    captured = {}
+    class Capturing(Model):
+        def propose(self, *, role, context):
+            captured.update(context)
+            return super().propose(role=role, context=context)
+    decision = decide_hunter_entry(snapshot(), model=Capturing(), ledger=book)
+    assert decision is not None
+    assert captured["mint_trade_history"] == {
+        "round_trips": 1, "total_realized_usd": -0.4, "consecutive_losses": 1,
+    }
     book.close()
 
 
