@@ -545,8 +545,21 @@ async def execute_live_exit(
     # our actual restart procedure - gets a new one, unlike path.stem, which
     # stays identical either way since the active ledger always lives at the
     # same filename.
+    #
+    # A mint can be bought, fully sold, and later re-bought and re-sold in
+    # the *same* session (observed live: hunter-v1 round-tripped the same
+    # mint twice) - without a per-position suffix, the second sell's key
+    # collides with the first, already-CONFIRMED order's primary key, and
+    # every future exit attempt for this mint permanently reads "this exit
+    # stage was already confirmed" even though the currently open position
+    # was never actually sold. tracked["opened_at"] is unique per buy, so it
+    # disambiguates different round trips on the same mint while staying
+    # constant across this position's own retries - a genuine unresolved
+    # order from *this* lifecycle (state FAILED, not CONFIRMED) still halts
+    # for manual reconciliation exactly as before, unaffected by the suffix.
     key = (f"live-trial:{ledger.path.stem}:{ledger.started_at()}:{agent}:sell:{mint}:{decision}"
-           + (f":{stage_key}" if stage_key else ""))
+           + (f":{stage_key}" if stage_key else "")
+           + (f":opened-{tracked['opened_at']}" if tracked else ""))
     existing = ledger.db.execute("SELECT state FROM orders WHERE intent=?", (key,)).fetchone()
     if existing:
         if existing[0] == "CONFIRMED":

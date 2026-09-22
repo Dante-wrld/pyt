@@ -699,6 +699,61 @@ def _confirmed_position(book, *, agent="hunter-v1", mint=MINT, quantity_raw=12_2
                      entry_liquidity_usd=56528.68, verified_on_chain=True)
 
 
+def test_a_second_sell_of_the_same_mint_after_a_full_round_trip_does_not_collide(tmp_path, monkeypatch):
+    """A mint can legitimately be bought, sold, rebought, and sold again in
+    the same session - the second sell's intent key must not collide with
+    the first, already-CONFIRMED sell's primary key (observed live: a
+    position round-tripped and its second sell was permanently blocked
+    with "this exit stage was already confirmed", leaving it stuck with
+    no way to ever exit for the rest of the session)."""
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    book = LiveTrialLedger(tmp_path / "trial.sqlite")
+    book.start()
+    # A stale prior sell claim from an earlier, already-completed round
+    # trip on this same mint, using the same base key shape a second
+    # full-position SELL would otherwise reuse.
+    stale_key = f"live-trial:{book.path.stem}:{book.started_at()}:hunter-v1:sell:{MINT}:SELL"
+    book.db.execute(
+        "INSERT INTO orders(intent,agent,side,mint,state,created_at) VALUES(?,?,'SELL',?,?,?)",
+        (stale_key, "hunter-v1", MINT, "CONFIRMED", time.time()),
+    )
+    book.db.commit()
+
+    _confirmed_position(book)
+    wallet = "synthetic-owner"
+
+    class Rpc:
+        async def token_balance(self, owner, mint):
+            return SimpleNamespace(raw_amount=12_290_598_152, decimals=6)
+        async def get_transaction(self, signature):
+            def row(index, mint, amount):
+                return {"accountIndex": index, "mint": mint, "owner": wallet,
+                        "uiTokenAmount": {"amount": str(amount)}}
+            return {"meta": {"err": None,
+                    "preTokenBalances": [row(0, MINT, 12_290_598_152)],
+                    "postTokenBalances": [row(1, USDC_MINT, 10_000_000)]}}
+
+    class Seller:
+        max_price_impact_pct = 3
+        max_slippage_bps = 300
+        async def preflight(self, plan, rpc):
+            return SimpleNamespace(prepared=SimpleNamespace(input_amount_raw=plan.amount_raw,
+                minimum_output_raw=9_000_000, expected_output_raw=10_000_000,
+                quoted_price_impact_pct=-1.0, quoted_slippage_bps=100))
+        async def execute(self, prepared):
+            return SimpleNamespace(signature="sell-signature", input_amount_raw=12_290_598_152,
+                                   output_amount_raw=10_000_000)
+
+    result = asyncio.run(execute_live_exit(
+        ledger=book, agent="hunter-v1", mint=MINT, symbol="TEST", decision="SELL",
+        position_value_usd=12, quote_age_seconds=2, liquidity_usd=60_000, fraction=1,
+        rpc=Rpc(), seller=Seller(), store=_sell_store_stub(), wallet=wallet,
+        current_exit_allowed=lambda: True,
+    ))
+    assert result["proceeds_usdc_raw"] == 10_000_000
+    book.close()
+
+
 def test_wallet_balance_dropping_to_zero_reconciles_instead_of_halting(tmp_path, monkeypatch):
     """The operator selling a position manually - exactly what happened live
     with CATEWALK - must not halt the whole trial; the ledger should just
