@@ -11,6 +11,8 @@ import sys
 import time
 from pathlib import Path
 
+from openai import APIError
+
 from .agents import AgentRole, TradeAction
 from .config import Settings, _load_dotenv
 from .core import SQLiteStore
@@ -456,7 +458,7 @@ async def supervise(*, interval_seconds: int = 30) -> dict:
                 consecutive_cycle_failures = 0
             except TrialHalted:
                 raise
-            except (ValueError, ConnectionError) as exc:
+            except (ValueError, ConnectionError, APIError) as exc:
                 ledger.log(agent="portfolio-v1", mint="", state="CYCLE_BLOCKED", reason=str(exc))
                 if ledger.unresolved():
                     raise TrialHalted("unresolved order after failed cycle; reconcile on chain") from exc
