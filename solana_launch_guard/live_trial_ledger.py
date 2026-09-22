@@ -119,6 +119,13 @@ class LiveTrialLedger:
         ).fetchall()
         return [dict(zip(("intent", "agent", "side", "mint", "state", "signature"), row)) for row in rows]
 
+    def started_at(self) -> float:
+        """A per-session value, unlike path.stem: the active ledger is always
+        recreated at the same filename after the old one is archived away, so
+        the stem alone can't tell this session apart from a previous one."""
+        row = self.db.execute("SELECT started_at FROM trial WHERE id=1").fetchone()
+        return row[0]
+
     def model_request_count(self) -> int:
         return int(self.db.execute(
             "SELECT COUNT(*) FROM decisions WHERE state='MODEL_REQUEST'"

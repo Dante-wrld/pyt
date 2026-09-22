@@ -371,6 +371,85 @@ def test_insufficient_usdc_after_reservation_still_halts_the_trial(tmp_path, mon
     book.close()
 
 
+def test_a_restart_at_the_same_ledger_path_can_still_buy_a_mint_the_last_session_aborted(tmp_path, monkeypatch):
+    """The active ledger is always recreated at the same filename once the
+    old one is archived away (that's the real restart procedure) - a mint
+    whose buy attempt was reserved and claimed in a past session, then
+    released without broadcasting, must still be buyable in a new one. This
+    is exactly what happened live: CATEWALK's signal expired post-reservation
+    in one session, and the next session's restart couldn't retry it because
+    the claim key didn't actually vary between sessions."""
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    path = tmp_path / "launch_guard_live_trial.sqlite"
+    wallet = "synthetic-owner"
+
+    class SharedMainStore:
+        """Mimics the real SQLiteStore's one-shot claim, shared across
+        sessions like the real main database actually is."""
+        connection = _no_legacy_claim()
+        def __init__(self):
+            self.claimed: set[str] = set()
+        def begin_auto_buy_execution(self, *, event_key, **kwargs):
+            if event_key in self.claimed:
+                return False
+            self.claimed.add(event_key)
+            return True
+        def complete_auto_buy_execution(self, **kwargs):
+            pass
+        def save_owned_holding(self, holding):
+            pass
+        def arm_auto_sell(self, mint, **kwargs):
+            pass
+
+    shared_store = SharedMainStore()
+
+    class Rpc:
+        async def token_balance(self, owner, mint):
+            return SimpleNamespace(raw_amount=20_000_000 if mint == USDC_MINT else 0)
+        async def mint_decimals(self, mint):
+            return 6
+
+    first = LiveTrialLedger(path)
+    first.start()
+    decision = decide_hunter_entry(snapshot(), model=Model(), ledger=first)
+    snapshot_calls = []
+    def flaky_snapshot():
+        snapshot_calls.append(1)
+        return snapshot() if len(snapshot_calls) == 1 else snapshot(confirmations=0)
+    with pytest.raises(ValueError, match="signal expired"):
+        asyncio.run(execute_hunter_entry(
+            decision, ledger=first, rpc=Rpc(), buyer=_PreflightBuyer(), store=shared_store,
+            wallet=wallet, current_snapshot=flaky_snapshot,
+        ))
+    first.close()
+    path.unlink()  # the real restart procedure archives (moves) the old file away
+
+    second = LiveTrialLedger(path)
+    second.start()
+    decision2 = decide_hunter_entry(snapshot(), model=Model(), ledger=second)
+
+    class BroadcastRpc(Rpc):
+        async def get_transaction(self, signature):
+            def row(index, mint, amount):
+                return {"accountIndex": index, "mint": mint, "owner": wallet,
+                        "uiTokenAmount": {"amount": str(amount)}}
+            return {"meta": {"err": None,
+                    "preTokenBalances": [row(0, USDC_MINT, 20_000_000)],
+                    "postTokenBalances": [row(0, USDC_MINT, 15_000_000), row(1, MINT, 100_000_000)]}}
+
+    class Buyer(_PreflightBuyer):
+        async def execute(self, prepared):
+            return SimpleNamespace(signature="public-signature", input_amount_raw=5_000_000,
+                                   output_amount_raw=100_000_000)
+
+    receipt = asyncio.run(execute_hunter_entry(
+        decision2, ledger=second, rpc=BroadcastRpc(), buyer=Buyer(), store=shared_store,
+        wallet=wallet, current_snapshot=snapshot,
+    ))
+    assert receipt["spent_cents"] == 500
+    second.close()
+
+
 def test_portfolio_owned_exit_can_exceed_five_dollars_without_bypassing_guards(tmp_path, monkeypatch):
     monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
     book = LiveTrialLedger(tmp_path / "trial.sqlite")

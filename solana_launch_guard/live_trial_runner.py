@@ -244,13 +244,17 @@ async def execute_hunter_entry(
     decimals = await rpc.mint_decimals(decision.mint)
     if not 0 <= decimals <= 18:
         raise TrialHalted("unsupported token decimals")
-    # Scoped to this ledger's own session (its filename), not just the mint:
-    # the main execution database's claim on this key is a one-shot,
-    # permanent lock (INSERT OR IGNORE on a PRIMARY KEY), so an unscoped key
-    # would mean a stopped-and-restarted trial inherits a stale claim from a
-    # session that never even used this ledger, and can never retry that
-    # mint again.
-    intent_key = f"live-trial:{ledger.path.stem}:hunter:{decision.mint}"
+    # Scoped to this ledger's own session, not just the mint: the main
+    # execution database's claim on this key is a one-shot, permanent lock
+    # (INSERT OR IGNORE on a PRIMARY KEY), so a key that doesn't vary per
+    # session would mean a stopped-and-restarted trial inherits a stale claim
+    # from a past attempt at the same mint and can never retry it again -
+    # path.stem alone doesn't do this, since the live ledger is always
+    # recreated at the same filename once the old one is archived away;
+    # started_at is the part that actually changes across a restart. This
+    # relies on the fresh on-chain wallet-balance check above (not this key)
+    # to stop an actual double-buy of a mint a past session really completed.
+    intent_key = f"live-trial:{ledger.path.stem}:{ledger.started_at()}:hunter:{decision.mint}"
     intent = BuyIntent(mint=decision.mint,
                        symbol=str(decision.candidate.get("symbol") or decision.mint[:8])[:40],
                        event_key=intent_key, amount_usdc_raw=amount_raw,
@@ -432,13 +436,16 @@ async def execute_live_exit(
     # of *this* ledger, so repeated model calls for the same mint and stage
     # cannot execute twice - but it also must not collide with a different
     # trial session: the main execution database's claim on this key is a
-    # one-shot, permanent lock (INSERT OR IGNORE on a PRIMARY KEY), so an
-    # unscoped key would mean a stopped-and-restarted trial (a fresh ledger
-    # file) inherits a stale claim from a session that never touched this
-    # ledger, and can never retry that mint again. ledger.path.stem scopes
-    # it to this session while staying identical across a restart of the
-    # same ledger file.
-    key = (f"live-trial:{ledger.path.stem}:{agent}:sell:{mint}:{decision}"
+    # one-shot, permanent lock (INSERT OR IGNORE on a PRIMARY KEY), so a key
+    # that doesn't vary per session would mean a stopped-and-restarted trial
+    # inherits a stale claim from a past attempt at the same mint/stage and
+    # can never retry it again. started_at gives both properties at once: it
+    # doesn't change if this exact ledger file is simply reopened (same trial
+    # row), but a fresh ledger created after the old one is archived away -
+    # our actual restart procedure - gets a new one, unlike path.stem, which
+    # stays identical either way since the active ledger always lives at the
+    # same filename.
+    key = (f"live-trial:{ledger.path.stem}:{ledger.started_at()}:{agent}:sell:{mint}:{decision}"
            + (f":{stage_key}" if stage_key else ""))
     existing = ledger.db.execute("SELECT state FROM orders WHERE intent=?", (key,)).fetchone()
     if existing:
