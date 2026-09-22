@@ -304,6 +304,9 @@ async def cycle(*, ledger: LiveTrialLedger, settings: Settings, rpc: SolanaRpc,
     buyer = SolanaAutoBuyer(client=client, signer=signer,
                             max_price_impact_pct=min(9, settings.auto_buy_max_price_impact_pct),
                             max_slippage_bps=min(1700, settings.auto_buy_max_slippage_bps))
+    momentum_buyer = SolanaAutoBuyer(client=client, signer=signer,
+                                     max_price_impact_pct=settings.momentum_buy_max_price_impact_pct,
+                                     max_slippage_bps=settings.momentum_buy_max_slippage_bps)
     seller = SolanaAutoSeller(client=client, signer=signer,
                               max_price_impact_pct=min(8, settings.auto_sell_max_price_impact_pct),
                               max_slippage_bps=min(1500, settings.auto_sell_max_slippage_bps))
@@ -493,8 +496,10 @@ async def cycle(*, ledger: LiveTrialLedger, settings: Settings, rpc: SolanaRpc,
                                    chase_first_target=chase_first_target,
                                    current_snapshot=_read_recommendations)
     if decision is not None:
+        active_buyer = (momentum_buyer if decision.candidate.get("decision") == "MOMENTUM BUY"
+                       else buyer)
         result = await _guarded_entry(decision, ledger=ledger, rpc=rpc,
-                                      buyer=buyer, store=store, wallet=wallet,
+                                      buyer=active_buyer, store=store, wallet=wallet,
                                       current_snapshot=_read_recommendations)
         if result is None:
             return

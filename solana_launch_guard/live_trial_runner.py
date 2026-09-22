@@ -270,7 +270,14 @@ async def execute_hunter_entry(
     if decision.agent != "hunter-v1" or not SOLANA_ADDRESS.fullmatch(decision.mint):
         raise ValueError("only a validated hunter Solana mint is eligible")
     ledger.assert_active()
-    if buyer.max_price_impact_pct > 9 or buyer.max_slippage_bps > 1700:
+    # A MOMENTUM BUY-sourced entry already cleared a stricter confirmation
+    # bar than a calmer pullback-zone entry, so it's allowed a wider (but
+    # still bounded) guard ceiling - a fast-moving token can blow past the
+    # normal 9%/1700bps limit before an approved order reaches Jupiter.
+    is_momentum_entry = decision.candidate.get("decision") == "MOMENTUM BUY"
+    guard_impact = 50 if is_momentum_entry else 9
+    guard_slippage = 5_000 if is_momentum_entry else 1700
+    if buyer.max_price_impact_pct > guard_impact or buyer.max_slippage_bps > guard_slippage:
         raise TrialHalted("live buyer exceeds guarded price impact or slippage limits")
     amount_raw = decision.approved_cents * 10_000  # 1 cent = 10,000 USDC raw units
     usdc = await rpc.token_balance(wallet, USDC_MINT)
@@ -301,10 +308,20 @@ async def execute_hunter_entry(
     reverse = await buyer.client.order(input_mint=decision.mint,
                                        output_mint=USDC_MINT,
                                        amount_raw=preflight.prepared.minimum_output_raw)
+    # This reverse-quote check verifies the token can actually be sold back
+    # right after buying (a honeypot/thin-liquidity guard), independent of
+    # the forward buy's own ceiling - its default is even stricter than the
+    # normal buy limit, so a momentum entry needs it widened too, or it
+    # would still block on this check after clearing the forward one.
+    # Reuses the buyer's own configured ceiling rather than a second
+    # hardcoded number, so the two can never drift apart.
+    reverse_policy = (CanaryPolicy(maximum_price_impact_pct=buyer.max_price_impact_pct,
+                                   maximum_slippage_bps=buyer.max_slippage_bps)
+                      if is_momentum_entry else CanaryPolicy())
     validate_exit_quote(reverse, mint=decision.mint,
                         amount_raw=preflight.prepared.minimum_output_raw,
                         usdc_mint=USDC_MINT,
-                        policy=CanaryPolicy())
+                        policy=reverse_policy)
     if not can_submit(ledger, mint=decision.mint, snapshot=current_snapshot()):
         raise TrialHalted("BUY_READY recovery expired before reservation")
     ledger.reserve_buy(intent=intent_key, agent="hunter-v1", mint=decision.mint,

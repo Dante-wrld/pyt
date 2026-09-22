@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from solana_launch_guard.live_trial_ledger import LiveTrialLedger, TrialHalted
-from solana_launch_guard.live_trial_runner import _live_arbiter, can_submit, decide_hunter_entry, execute_hunter_entry, execute_live_exit
+from solana_launch_guard.live_trial_runner import LiveEntryDecision, _live_arbiter, can_submit, decide_hunter_entry, execute_hunter_entry, execute_live_exit
 from solana_launch_guard.execution import USDC_MINT
 
 
@@ -308,6 +308,90 @@ def test_execution_reserves_before_broadcast_and_requires_chain_deltas(tmp_path,
     assert receipt["spent_cents"] == 500
     assert book.status()["agents"]["hunter-v1"]["open_positions"] == 1
     assert not book.unresolved()
+    book.close()
+
+
+def test_momentum_buy_entry_allows_a_wider_guard_ceiling(tmp_path, monkeypatch):
+    """A MOMENTUM BUY-sourced entry already cleared a stricter confirmation
+    bar than a calmer pullback-zone entry, so a wider (but still bounded)
+    price-impact/slippage ceiling is allowed through - observed live:
+    BETBOLT's approved buy was rejected at 2001 bps against the normal
+    1700 bps limit despite a clean confirmed momentum signal."""
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    book = LiveTrialLedger(tmp_path / "trial.sqlite")
+    book.start()
+    decision = LiveEntryDecision(
+        agent="hunter-v1", mint=MINT, requested_cents=500, approved_cents=500,
+        reason="test", candidate={"decision": "MOMENTUM BUY", "symbol": "TEST",
+                                  "liquidity_usd": 60_000},
+    )
+    wallet = "synthetic-owner"
+
+    class Rpc:
+        async def token_balance(self, owner, mint):
+            return SimpleNamespace(raw_amount=20_000_000 if mint == USDC_MINT else 0)
+        async def mint_decimals(self, mint):
+            return 6
+        async def get_transaction(self, signature):
+            def row(index, mint, amount):
+                return {"accountIndex": index, "mint": mint, "owner": wallet,
+                        "uiTokenAmount": {"amount": str(amount)}}
+            return {"meta": {"err": None,
+                    "preTokenBalances": [row(0, USDC_MINT, 20_000_000)],
+                    "postTokenBalances": [row(0, USDC_MINT, 15_000_000), row(1, MINT, 100_000_000)]}}
+
+    class Client:
+        async def order(self, **kwargs):
+            return {"inputMint": MINT, "outputMint": USDC_MINT,
+                    "inAmount": str(kwargs["amount_raw"]), "outAmount": "4100000",
+                    "otherAmountThreshold": "4000000", "priceImpact": "-1",
+                    "slippageBps": 2500}
+
+    class Buyer:
+        client = Client()
+        max_price_impact_pct = 20
+        max_slippage_bps = 3000
+        async def preflight(self, intent, rpc):
+            return SimpleNamespace(prepared=SimpleNamespace(input_amount_raw=intent.amount_usdc_raw,
+                minimum_output_raw=100_000_000, expected_output_raw=100_000_000))
+        async def execute(self, prepared):
+            return SimpleNamespace(signature="public-signature", input_amount_raw=5_000_000,
+                                   output_amount_raw=100_000_000)
+
+    class Store:
+        connection = _no_legacy_claim()
+        def begin_auto_buy_execution(self, **kwargs):
+            return True
+        def complete_auto_buy_execution(self, **kwargs):
+            pass
+        def save_owned_holding(self, holding):
+            pass
+        def arm_auto_sell(self, mint, **kwargs):
+            pass
+
+    receipt = asyncio.run(execute_hunter_entry(decision, ledger=book, rpc=Rpc(),
+                          buyer=Buyer(), store=Store(), wallet=wallet,
+                          current_snapshot=snapshot))
+    assert receipt["spent_cents"] == 500
+    book.close()
+
+
+def test_non_momentum_buy_entry_rejects_a_wide_guard_ceiling(tmp_path, monkeypatch):
+    """The wider ceiling is earned by the MOMENTUM BUY label specifically -
+    a buyer configured that wide for any other entry source must still
+    halt, same as before this feature existed."""
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    book = LiveTrialLedger(tmp_path / "trial.sqlite")
+    book.start()
+    decision = LiveEntryDecision(
+        agent="hunter-v1", mint=MINT, requested_cents=500, approved_cents=500,
+        reason="test", candidate={"decision": "BUY NOW", "symbol": "TEST"},
+    )
+    wide_buyer = SimpleNamespace(max_price_impact_pct=20, max_slippage_bps=3000)
+    with pytest.raises(TrialHalted, match="guarded price impact or slippage"):
+        asyncio.run(execute_hunter_entry(decision, ledger=book, rpc=None,
+                          buyer=wide_buyer, store=None, wallet="synthetic-owner",
+                          current_snapshot=snapshot))
     book.close()
 
 

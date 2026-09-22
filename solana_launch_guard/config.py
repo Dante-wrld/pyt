@@ -226,6 +226,15 @@ class Settings:
     auto_buy_reinvest_profit_pct: float = 50.0
     auto_buy_max_price_impact_pct: float = 5.0
     auto_buy_max_slippage_bps: int = 500
+    # A wider ceiling used only for a MOMENTUM BUY-sourced entry - one that
+    # already cleared the stricter momentum confirmation bar (see
+    # RecommendationBook._momentum_buy_reason), unlike a calmer pullback-
+    # zone entry. A token moving fast enough to earn that label can also
+    # move past the normal ceiling before an approved order reaches
+    # Jupiter (observed live: BETBOLT's approved buy was rejected at 2001
+    # bps against a 1700 bps normal limit) - still bounded, not unlimited.
+    momentum_buy_max_price_impact_pct: float = 20.0
+    momentum_buy_max_slippage_bps: int = 3000
     auto_rebuy_enabled: bool = False
     auto_rebuy_cooldown_seconds: float = 600.0
     auto_rebuy_max_watch_seconds: float = 86_400.0
@@ -509,6 +518,12 @@ class Settings:
             auto_buy_max_slippage_bps=_int(
                 "AUTO_BUY_MAX_SLIPPAGE_BPS", 500
             ),
+            momentum_buy_max_price_impact_pct=_float(
+                "MOMENTUM_BUY_MAX_PRICE_IMPACT_PCT", 20.0
+            ),
+            momentum_buy_max_slippage_bps=_int(
+                "MOMENTUM_BUY_MAX_SLIPPAGE_BPS", 3000
+            ),
             auto_rebuy_enabled=_bool("AUTO_REBUY_ENABLED", False),
             auto_rebuy_cooldown_seconds=_float(
                 "AUTO_REBUY_COOLDOWN_SECONDS", 600.0
@@ -711,6 +726,16 @@ class Settings:
         if not 1 <= self.auto_buy_max_slippage_bps <= 2_000:
             raise ValueError(
                 "AUTO_BUY_MAX_SLIPPAGE_BPS must be from 1 through 2000"
+            )
+        if not self.auto_buy_max_price_impact_pct < self.momentum_buy_max_price_impact_pct <= 50:
+            raise ValueError(
+                "MOMENTUM_BUY_MAX_PRICE_IMPACT_PCT must exceed the normal "
+                "buy ceiling and be at most 50"
+            )
+        if not self.auto_buy_max_slippage_bps < self.momentum_buy_max_slippage_bps <= 5_000:
+            raise ValueError(
+                "MOMENTUM_BUY_MAX_SLIPPAGE_BPS must exceed the normal buy "
+                "ceiling and be from 1 through 5000"
             )
         if not 0 <= self.auto_buy_discovery_min_score <= 100:
             raise ValueError(
