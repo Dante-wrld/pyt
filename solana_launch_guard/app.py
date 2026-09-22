@@ -223,6 +223,8 @@ class LaunchGuard(
             stop_loss_pct=settings.stop_loss_pct,
             trailing_activation_pct=settings.trailing_activation_pct,
             trailing_stop_pct=settings.trailing_stop_pct,
+            small_gain_trailing_activation_pct=settings.small_gain_trailing_activation_pct,
+            small_gain_trailing_stop_pct=settings.small_gain_trailing_stop_pct,
             momentum_exit_pct=settings.momentum_exit_pct,
             sell_pressure_ratio=settings.sell_pressure_ratio,
             liquidity_drop_pct=settings.liquidity_drop_pct,

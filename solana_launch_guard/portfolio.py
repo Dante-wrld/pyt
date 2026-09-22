@@ -61,6 +61,8 @@ class PortfolioAdvisor:
         stop_loss_pct: float = 20,
         trailing_activation_pct: float = 20,
         trailing_stop_pct: float = 12,
+        small_gain_trailing_activation_pct: float = 8,
+        small_gain_trailing_stop_pct: float = 8,
         momentum_exit_pct: float = -8,
         sell_pressure_ratio: float = 1.5,
         liquidity_drop_pct: float = 30,
@@ -71,6 +73,8 @@ class PortfolioAdvisor:
         self.stop_loss_pct = stop_loss_pct
         self.trailing_activation_pct = trailing_activation_pct
         self.trailing_stop_pct = trailing_stop_pct
+        self.small_gain_trailing_activation_pct = small_gain_trailing_activation_pct
+        self.small_gain_trailing_stop_pct = small_gain_trailing_stop_pct
         self.momentum_exit_pct = momentum_exit_pct
         self.sell_pressure_ratio = sell_pressure_ratio
         self.liquidity_drop_pct = liquidity_drop_pct
@@ -218,6 +222,29 @@ class PortfolioAdvisor:
             reason = (
                 f"price is {abs(drawdown_from_peak):.1f}% below its monitored "
                 f"peak; open gain is {pnl_pct:.1f}%"
+            )
+        elif (
+            # A gain too small to reach the trailing-activation bar above
+            # still deserves protecting once it's genuinely reversing - a
+            # token that peaks well above this bar and gives it all back
+            # before ever reaching the bigger threshold currently captures
+            # nothing (observed live: +35.5% peak round-tripped into a
+            # realized loss). Requires real reversal evidence (falling
+            # momentum or net selling), not just ordinary price noise, since
+            # the bar itself is much more sensitive than the tier above.
+            pnl_pct is not None
+            and pnl_pct >= self.small_gain_trailing_activation_pct
+            and drawdown_from_peak <= -self.small_gain_trailing_stop_pct
+            and (
+                (quote.price_change_m5_pct is not None and quote.price_change_m5_pct <= 0)
+                or quote.sells_m5 > quote.buys_m5
+            )
+        ):
+            decision = "PROTECT PROFIT"
+            reason = (
+                f"open gain {pnl_pct:.1f}% is reversing ({abs(drawdown_from_peak):.1f}% "
+                "below peak, confirmed by falling momentum or net selling); "
+                "protecting it now rather than waiting for the larger trailing-stop"
             )
         elif (
             pnl_pct is not None and pnl_pct >= self.take_partial_pct

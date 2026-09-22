@@ -118,6 +118,11 @@ class Settings:
     max_pending_candidates: int = 50
     trailing_activation_pct: float = 20.0
     trailing_stop_pct: float = 12.0
+    # A gain too small to reach trailing_activation_pct above still deserves
+    # protecting once it's genuinely reversing, rather than only capturing
+    # profit above the bigger threshold - see PortfolioAdvisor.evaluate().
+    small_gain_trailing_activation_pct: float = 8.0
+    small_gain_trailing_stop_pct: float = 8.0
     momentum_exit_pct: float = -8.0
     sell_pressure_ratio: float = 1.5
     liquidity_drop_pct: float = 30.0
@@ -325,6 +330,12 @@ class Settings:
             max_pending_candidates=_int("MAX_PENDING_CANDIDATES", 50),
             trailing_activation_pct=_float("TRAILING_ACTIVATION_PCT", 20.0),
             trailing_stop_pct=_float("TRAILING_STOP_PCT", 12.0),
+            small_gain_trailing_activation_pct=_float(
+                "SMALL_GAIN_TRAILING_ACTIVATION_PCT", 8.0
+            ),
+            small_gain_trailing_stop_pct=_float(
+                "SMALL_GAIN_TRAILING_STOP_PCT", 8.0
+            ),
             momentum_exit_pct=float(os.getenv("MOMENTUM_EXIT_PCT", "-8")),
             sell_pressure_ratio=_float("SELL_PRESSURE_RATIO", 1.5),
             liquidity_drop_pct=_float("LIQUIDITY_DROP_PCT", 30.0),
@@ -862,6 +873,13 @@ class Settings:
             raise ValueError("CORE_INTELLIGENCE_SCORE cannot be lower than moonshot")
         if not 0 < self.trailing_stop_pct < 100:
             raise ValueError("TRAILING_STOP_PCT must be between 0 and 100")
+        if not 0 < self.small_gain_trailing_activation_pct < self.trailing_activation_pct:
+            raise ValueError(
+                "SMALL_GAIN_TRAILING_ACTIVATION_PCT must be positive and "
+                "below TRAILING_ACTIVATION_PCT"
+            )
+        if not 0 < self.small_gain_trailing_stop_pct < 100:
+            raise ValueError("SMALL_GAIN_TRAILING_STOP_PCT must be between 0 and 100")
         if not 0 < self.liquidity_drop_pct < 100:
             raise ValueError("LIQUIDITY_DROP_PCT must be between 0 and 100")
         if self.sell_pressure_ratio <= 0 or self.reentry_buy_sell_ratio <= 0:

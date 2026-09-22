@@ -4016,6 +4016,67 @@ def test_portfolio_advisor_uses_cost_basis_for_partial_profit() -> None:
     assert signal.current_value_usd == pytest.approx(4.0)
 
 
+def test_portfolio_advisor_protects_a_small_gain_reversing_before_the_big_trailing_stop() -> None:
+    """A gain too small to reach the 20%/12% trailing-stop tier still
+    deserves protecting once it's genuinely reversing - otherwise a token
+    that peaks well above this bar and gives it back before ever reaching
+    the bigger threshold captures nothing (observed live: a +35.5% peak
+    round-tripped into a realized loss with no protective action taken
+    along the way)."""
+    holding = OwnedHolding(
+        chain="solana", token_address="MintSmallGain111", symbol="SMOL",
+        quantity=30_000, entry_price=0.0001, price_currency="USD",
+    )
+
+    def quote_at(price: float, *, change: float) -> MarketQuote:
+        return MarketQuote(
+            mint=holding.token_address, symbol=holding.symbol,
+            price_sol=price / 150, price_usd=price, chain="solana",
+            liquidity_usd=50_000, market_cap_usd=100_000,
+            pair_address="PairSmallGain", pair_created_at_ms=1,
+            buys_m5=10, sells_m5=15, volume_m5_usd=5_000,
+            price_change_m5_pct=change,
+        )
+
+    advisor = PortfolioAdvisor()
+    # Peak at +35% - establishes the tracked peak.
+    advisor.evaluate(holding, quote_at(0.000135, change=20))
+    # Pulled back to +10% (well below the 20% big-tier activation bar) with
+    # falling momentum and net selling - real reversal evidence.
+    signal = advisor.evaluate(holding, quote_at(0.00011, change=-3))
+
+    assert signal.pnl_pct == pytest.approx(10, abs=0.5)
+    assert signal.decision == "PROTECT PROFIT"
+    assert "reversing" in signal.reason
+
+
+def test_portfolio_advisor_does_not_protect_a_small_gain_without_reversal_evidence() -> None:
+    """A small pullback with no confirming evidence (momentum still firm,
+    no net selling) is ordinary noise, not a reversal - must not fire the
+    more sensitive small-gain tier."""
+    holding = OwnedHolding(
+        chain="solana", token_address="MintSmallGainNoise111", symbol="NOISE",
+        quantity=30_000, entry_price=0.0001, price_currency="USD",
+    )
+
+    def quote_at(price: float, *, change: float, buys: int, sells: int) -> MarketQuote:
+        return MarketQuote(
+            mint=holding.token_address, symbol=holding.symbol,
+            price_sol=price / 150, price_usd=price, chain="solana",
+            liquidity_usd=50_000, market_cap_usd=100_000,
+            pair_address="PairSmallGainNoise", pair_created_at_ms=1,
+            buys_m5=buys, sells_m5=sells, volume_m5_usd=5_000,
+            price_change_m5_pct=change,
+        )
+
+    advisor = PortfolioAdvisor()
+    advisor.evaluate(holding, quote_at(0.000135, change=20, buys=20, sells=5))
+    signal = advisor.evaluate(holding, quote_at(0.00011, change=3, buys=20, sells=5))
+
+    assert signal.pnl_pct == pytest.approx(10, abs=0.5)
+    assert signal.decision != "PROTECT PROFIT"
+
+
 def test_portfolio_advisor_keeps_raw_decision_when_value_crashes_below_sell_floor() -> None:
     """A position that crashes below the $2 sell floor still reads as HOLD
     for notifications (unchanged), but `raw_decision` must keep the true
