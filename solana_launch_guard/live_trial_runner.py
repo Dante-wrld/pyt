@@ -291,9 +291,24 @@ async def execute_hunter_entry(
             raise TrialHalted("buy intent already claimed in main execution database")
         refreshed = await rpc.token_balance(wallet, USDC_MINT)
         refreshed_token = await rpc.token_balance(wallet, decision.mint)
-        if (refreshed.raw_amount < amount_raw or refreshed_token.raw_amount > 0
-            or not can_submit(ledger, mint=decision.mint, snapshot=current_snapshot())):
-            raise TrialHalted("wallet or signal changed before buy broadcast")
+        if refreshed.raw_amount < amount_raw:
+            # Real wallet USDC came up short against a reservation the ledger
+            # already believes is good - that's a mismatch between our own
+            # accounting and on-chain reality, not routine market movement,
+            # so it stays a full-trial halt for manual reconciliation.
+            raise TrialHalted("USDC balance dropped below the reserved buy before broadcast")
+        if refreshed_token.raw_amount > 0 or not can_submit(
+            ledger, mint=decision.mint, snapshot=current_snapshot()
+        ):
+            # Either condition just means this one candidate is no longer
+            # buyable right now (someone/something else already holds it, or
+            # the market moved past the entry in the last second) - the same
+            # outcome the pre-reservation checks above treat as routine. Release
+            # the reservation so the trial keeps running instead of halting.
+            reason = ("token already held" if refreshed_token.raw_amount > 0
+                     else "BUY_READY signal expired")
+            ledger.transition(intent_key, "FAILED")
+            raise ValueError(f"{reason} before broadcast; reservation released")
         receipt = await buyer.execute(preflight.prepared)
         ledger.transition(intent_key, "SUBMITTED", signature=receipt.signature)
         ledger.log(agent="hunter-v1", mint=decision.mint, state="SUBMITTED",

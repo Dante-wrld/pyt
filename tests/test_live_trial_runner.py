@@ -242,6 +242,135 @@ def test_execution_reserves_before_broadcast_and_requires_chain_deltas(tmp_path,
     book.close()
 
 
+async def _reverse_quote(**kwargs):
+    return {"inputMint": MINT, "outputMint": USDC_MINT,
+            "inAmount": "100000000", "outAmount": "4100000",
+            "otherAmountThreshold": "4000000", "priceImpact": "-1",
+            "slippageBps": 250}
+
+
+class _PreflightBuyer:
+    """A buyer that always reaches the post-reservation wallet/signal recheck."""
+    client = SimpleNamespace(order=_reverse_quote)
+    max_price_impact_pct = 3
+    max_slippage_bps = 300
+
+    async def preflight(self, intent, rpc):
+        return SimpleNamespace(prepared=SimpleNamespace(
+            input_amount_raw=intent.amount_usdc_raw,
+            minimum_output_raw=100_000_000, expected_output_raw=100_000_000))
+
+
+def _store_stub():
+    return SimpleNamespace(
+        connection=_no_legacy_claim(),
+        begin_auto_buy_execution=lambda **kwargs: True,
+        complete_auto_buy_execution=lambda **kwargs: None,
+    )
+
+
+def test_stale_signal_after_reservation_releases_the_order_instead_of_halting(tmp_path, monkeypatch):
+    """The candidate falling out of BUY_READY in the ~1s between reservation
+    and broadcast is routine market movement for these fast tokens, not a
+    wallet-integrity problem - it must release the reservation and let the
+    trial keep running, not halt the whole session."""
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    book = LiveTrialLedger(tmp_path / "trial.sqlite")
+    book.start()
+    decision = decide_hunter_entry(snapshot(), model=Model(), ledger=book)
+    wallet = "synthetic-owner"
+
+    class Rpc:
+        calls = 0
+        async def token_balance(self, owner, mint):
+            Rpc.calls += 1
+            return SimpleNamespace(raw_amount=20_000_000 if mint == USDC_MINT else 0)
+        async def mint_decimals(self, mint):
+            return 6
+
+    snapshot_calls = []
+    def flaky_snapshot():
+        # First can_submit check (just before reserving) still sees the
+        # candidate as BUY_READY; the second (just before broadcast, ~1s
+        # later in production) sees it's moved on - the same real-world gap
+        # observed tonight.
+        snapshot_calls.append(1)
+        return snapshot() if len(snapshot_calls) == 1 else snapshot(confirmations=0)
+
+    with pytest.raises(ValueError, match="signal expired"):
+        asyncio.run(execute_hunter_entry(
+            decision, ledger=book, rpc=Rpc(), buyer=_PreflightBuyer(), store=_store_stub(),
+            wallet=wallet, current_snapshot=flaky_snapshot,
+        ))
+    assert book.status()["status"] == "ACTIVE"
+    assert not book.unresolved()
+    book.close()
+
+
+def test_already_held_after_reservation_releases_the_order_instead_of_halting(tmp_path, monkeypatch):
+    """A concurrent/manual buy landing on the same mint between reservation
+    and broadcast (the same CASHTAG-style scenario the pre-reservation check
+    already treats as routine) must not halt the whole trial either."""
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    book = LiveTrialLedger(tmp_path / "trial.sqlite")
+    book.start()
+    decision = decide_hunter_entry(snapshot(), model=Model(), ledger=book)
+    wallet = "synthetic-owner"
+
+    class Rpc:
+        calls = 0
+        async def token_balance(self, owner, mint):
+            Rpc.calls += 1
+            if mint == USDC_MINT:
+                return SimpleNamespace(raw_amount=20_000_000)
+            # Pre-reservation check (call 2) sees nothing held yet; the
+            # post-reservation recheck (call 4) sees a balance appear.
+            return SimpleNamespace(raw_amount=0 if Rpc.calls <= 2 else 100_000_000)
+        async def mint_decimals(self, mint):
+            return 6
+
+    with pytest.raises(ValueError, match="already held"):
+        asyncio.run(execute_hunter_entry(
+            decision, ledger=book, rpc=Rpc(), buyer=_PreflightBuyer(), store=_store_stub(),
+            wallet=wallet, current_snapshot=snapshot,
+        ))
+    assert book.status()["status"] == "ACTIVE"
+    assert not book.unresolved()
+    book.close()
+
+
+def test_insufficient_usdc_after_reservation_still_halts_the_trial(tmp_path, monkeypatch):
+    """Real wallet USDC coming up short against a reservation the ledger
+    already believes is good is a genuine accounting mismatch, not routine
+    market movement - this must keep halting the whole trial."""
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    book = LiveTrialLedger(tmp_path / "trial.sqlite")
+    book.start()
+    decision = decide_hunter_entry(snapshot(), model=Model(), ledger=book)
+    wallet = "synthetic-owner"
+
+    class Rpc:
+        calls = 0
+        async def token_balance(self, owner, mint):
+            Rpc.calls += 1
+            if mint != USDC_MINT:
+                return SimpleNamespace(raw_amount=0)
+            # Pre-reservation check (call 1) sees enough; the post-reservation
+            # recheck (call 3) sees the balance has dropped below the reserve.
+            return SimpleNamespace(raw_amount=20_000_000 if Rpc.calls <= 2 else 1_000_000)
+        async def mint_decimals(self, mint):
+            return 6
+
+    with pytest.raises(TrialHalted, match="USDC balance dropped"):
+        asyncio.run(execute_hunter_entry(
+            decision, ledger=book, rpc=Rpc(), buyer=_PreflightBuyer(), store=_store_stub(),
+            wallet=wallet, current_snapshot=snapshot,
+        ))
+    assert book.unresolved()
+    assert book.unresolved()[0]["state"] == "RESERVED"
+    book.close()
+
+
 def test_portfolio_owned_exit_can_exceed_five_dollars_without_bypassing_guards(tmp_path, monkeypatch):
     monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
     book = LiveTrialLedger(tmp_path / "trial.sqlite")
