@@ -260,6 +260,81 @@ def test_early_buy_entry_is_capped_at_half_the_normal_order_size(tmp_path, monke
     book.close()
 
 
+def test_a_second_buy_of_the_same_mint_after_a_full_round_trip_does_not_collide(tmp_path, monkeypatch):
+    """A mint can legitimately be bought, fully sold, and re-qualify for a
+    fresh buy later in the same session (observed live: WHT round-tripped
+    and hunter-v1 re-entered it) - the second buy's intent key must not
+    collide with the first, already-CONFIRMED order's primary key and
+    crash the whole supervisor with a raw sqlite3.IntegrityError."""
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    book = LiveTrialLedger(tmp_path / "trial.sqlite")
+    book.start()
+    wallet = "synthetic-owner"
+
+    class Rpc:
+        async def token_balance(self, owner, mint):
+            return SimpleNamespace(raw_amount=20_000_000 if mint == USDC_MINT else 0)
+        async def mint_decimals(self, mint):
+            return 6
+        async def get_transaction(self, signature):
+            def row(index, mint, amount):
+                return {"accountIndex": index, "mint": mint, "owner": wallet,
+                        "uiTokenAmount": {"amount": str(amount)}}
+            return {"meta": {"err": None,
+                    "preTokenBalances": [row(0, USDC_MINT, 20_000_000)],
+                    "postTokenBalances": [row(0, USDC_MINT, 15_000_000), row(1, MINT, 100_000_000)]}}
+
+    class Client:
+        async def order(self, **kwargs):
+            return {"inputMint": MINT, "outputMint": USDC_MINT,
+                    "inAmount": str(kwargs["amount_raw"]), "outAmount": "4100000",
+                    "otherAmountThreshold": "4000000", "priceImpact": "-1",
+                    "slippageBps": 250}
+
+    class Buyer:
+        client = Client()
+        max_price_impact_pct = 3
+        max_slippage_bps = 300
+        async def preflight(self, intent, rpc):
+            return SimpleNamespace(prepared=SimpleNamespace(input_amount_raw=intent.amount_usdc_raw,
+                minimum_output_raw=100_000_000, expected_output_raw=100_000_000))
+        async def execute(self, prepared):
+            return SimpleNamespace(signature="public-signature", input_amount_raw=5_000_000,
+                                   output_amount_raw=100_000_000)
+
+    class Store:
+        connection = _no_legacy_claim()
+        def begin_auto_buy_execution(self, **kwargs):
+            return True
+        def complete_auto_buy_execution(self, **kwargs):
+            pass
+        def save_owned_holding(self, holding):
+            pass
+        def arm_auto_sell(self, mint, **kwargs):
+            pass
+
+    decision = decide_hunter_entry(snapshot(), model=Model(), ledger=book)
+    receipt = asyncio.run(execute_hunter_entry(decision, ledger=book, rpc=Rpc(),
+                          buyer=Buyer(), store=Store(), wallet=wallet,
+                          current_snapshot=snapshot))
+    assert receipt["spent_cents"] == 500
+    # Simulate a completed sell closing the position out, same as a real
+    # round trip would leave behind - only what reserve_buy's own checks
+    # inspect (no open position, no unresolved BUY order for this mint).
+    book.db.execute("DELETE FROM positions WHERE mint=?", (MINT,))
+    book.db.commit()
+
+    second = decide_hunter_entry(snapshot(), model=Model(), ledger=book)
+    second_receipt = asyncio.run(execute_hunter_entry(second, ledger=book, rpc=Rpc(),
+                          buyer=Buyer(), store=Store(), wallet=wallet,
+                          current_snapshot=snapshot))
+    assert second_receipt["spent_cents"] == 500
+    keys = [row[0] for row in book.db.execute(
+        "SELECT intent FROM orders WHERE mint=? AND side='BUY'", (MINT,)).fetchall()]
+    assert len(keys) == 2 and len(set(keys)) == 2
+    book.close()
+
+
 def test_execution_reserves_before_broadcast_and_requires_chain_deltas(tmp_path, monkeypatch):
     monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
     book = LiveTrialLedger(tmp_path / "trial.sqlite")

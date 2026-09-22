@@ -73,6 +73,38 @@ def test_momentum_buy_still_rejects_falling_volume():
     assert "volume" in result["failure_codes"]
 
 
+def test_momentum_buy_does_not_re_impose_the_general_three_poll_floor():
+    """MOMENTUM BUY's own confirmation requirement (set by the
+    recommendation engine via entry_confirmation_required) must not be
+    silently overridden back up to 3 by the general max(3, ...) floor -
+    that floor exists for the pullback/BUY NOW/BUY ZONE paths, which have
+    no other timing pressure, but re-imposing it here would erase the
+    whole point of momentum's lower, deliberately faster threshold."""
+    result = assess_entry(
+        candidate(decision="MOMENTUM BUY", price=1.0, peak_price=1.0,
+                  pullback_from_peak_pct=0, volume_label="RISING",
+                  buys_m5=35, sells_m5=20,
+                  entry_confirmation_count=1, entry_confirmation_required=1),
+        ShadowRecoveryPolicy(),
+    )
+    assert result["state"] == "BUY_READY"
+    assert "confirmations" not in result["failure_codes"]
+
+
+def test_non_momentum_candidates_keep_the_general_three_poll_floor():
+    """A pullback-path candidate with a (misreported or stale) required
+    count below 3 still needs at least 3 real confirmations - the lower
+    threshold is earned by MOMENTUM BUY specifically, not a general
+    loosening."""
+    result = assess_entry(
+        candidate(decision="BUY ZONE",
+                  entry_confirmation_count=1, entry_confirmation_required=1),
+        ShadowRecoveryPolicy(),
+    )
+    assert result["state"] != "BUY_READY"
+    assert "confirmations" in result["failure_codes"]
+
+
 def test_early_buy_does_not_require_momentum_or_pullback():
     """The whole point of an early-buy candidate is that it hasn't proven a
     move yet - neither a pullback nor upward momentum can be required of it,

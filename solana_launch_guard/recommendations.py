@@ -221,6 +221,16 @@ class RecommendationBook:
         pullback_started_pct: float = 2.0,
         pullback_reclaim_pct: float = 2.0,
         entry_confirmation_polls: int = 3,
+        # A momentum candidate requiring the same strong-momentum reading to
+        # persist for entry_confirmation_polls consecutive polls (~30-45s)
+        # tends to select for local tops - by the time it's confirmed 3
+        # times in a row, the move is often already exhausting (observed
+        # live: BETBOLT, WETCAT, and WHT all bought within seconds of a
+        # local peak, then reversed hard). MOMENTUM BUY's own evidence bar
+        # (50+ trades, 1.5x ratio, rising volume) is already substantial on
+        # a single poll, so it acts on the first sighting instead of
+        # requiring it to repeat.
+        momentum_buy_confirmation_polls: int = 1,
         entry_min_signal_score: int = 65,
         entry_min_liquidity_retention_pct: float = 80.0,
         entry_require_nonfalling_volume: bool = True,
@@ -249,6 +259,7 @@ class RecommendationBook:
         self.pullback_started_pct = pullback_started_pct
         self.pullback_reclaim_pct = pullback_reclaim_pct
         self.entry_confirmation_polls = entry_confirmation_polls
+        self.momentum_buy_confirmation_polls = momentum_buy_confirmation_polls
         self.entry_min_signal_score = entry_min_signal_score
         self.entry_min_liquidity_retention_pct = (
             entry_min_liquidity_retention_pct
@@ -487,7 +498,10 @@ class RecommendationBook:
         candidate: RecommendationCandidate,
         decision: str,
         reason: str,
+        *,
+        confirmation_polls: int | None = None,
     ) -> None:
+        required_polls = self.entry_confirmation_polls if confirmation_polls is None else confirmation_polls
         blocked = self._entry_block_reason(candidate)
         if blocked is not None:
             self._set_non_entry(
@@ -501,16 +515,17 @@ class RecommendationBook:
         else:
             candidate.entry_confirmation_signal = decision
             candidate.entry_confirmation_count = 1
-        if candidate.entry_confirmation_count < self.entry_confirmation_polls:
+        candidate.entry_confirmation_required = required_polls
+        if candidate.entry_confirmation_count < required_polls:
             candidate.decision = "ENTRY PENDING"
             candidate.decision_reason = (
                 f"{decision} confirmation "
                 f"{candidate.entry_confirmation_count}/"
-                f"{self.entry_confirmation_polls}: {reason}"
+                f"{required_polls}: {reason}"
             )
             return
         candidate.decision = decision
-        if candidate.entry_confirmation_count == self.entry_confirmation_polls:
+        if candidate.entry_confirmation_count == required_polls:
             candidate.planned_entry_price = candidate.current_price
         candidate.decision_reason = (
             f"confirmed for {candidate.entry_confirmation_count} consecutive "
@@ -641,7 +656,8 @@ class RecommendationBook:
                     candidate, require_rising_volume=False
                 )
                 if momentum_reason is not None:
-                    self._propose_entry(candidate, "MOMENTUM BUY", momentum_reason)
+                    self._propose_entry(candidate, "MOMENTUM BUY", momentum_reason,
+                                        confirmation_polls=self.momentum_buy_confirmation_polls)
                     return
                 # A token that keeps making new highs needs its zone to
                 # follow: re-anchor once price has run far enough past the
@@ -743,7 +759,8 @@ class RecommendationBook:
                 candidate, require_rising_volume=True
             )
             if momentum_reason is not None:
-                self._propose_entry(candidate, "MOMENTUM BUY", momentum_reason)
+                self._propose_entry(candidate, "MOMENTUM BUY", momentum_reason,
+                                    confirmation_polls=self.momentum_buy_confirmation_polls)
                 return
             candidate.entry_zone_low = candidate.current_price * (
                 1 - self.pullback_zone_max_pct / 100

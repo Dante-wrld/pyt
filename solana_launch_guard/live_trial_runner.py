@@ -304,7 +304,21 @@ async def execute_hunter_entry(
     # started_at is the part that actually changes across a restart. This
     # relies on the fresh on-chain wallet-balance check above (not this key)
     # to stop an actual double-buy of a mint a past session really completed.
-    intent_key = f"live-trial:{ledger.path.stem}:{ledger.started_at()}:hunter:{decision.mint}"
+    #
+    # A mint can legitimately be bought, fully sold, and re-qualify for a
+    # fresh buy later in the *same* session (observed live: WHT round-
+    # tripped and hunter-v1 re-entered it) - without a per-attempt suffix,
+    # that second buy's key collides with the first, already-CONFIRMED
+    # order's primary key and the plain INSERT raises an uncaught
+    # sqlite3.IntegrityError that crashes the whole supervisor. Suffix only
+    # kicks in from the second attempt onward, so the common single-buy
+    # case keeps its original, unsuffixed key unchanged.
+    prior_buys = ledger.db.execute(
+        "SELECT COUNT(*) FROM orders WHERE agent='hunter-v1' AND mint=? AND side='BUY'",
+        (decision.mint,),
+    ).fetchone()[0]
+    intent_key = (f"live-trial:{ledger.path.stem}:{ledger.started_at()}:hunter:{decision.mint}"
+                 + (f":attempt-{prior_buys + 1}" if prior_buys else ""))
     intent = BuyIntent(mint=decision.mint,
                        symbol=str(decision.candidate.get("symbol") or decision.mint[:8])[:40],
                        event_key=intent_key, amount_usdc_raw=amount_raw,

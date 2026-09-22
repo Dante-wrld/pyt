@@ -2802,6 +2802,39 @@ def test_early_buy_still_fires_on_flat_or_unknown_momentum() -> None:
     assert candidate.decision == "EARLY BUY"
 
 
+def test_momentum_buy_confirms_on_the_first_poll_even_with_the_general_threshold_at_three() -> None:
+    """MOMENTUM BUY uses its own, lower confirmation threshold
+    (momentum_buy_confirmation_polls, default 1) independent of the general
+    entry_confirmation_polls (default 3) used by the pullback/BUY NOW
+    paths - requiring the same strong-momentum reading to persist for 3
+    consecutive polls (~30-45s) tends to select for local tops, since a
+    move that's confirmed strong three times running is often already
+    exhausting (observed live: BETBOLT, WETCAT, and WHT all bought within
+    seconds of a local peak this way, then reversed hard)."""
+    initial = market_quote(
+        liquidity=50_000, market_cap=100_000, buys=60, sells=20,
+        volume=15_000, change=1,
+    )
+    book = RecommendationBook(pool_size=10, ttl_seconds=60)
+    assert book.entry_confirmation_polls == 3
+    assert book.momentum_buy_confirmation_polls == 1
+    candidate = book.add(initial, CoinIntelligence().score(initial), now=0)
+    assert candidate is not None
+
+    strong_move = MarketQuote(
+        mint=initial.mint, symbol=initial.symbol,
+        price_sol=initial.price_sol * 1.10,
+        liquidity_usd=initial.liquidity_usd, market_cap_usd=initial.market_cap_usd,
+        pair_address=initial.pair_address, pair_created_at_ms=initial.pair_created_at_ms,
+        buys_m5=45, sells_m5=15, volume_m5_usd=20_000, price_change_m5_pct=6,
+    )
+    book.update(strong_move, now=3)
+
+    assert candidate.decision == "MOMENTUM BUY"
+    assert candidate.entry_confirmation_count == 1
+    assert candidate.entry_confirmation_required == 1
+
+
 def test_momentum_buy_fires_on_a_fresh_extended_move_with_rising_volume() -> None:
     """A token that extends straight up without ever giving back into a
     pullback zone must not be permanently unbuyable just because the

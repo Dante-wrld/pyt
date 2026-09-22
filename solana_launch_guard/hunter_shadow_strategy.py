@@ -112,7 +112,18 @@ def assess_entry(candidate: dict[str, Any], policy: ShadowRecoveryPolicy) -> dic
     liquidity = _number(candidate.get("liquidity_usd"))
     baseline = _number(candidate.get("initial_liquidity_usd"))
     count = int(_number(candidate.get("entry_confirmation_count")))
-    required = max(3, policy.confirmations, int(_number(candidate.get("entry_confirmation_required"))))
+    is_momentum_buy = candidate.get("decision") == "MOMENTUM BUY"
+    # A momentum candidate's own confirmation threshold is deliberately
+    # lower (see RecommendationBook.momentum_buy_confirmation_polls) - the
+    # general max(3, ...) floor below exists for the pullback/BUY NOW/BUY
+    # ZONE paths, which have no other timing pressure, but re-imposing it
+    # here would silently erase the whole point of that lower threshold by
+    # forcing hunter-v1 to wait through the same 3 polls regardless.
+    required = (
+        max(1, int(_number(candidate.get("entry_confirmation_required"))))
+        if is_momentum_buy
+        else max(3, policy.confirmations, int(_number(candidate.get("entry_confirmation_required"))))
+    )
     momentum = str(candidate.get("momentum_label") or "UNKNOWN").upper()
     volume = str(candidate.get("volume_label") or "UNKNOWN").upper()
     risk = str(candidate.get("risk_label") or "UNKNOWN").upper()
@@ -128,7 +139,6 @@ def assess_entry(candidate: dict[str, Any], policy: ShadowRecoveryPolicy) -> dic
     # momentum yet, since the whole point is buying before a move has
     # happened. It carries its own, deliberately weaker buy-pressure and
     # trade-count bar in exchange for accepting that lack of evidence.
-    is_momentum_buy = candidate.get("decision") == "MOMENTUM BUY"
     is_early_buy = candidate.get("decision") == "EARLY BUY"
     failures = []
     codes = []
