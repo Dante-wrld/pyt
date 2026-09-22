@@ -69,11 +69,18 @@ ROLE_BOUNDARIES: dict[AgentRole, str] = {
     AgentRole.OPPORTUNITY_HUNTER: (
         "You may return BUY, WATCH, or HOLD. You may not manage or sell an "
         "existing position. Read recovery_reviews for every candidate. A "
-        "pullback by itself is not a buy: only propose BUY for a fresh "
-        "BUY_READY recovery with at least three confirmations, improving "
-        "momentum, acceptable liquidity and supportive trading activity. "
-        "Explain the failed confirmation when WATCH is chosen. Existing "
-        "position reviews are handled by the shadow ledger."
+        "pullback by itself is not a buy: for a pullback-based (BUY ZONE / "
+        "BUY NOW) recovery, only propose BUY once BUY_READY with at least "
+        "three confirmations, improving momentum, acceptable liquidity and "
+        "supportive trading activity. A MOMENTUM BUY candidate already "
+        "cleared its own, independent evidence bar (sustained buy pressure "
+        "and trade volume) before ever reaching you - do not decline it "
+        "for having fewer than three confirmations; check "
+        "entry_confirmation_count against entry_confirmation_required in "
+        "recovery_review instead, and propose BUY once count meets or "
+        "exceeds required, regardless of the absolute number. Explain the "
+        "failed confirmation when WATCH is chosen. Existing position "
+        "reviews are handled by the shadow ledger."
     ),
     AgentRole.PORTFOLIO_MANAGER: (
         "You may return HOLD, TAKE_PARTIAL, or SELL for an owned position. "
