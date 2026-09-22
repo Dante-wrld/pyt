@@ -4239,6 +4239,63 @@ def test_robinhood_quote_uses_usd_and_exact_contract(
     assert quote.recommendation_key.endswith(address.lower())
 
 
+def test_oracle_retries_a_429_and_recovers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A 429 used to be swallowed identically to "no pairs for this token" -
+    observed live against the real API for a token that was actively
+    trading with real liquidity. A couple of short backoff retries should
+    clear a transient rate limit instead of reporting no quote at all."""
+    mint = "BLSuVTxKYDL4vm4XmG3oEJfsSGfJZF3cgy98ri68pump"
+    body = (
+        '{"pairs":[{"chainId":"solana",'
+        f'"baseToken":{{"address":"{mint}"}},'
+        '"quoteToken":{"address":"So11111111111111111111111111111111111111112"},'
+        '"priceNative":"0.0001","priceUsd":"0.25","liquidity":{"usd":50000},'
+        '"marketCap":100000,"txns":{"m5":{"buys":10,"sells":5}},'
+        '"volume":{"m5":1000},"priceChange":{"m5":1},"pairCreatedAt":1}]}'
+    ).encode()
+
+    calls = []
+
+    def flaky_urlopen(*_args: object, **_kwargs: object) -> object:
+        calls.append(1)
+        if len(calls) < 3:
+            raise urllib.error.HTTPError(
+                "https://api.dexscreener.com/latest/dex/tokens/x", 429,
+                "Too Many Requests", None, io.BytesIO(b""),
+            )
+        return io.BytesIO(body)
+
+    monkeypatch.setattr("urllib.request.urlopen", flaky_urlopen)
+    monkeypatch.setattr("solana_launch_guard.market.time.sleep", lambda _seconds: None)
+    oracle = DexScreenerOracle()
+
+    pairs = oracle._request_token(mint)
+
+    assert len(calls) == 3
+    assert len(pairs) == 1
+    assert pairs[0]["priceUsd"] == "0.25"
+
+
+def test_oracle_does_not_retry_a_non_429_http_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = []
+
+    def reject(*_args: object, **_kwargs: object) -> object:
+        calls.append(1)
+        raise urllib.error.HTTPError(
+            "https://api.dexscreener.com/latest/dex/tokens/x", 500,
+            "Server Error", None, io.BytesIO(b""),
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", reject)
+    monkeypatch.setattr("solana_launch_guard.market.time.sleep", lambda _seconds: None)
+    oracle = DexScreenerOracle()
+
+    pairs = oracle._request_token("A" * 44)
+
+    assert pairs == []
+    assert len(calls) == 1
+
+
 def test_robinhood_profiles_and_stock_contracts_are_discovered(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

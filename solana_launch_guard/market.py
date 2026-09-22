@@ -71,7 +71,11 @@ class MarketQuote:
 class DexScreenerOracle:
     """Cached client for DEX Screener's public token-pairs endpoint."""
 
-    def __init__(self, cache_seconds: float = 2.0) -> None:
+    def __init__(self, cache_seconds: float = 8.0) -> None:
+        # 2.0 did almost nothing to cut duplicate requests for the same mint
+        # within one process; 8.0 is still comfortably under the 15s
+        # freshness bound live buy decisions require, but cuts repeat calls
+        # for a mint queried more than once in quick succession.
         self.cache_seconds = cache_seconds
         self._cache: dict[str, tuple[float, MarketQuote | None]] = {}
         self._stock_token_cache: (
@@ -118,14 +122,30 @@ class DexScreenerOracle:
                 "User-Agent": "solana-launch-guard/0.7",
             },
         )
-        try:
-            with urllib.request.urlopen(
-                request, timeout=10, context=self._ssl
-            ) as response:
-                payload = json.load(response)
-        except (OSError, ValueError, urllib.error.URLError):
-            return []
-        return list(payload.get("pairs") or [])
+        # A 429 (observed live: this app's polling volume across its several
+        # concurrent processes exceeds DexScreener's public rate limit) used
+        # to be swallowed identically to "this token genuinely has no
+        # pairs" - indistinguishable downstream, and every caller (hunter-v1's
+        # own exit review, the portfolio-v1 exit path, the watchlist scan)
+        # would just see a permanent "no quote" for that mint until the next
+        # request happened to land outside the rate-limited window. A couple
+        # of short backoff retries clears most of these without hammering
+        # the API further.
+        for attempt in range(3):
+            try:
+                with urllib.request.urlopen(
+                    request, timeout=10, context=self._ssl
+                ) as response:
+                    payload = json.load(response)
+                return list(payload.get("pairs") or [])
+            except urllib.error.HTTPError as exc:
+                if exc.code == 429 and attempt < 2:
+                    time.sleep(0.5 * (attempt + 1))
+                    continue
+                return []
+            except (OSError, ValueError, urllib.error.URLError):
+                return []
+        return []
 
     def _request_json(self, url: str) -> Any:
         request = urllib.request.Request(
