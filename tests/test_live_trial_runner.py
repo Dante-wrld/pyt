@@ -66,6 +66,68 @@ def test_recovery_model_and_arbiter_gate_before_reservation(tmp_path, monkeypatc
     book.close()
 
 
+def test_post_model_recheck_uses_a_fresh_read_not_the_aging_original(tmp_path, monkeypatch):
+    """The model call reliably takes real wall-clock time (observed ~11-13s
+    in production). Re-checking the *original* snapshot's age against a
+    later time.time() fails purely from that latency, even though a
+    genuinely fresh read on disk shows the candidate is still perfectly
+    valid - decide_hunter_entry must re-fetch via current_snapshot instead
+    of re-timestamping the same stale data it started with."""
+    base = time.time()
+    stale_snapshot = snapshot()
+    stale_snapshot["generated_at"] = base - 5
+    for c in stale_snapshot["candidates"]:
+        c["quoted_at"] = base - 5
+
+    fresh_snapshot = snapshot()
+    fresh_snapshot["generated_at"] = base + 12
+    for c in fresh_snapshot["candidates"]:
+        c["quoted_at"] = base + 12
+
+    # Only the internal recheck (after model.propose()) calls time.time()
+    # with no `now` override - simulate ~12s of real elapsed model latency.
+    monkeypatch.setattr("solana_launch_guard.live_trial_runner.time.time", lambda: base + 12)
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    book = LiveTrialLedger(tmp_path / "trial.sqlite")
+    book.start()
+    model = Model()
+    decision = decide_hunter_entry(
+        stale_snapshot, model=model, ledger=book, now=base,
+        current_snapshot=lambda: fresh_snapshot,
+    )
+    assert decision is not None
+    assert decision.approved_cents == 500
+    book.close()
+
+
+def test_post_model_recheck_still_blocks_when_the_fresh_read_no_longer_qualifies(tmp_path, monkeypatch):
+    base = time.time()
+    stale_snapshot = snapshot()
+    stale_snapshot["generated_at"] = base - 5
+    for c in stale_snapshot["candidates"]:
+        c["quoted_at"] = base - 5
+
+    # The fresh read exists (not itself stale) but the candidate has moved on.
+    fresh_snapshot = snapshot(momentum="FALLING")
+    fresh_snapshot["generated_at"] = base + 12
+    for c in fresh_snapshot["candidates"]:
+        c["quoted_at"] = base + 12
+
+    monkeypatch.setattr("solana_launch_guard.live_trial_runner.time.time", lambda: base + 12)
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    book = LiveTrialLedger(tmp_path / "trial.sqlite")
+    book.start()
+    model = Model()
+    decision = decide_hunter_entry(
+        stale_snapshot, model=model, ledger=book, now=base,
+        current_snapshot=lambda: fresh_snapshot,
+    )
+    assert decision is None
+    skipped = [d for d in book.status()["recent_decisions"] if d["state"] == "BLOCKED"]
+    assert skipped and "stale" in skipped[0]["reason"]
+    book.close()
+
+
 def test_liquidity_floor_follows_policy_not_a_hardcoded_fifty_thousand(tmp_path, monkeypatch):
     """_fresh_candidates and _live_arbiter used to hardcode a $50,000
     liquidity floor, completely independent of INTELLIGENCE_MIN_LIQUIDITY_USD

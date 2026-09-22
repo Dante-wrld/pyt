@@ -8,12 +8,15 @@ from solana_launch_guard.live_trial import (
     EXIT_STUCK_ALERT_STREAK,
     BoundedTrialModel,
     _eligible_exit,
+    _guarded_entry,
     _guarded_exit,
     _sell_choice,
     _track_exit_block_streak,
     require_exclusive_trial_flags,
 )
 from solana_launch_guard.live_trial_ledger import LiveTrialLedger, TrialHalted
+from solana_launch_guard.live_trial_runner import LiveEntryDecision
+from solana_launch_guard.execution import USDC_MINT
 from solana_launch_guard.agents import AgentRole
 
 
@@ -206,6 +209,83 @@ def test_expired_exit_never_suppresses_an_unresolved_order(tmp_path, monkeypatch
             quote_age_seconds=2, liquidity_usd=60_000,
             rpc=None, seller=None, store=None, wallet="synthetic-owner",
             symbol="TEST",
+        ))
+    assert len(book.unresolved()) == 1
+    book.close()
+
+
+def test_price_impact_rejection_blocks_one_buy_without_stopping_trial(tmp_path, monkeypatch):
+    """A pre-reservation ValueError (e.g. Jupiter's real quote showing price
+    impact over the guarded limit, common on a fast-moving candidate) must
+    skip just this attempt and retry next cycle, correctly attributed to
+    hunter-v1 - not propagate to supervise()'s generic handler, which can't
+    tell a buy failure from a sell failure and always mislabels it
+    agent="portfolio-v1"."""
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    book = LiveTrialLedger(tmp_path / "trial.sqlite")
+    book.start()
+    decision = LiveEntryDecision(
+        agent="hunter-v1", mint="A" * 44, requested_cents=500,
+        approved_cents=500, reason="test", candidate={},
+    )
+
+    class Rpc:
+        async def token_balance(self, owner, mint):
+            if mint == USDC_MINT:
+                return SimpleNamespace(raw_amount=20_000_000)
+            return SimpleNamespace(raw_amount=0)
+        async def mint_decimals(self, mint):
+            return 6
+
+    class Buyer:
+        max_price_impact_pct = 3
+        max_slippage_bps = 300
+        async def preflight(self, intent, rpc):
+            raise ValueError("Jupiter price impact -4.49% exceeds the 3.00% limit (exact quote -4.491513%)")
+
+    result = asyncio.run(_guarded_entry(
+        decision, ledger=book, rpc=Rpc(), buyer=Buyer(), store=None,
+        wallet="synthetic-owner", current_snapshot=lambda: {},
+    ))
+    assert result is None
+    assert book.status()["status"] == "ACTIVE"
+    assert not book.unresolved()
+    decisions = book.status()["recent_decisions"]
+    assert decisions[0]["agent"] == "hunter-v1"
+    assert decisions[0]["state"] == "BUY_BLOCKED"
+    assert "price impact" in decisions[0]["reason"]
+    book.close()
+
+
+def test_rejected_buy_never_suppresses_an_unresolved_order(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    book = LiveTrialLedger(tmp_path / "trial.sqlite")
+    book.start()
+    book.reserve_buy(intent="already-submitted", agent="hunter-v1", mint="A" * 44,
+                     requested_cents=500, approved_cents=500)
+    decision = LiveEntryDecision(
+        agent="hunter-v1", mint="A" * 44, requested_cents=500,
+        approved_cents=500, reason="test", candidate={},
+    )
+
+    class Rpc:
+        async def token_balance(self, owner, mint):
+            if mint == USDC_MINT:
+                return SimpleNamespace(raw_amount=20_000_000)
+            return SimpleNamespace(raw_amount=0)
+        async def mint_decimals(self, mint):
+            return 6
+
+    class Buyer:
+        max_price_impact_pct = 3
+        max_slippage_bps = 300
+        async def preflight(self, intent, rpc):
+            raise ValueError("Jupiter price impact exceeds the limit")
+
+    with pytest.raises(ValueError, match="price impact"):
+        asyncio.run(_guarded_entry(
+            decision, ledger=book, rpc=Rpc(), buyer=Buyer(), store=None,
+            wallet="synthetic-owner", current_snapshot=lambda: {},
         ))
     assert len(book.unresolved()) == 1
     book.close()

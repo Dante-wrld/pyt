@@ -91,6 +91,7 @@ def decide_hunter_entry(
     snapshot: dict, *, model, ledger: LiveTrialLedger,
     now: float | None = None,
     buy_zone_skip_reasons: dict[str, str] | None = None,
+    current_snapshot: Callable[[], dict] | None = None,
 ) -> LiveEntryDecision | None:
     """Require a BUY_READY recovery, model proposal, then live arbitration."""
     at = time.time() if now is None else now
@@ -157,8 +158,18 @@ def decide_hunter_entry(
         return None
     # Centre of the decision must still pass deterministic entry checks after
     # model latency; an old model output never becomes permission to trade.
-    if (not _fresh_candidates(snapshot, now=time.time(), min_liquidity_usd=policy.min_liquidity_usd)
-        or assess_entry(candidate, policy)["state"] != "BUY_READY"):
+    # This re-reads the recommendation feed from disk (when a current_snapshot
+    # callable is given) instead of re-checking the age of the same snapshot
+    # this function started with: the model call reliably takes ~10-15s, and
+    # re-timestamping the *original* snapshot against a later "now" fails
+    # that snapshot's freshness bound purely from that wait, even though a
+    # newer, genuinely fresh read exists on disk showing the candidate is
+    # still perfectly valid. Re-fetching checks whether the trade is still
+    # good *right now*, not whether the data we started with has aged out.
+    recheck_snapshot = current_snapshot() if current_snapshot is not None else snapshot
+    fresh = _fresh_candidates(recheck_snapshot, now=time.time(), min_liquidity_usd=policy.min_liquidity_usd)
+    fresh_candidate = next((c for c in fresh if c.get("mint") == candidate.get("mint")), None)
+    if fresh_candidate is None or assess_entry(fresh_candidate, policy)["state"] != "BUY_READY":
         ledger.log(agent="hunter-v1", mint=proposal.mint, state="BLOCKED", reason="candidate is stale")
         return None
     approved_cents = min(round(arbitration.approved_usd * 100),

@@ -21,7 +21,7 @@ from .execution import (
 from .hunter_shadow_strategy import ShadowRecoveryPolicy, assess_exit
 from .live_trial_ledger import LiveTrialLedger, TrialHalted
 from .live_trial_runner import (
-    decide_hunter_entry, execute_hunter_entry, execute_live_exit,
+    LiveEntryDecision, decide_hunter_entry, execute_hunter_entry, execute_live_exit,
 )
 from .market import DexScreenerOracle
 from .wallet import SolanaRpc
@@ -173,6 +173,31 @@ async def _notify(settings: Settings, *, title: str, message: str) -> None:
                                  title=title, message=message, priority=1)
     except (OSError, ValueError, ConnectionError) as exc:
         print(f"Notification could not be delivered: {exc}", flush=True)
+
+
+async def _guarded_entry(decision: LiveEntryDecision, *, ledger: LiveTrialLedger, **kwargs) -> dict | None:
+    """Deterministic, pre-reservation rejections (a quote's price impact or
+    slippage exceeding the guarded limit, most often on a fast-moving
+    candidate) are routine and market-condition-dependent - they can pass on
+    a later cycle once a fresh quote is in, so this skips just this attempt
+    and retries next cycle instead of the exception reaching supervise()'s
+    generic handler, which can't tell a buy failure from a sell failure and
+    always mislabels it agent="portfolio-v1". Anything past reservation is
+    already handled and logged by execute_hunter_entry's own except block, so
+    only pre-reservation ValueErrors are routine here - re-raise anything
+    else, same as _guarded_exit does for the sell side.
+    """
+    try:
+        return await execute_hunter_entry(decision, ledger=ledger, **kwargs)
+    except AdditionalSignerError as exc:
+        raise TrialHalted("buy signing failure; stop new buys and inspect wallet") from exc
+    except ValueError as exc:
+        if ledger.unresolved():
+            raise
+        ledger.assert_active()
+        ledger.log(agent="hunter-v1", mint=decision.mint, state="BUY_BLOCKED",
+                   reason=f"entry rejected before broadcast: {str(exc)[:400]}")
+        return None
 
 
 async def _guarded_exit(*, ledger: LiveTrialLedger, agent: str, mint: str,
@@ -371,11 +396,14 @@ async def cycle(*, ledger: LiveTrialLedger, settings: Settings, rpc: SolanaRpc,
         return
     recommendations = _read_recommendations()
     decision = decide_hunter_entry(recommendations, model=model, ledger=ledger,
-                                   buy_zone_skip_reasons=buy_zone_skip_reasons)
+                                   buy_zone_skip_reasons=buy_zone_skip_reasons,
+                                   current_snapshot=_read_recommendations)
     if decision is not None:
-        result = await execute_hunter_entry(decision, ledger=ledger, rpc=rpc,
-                                            buyer=buyer, store=store, wallet=wallet,
-                                            current_snapshot=_read_recommendations)
+        result = await _guarded_entry(decision, ledger=ledger, rpc=rpc,
+                                      buyer=buyer, store=store, wallet=wallet,
+                                      current_snapshot=_read_recommendations)
+        if result is None:
+            return
         await _notify(settings, title="Launch Guard CONFIRMED BUY",
                       message=f"hunter-v1: {result['mint']} spent {result['spent_cents']/100:.2f} USD; {decision.reason[:100]}; {result['signature']}")
 
