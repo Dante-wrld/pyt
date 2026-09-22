@@ -2771,6 +2771,37 @@ def test_early_buy_requires_its_own_higher_liquidity_floor() -> None:
     assert candidate.decision != "EARLY BUY"
 
 
+def test_early_buy_does_not_fire_on_a_token_actively_falling() -> None:
+    """Still being within the starting-price window is not itself a reason
+    to buy - a token actively declining in the last five minutes (here,
+    -3% - FALLING territory) must not qualify just because it hasn't
+    fallen far enough yet to leave the window."""
+    initial = market_quote(
+        liquidity=50_000, market_cap=100_000, buys=60, sells=20,
+        volume=15_000, change=-3,
+    )
+    book = RecommendationBook(pool_size=10, ttl_seconds=60, entry_confirmation_polls=1)
+    candidate = book.add(initial, CoinIntelligence().score(initial), now=0)
+    assert candidate is not None
+    assert candidate.momentum_label == "FALLING"
+    assert candidate.decision != "EARLY BUY"
+
+
+def test_early_buy_still_fires_on_flat_or_unknown_momentum() -> None:
+    """A mild dip within STABLE range, or no five-minute data yet at all
+    (the genuinely earliest case), is not 'falling' and should still
+    qualify - only active decline is excluded."""
+    initial = market_quote(
+        liquidity=50_000, market_cap=100_000, buys=60, sells=20,
+        volume=15_000, change=-1,
+    )
+    book = RecommendationBook(pool_size=10, ttl_seconds=60, entry_confirmation_polls=1)
+    candidate = book.add(initial, CoinIntelligence().score(initial), now=0)
+    assert candidate is not None
+    assert candidate.momentum_label == "STABLE"
+    assert candidate.decision == "EARLY BUY"
+
+
 def test_momentum_buy_fires_on_a_fresh_extended_move_with_rising_volume() -> None:
     """A token that extends straight up without ever giving back into a
     pullback zone must not be permanently unbuyable just because the

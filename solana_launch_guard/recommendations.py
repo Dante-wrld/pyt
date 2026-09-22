@@ -586,8 +586,16 @@ class RecommendationBook:
         initial_price (see the caller): this only judges whether there is
         enough real activity to believe the pool isn't dead or a decoy, not
         whether a trend already exists.
+
+        Being close to the starting price is not itself a reason to buy - a
+        token actively declining in the last five minutes must not qualify
+        just because it hasn't fallen far enough yet to leave the window.
+        Flat/unknown (no five-minute data yet, the genuinely earliest case)
+        and mild upticks still pass; only active decline is excluded.
         """
         if abs(candidate.rise_pct) > self.early_buy_max_deviation_pct:
+            return None
+        if candidate.momentum_label == "FALLING":
             return None
         if (candidate.liquidity_usd or 0) < self.early_buy_min_liquidity_usd:
             return None
