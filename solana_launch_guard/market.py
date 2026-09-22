@@ -71,12 +71,25 @@ class MarketQuote:
 class DexScreenerOracle:
     """Cached client for DEX Screener's public token-pairs endpoint."""
 
-    def __init__(self, cache_seconds: float = 8.0) -> None:
+    def __init__(self, cache_seconds: float = 8.0, max_429_retries: int = 2) -> None:
         # 2.0 did almost nothing to cut duplicate requests for the same mint
         # within one process; 8.0 is still comfortably under the 15s
         # freshness bound live buy decisions require, but cuts repeat calls
         # for a mint queried more than once in quick succession.
         self.cache_seconds = cache_seconds
+        # A missed quote costs very different amounts depending on the
+        # caller: the live trial's own buy/sell decisions run over a
+        # handful of mints at a time, so retrying a 429 there can be the
+        # difference between seeing a real trade and missing it. The bulk
+        # portfolio/watchlist scan queries dozens of mints (observed: ~75
+        # owned holdings) through a small concurrency semaphore, so every
+        # retry's backoff sleep is paid by that many sequential batches -
+        # missing one mint's quote for a single ~30s cycle there is cheap,
+        # but the retries compounding across a whole scan is what was
+        # actually pushing the portfolio snapshot stale enough to block
+        # live buy/sell decisions that depend on its freshness. Callers
+        # doing that kind of bulk scan should construct with retries=0.
+        self._max_429_retries = max_429_retries
         self._cache: dict[str, tuple[float, MarketQuote | None]] = {}
         self._stock_token_cache: (
             tuple[float, frozenset[str], frozenset[str]] | None
@@ -131,7 +144,7 @@ class DexScreenerOracle:
         # request happened to land outside the rate-limited window. A couple
         # of short backoff retries clears most of these without hammering
         # the API further.
-        for attempt in range(3):
+        for attempt in range(self._max_429_retries + 1):
             try:
                 with urllib.request.urlopen(
                     request, timeout=10, context=self._ssl
@@ -139,7 +152,7 @@ class DexScreenerOracle:
                     payload = json.load(response)
                 return list(payload.get("pairs") or [])
             except urllib.error.HTTPError as exc:
-                if exc.code == 429 and attempt < 2:
+                if exc.code == 429 and attempt < self._max_429_retries:
                     time.sleep(0.5 * (attempt + 1))
                     continue
                 return []

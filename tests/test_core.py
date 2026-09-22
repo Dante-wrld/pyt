@@ -4296,6 +4296,33 @@ def test_oracle_does_not_retry_a_non_429_http_error(monkeypatch: pytest.MonkeyPa
     assert len(calls) == 1
 
 
+def test_oracle_with_zero_retries_gives_up_on_first_429(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The bulk portfolio/watchlist scanner constructs with max_429_retries=0
+    (app.py) so a rate limit costs one failed call, not a blocking retry
+    sleep repeated across dozens of concurrently-scanned holdings - that
+    compounding sleep was what pushed the portfolio snapshot stale enough
+    to block live buy/sell decisions that depend on its freshness."""
+    calls = []
+    slept = []
+
+    def reject_429(*_args: object, **_kwargs: object) -> object:
+        calls.append(1)
+        raise urllib.error.HTTPError(
+            "https://api.dexscreener.com/latest/dex/tokens/x", 429,
+            "Too Many Requests", None, io.BytesIO(b""),
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", reject_429)
+    monkeypatch.setattr("solana_launch_guard.market.time.sleep", lambda seconds: slept.append(seconds))
+    oracle = DexScreenerOracle(max_429_retries=0)
+
+    pairs = oracle._request_token("A" * 44)
+
+    assert pairs == []
+    assert len(calls) == 1
+    assert slept == []
+
+
 def test_robinhood_profiles_and_stock_contracts_are_discovered(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -105,7 +105,10 @@ class LaunchGuard(
         self.store = store
         self.broker = PaperBroker(settings, store)
         self.risk = RiskEngine(settings)
-        self.oracle = DexScreenerOracle()
+        # Bulk scanner (portfolio monitor + watchlist/discovery), not the
+        # live trial's own decision path - see DexScreenerOracle's docstring
+        # on max_429_retries for why this one skips the retry.
+        self.oracle = DexScreenerOracle(max_429_retries=0)
         self.intelligence = CoinIntelligence(
             core_score=settings.core_intelligence_score,
             moonshot_score=settings.moonshot_intelligence_score,
