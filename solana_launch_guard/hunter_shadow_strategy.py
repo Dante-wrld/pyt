@@ -51,6 +51,16 @@ class ShadowRecoveryPolicy:
     early_buy_min_trades: int = 15
     trailing_activation_pct: float = 20.0
     trailing_stop_pct: float = 12.0
+    # Once principal is recovered, the remainder is house money, not
+    # original capital - a gradual, unconfirmed pullback (no real momentum
+    # or selling-pressure evidence) earns more room before it's treated as
+    # a trailing-stop exit, so a choppy consolidation isn't cut short right
+    # before a much bigger continuation. This does NOT relax trend_break
+    # (momentum + confirmed selling pressure) below - a fast, violent drop
+    # is far more likely to be a rug heading toward zero than ordinary
+    # volatility, and keeps exiting on the unchanged, tight threshold
+    # regardless of principal_recovered.
+    principal_recovered_trailing_stop_pct: float = 25.0
     momentum_exit_pct: float = -8.0
     sell_pressure_ratio: float = 1.5
     liquidity_drop_pct: float = 30.0
@@ -82,6 +92,9 @@ class ShadowRecoveryPolicy:
             early_buy_min_trades=int(get("EARLY_BUY_MIN_TRADES", 15)),
             trailing_activation_pct=get("TRAILING_ACTIVATION_PCT", 20),
             trailing_stop_pct=get("TRAILING_STOP_PCT", 12),
+            principal_recovered_trailing_stop_pct=get(
+                "PRINCIPAL_RECOVERED_TRAILING_STOP_PCT", 25
+            ),
             momentum_exit_pct=get("MOMENTUM_EXIT_PCT", -8),
             sell_pressure_ratio=get("SELL_PRESSURE_RATIO", 1.5),
             liquidity_drop_pct=get("LIQUIDITY_DROP_PCT", 30),
@@ -95,8 +108,11 @@ class ShadowRecoveryPolicy:
         )
         if (policy.confirmations < 3 or policy.pullback_pct <= 0
                 or not 0 < policy.trailing_stop_pct < 100
+                or not policy.trailing_stop_pct < policy.principal_recovered_trailing_stop_pct < 100
                 or policy.stagnation_window_seconds <= 0):
-            raise ValueError("invalid shadow recovery configuration: confirmations >= 3, pullback, trailing stop and stagnation window required")
+            raise ValueError("invalid shadow recovery configuration: confirmations >= 3, pullback, "
+                             "trailing stop (with the principal-recovered variant exceeding it) and "
+                             "stagnation window required")
         return policy
 
 
@@ -253,8 +269,19 @@ def assess_exit(
     # grounds for an exit, same principle as the rest of this module).
     age_seconds = ((now if now is not None else time.time()) - opened_at) if opened_at > 0 else 0.0
     liquidity_failure = liquidity > 0 and (liquidity < policy.min_liquidity_usd or baseline > 0 and liquidity < baseline * (1 - policy.liquidity_drop_pct / 100))
+    principal_recovered = bool(position.get("principal_recovered"))
+    # trend_break (momentum + confirmed selling pressure) deliberately keeps
+    # the unchanged, tight trailing_stop_pct wherever it's referenced below -
+    # a fast, violent drop is far more likely to be a rug heading toward
+    # zero than ordinary volatility, so it still exits quickly regardless of
+    # principal_recovered. Only the pure-drawdown trailing_break gets more
+    # room once principal is recovered, for a gradual, unconfirmed pullback.
     trend_break = momentum <= policy.momentum_exit_pct and sells >= 5 and sells / max(1, buys) >= policy.sell_pressure_ratio
-    trailing_break = peak_gain >= policy.trailing_activation_pct and drawdown >= policy.trailing_stop_pct
+    effective_trailing_stop_pct = (
+        policy.principal_recovered_trailing_stop_pct if principal_recovered
+        else policy.trailing_stop_pct
+    )
+    trailing_break = peak_gain >= policy.trailing_activation_pct and drawdown >= effective_trailing_stop_pct
     # Bought expecting a bounce; gave it the configured grace window, and
     # there's still no rise (gain below the bar) and no sign of one forming
     # (momentum non-positive) - exit proactively rather than wait for a
@@ -263,8 +290,13 @@ def assess_exit(
     # here: live_trial.py's cycle() doesn't currently populate it on the
     # quote passed in (it's always "UNKNOWN" there), so a volume-rising
     # requirement would be vacuous rather than a real gate.
+    # Once principal is recovered the remainder is house money, so a quiet
+    # period isn't itself a reason to force an exit - the widened
+    # trailing_break and the unchanged trend_break/liquidity checks above
+    # still catch a real decline; a stall alone should not.
     stagnant = (
-        age_seconds >= policy.stagnation_window_seconds
+        not principal_recovered
+        and age_seconds >= policy.stagnation_window_seconds
         and gain < policy.stagnation_min_gain_pct
         and momentum_known
         and momentum <= 0

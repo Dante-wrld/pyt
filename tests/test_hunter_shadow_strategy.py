@@ -279,6 +279,44 @@ def test_trailing_stop_without_selling_pressure_only_warns():
     assert review["state"] == "REVERSAL_WARNING"
 
 
+def test_principal_recovered_widens_tolerance_for_an_unconfirmed_pullback():
+    """Once principal is recovered the remainder is house money - the same
+    15.4% pullback that would exit a normal position (see
+    test_trailing_stop_exits_a_considerable_rise_that_reverses_with_selling_pressure)
+    stays within the wider 25% band and keeps running, since there's no
+    confirmed reversal evidence (momentum is barely negative)."""
+    position = {"entry_price": 1, "highest_price_since_entry": 1.3, "principal_recovered": True}
+    row = candidate(price=1.1, price_change_m5_pct=-2, buys_m5=8, sells_m5=10,
+                     volume_label="UNKNOWN")
+    review = assess_exit(position, row, ShadowRecoveryPolicy())
+    assert review["state"] != "EXIT"
+
+
+def test_principal_recovered_does_not_widen_tolerance_for_a_rapid_confirmed_reversal():
+    """A fast, momentum-and-selling-confirmed reversal keeps the unchanged,
+    tight threshold and still exits promptly even with principal already
+    recovered - most rapid/violent drops end up at zero, so this is not
+    the case the wider tolerance is meant to protect."""
+    position = {"entry_price": 1, "highest_price_since_entry": 1.3, "principal_recovered": True}
+    row = candidate(price=1.1, price_change_m5_pct=-9, buys_m5=5, sells_m5=10,
+                     volume_label="UNKNOWN")
+    review = assess_exit(position, row, ShadowRecoveryPolicy())
+    assert review["state"] == "EXIT"
+    assert "confirmed reversal" in " ".join(review["reasons"]).lower()
+
+
+def test_principal_recovered_suppresses_the_stagnation_exit():
+    """A quiet period isn't itself a reason to force an exit once the
+    remainder is house money - the widened trailing stop and the unchanged
+    trend_break/liquidity checks still catch a real decline."""
+    policy = ShadowRecoveryPolicy(stagnation_window_seconds=900)
+    position = {"entry_price": 1, "highest_price_since_entry": 1, "opened_at": 1_000,
+                "principal_recovered": True}
+    row = candidate(price=0.99, price_change_m5_pct=-1, buys_m5=10, sells_m5=10)
+    review = assess_exit(position, row, policy, now=1_000 + 901)
+    assert review["state"] != "EXIT"
+
+
 def test_stagnant_position_exits_after_grace_window_with_no_rise():
     policy = ShadowRecoveryPolicy(stagnation_window_seconds=900)
     position = {"entry_price": 1, "highest_price_since_entry": 1, "opened_at": 1_000}
