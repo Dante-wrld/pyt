@@ -459,6 +459,13 @@ class SQLiteStore:
                 PRIMARY KEY (chain, token_address)
             );
 
+            CREATE TABLE IF NOT EXISTS external_wallet_classifications (
+                token_address TEXT PRIMARY KEY,
+                first_seen_value_usd REAL NOT NULL,
+                classification TEXT NOT NULL,
+                classified_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS loss_sale_reviews (
                 sale_id TEXT PRIMARY KEY,
                 chain TEXT NOT NULL,
@@ -874,6 +881,53 @@ class SQLiteStore:
             (holding.chain, holding.token_address),
         )
         self.connection.commit()
+
+    def is_launch_guard_owned(self, *, chain: str, token_address: str) -> bool:
+        """True if this ledger's own buy flow has ever recorded a fill for
+        this mint (owned_holdings is upserted at buy confirmation and never
+        deleted, even after a full sell - see save_owned_holding). A wallet
+        holding that fails this check was acquired some other way (a
+        separate copy-trading bot, a manual purchase, ...) and this ledger
+        has no cost-basis or intent behind it."""
+        return self.connection.execute(
+            "SELECT 1 FROM owned_holdings WHERE chain = ? AND token_address = ?",
+            (chain, token_address),
+        ).fetchone() is not None
+
+    def classify_external_wallet_position(
+        self, token_address: str, *, current_value_usd: float,
+        known_purchase_ranges_usd: tuple[tuple[float, float], ...] = (),
+    ) -> str:
+        """Classify a wallet holding this ledger never bought, the first
+        time it's ever seen, and remember that classification forever -
+        not re-derived on later cycles, since current value drifts away
+        from whatever was actually paid within minutes on these tokens,
+        making a later check meaningless. known_purchase_ranges_usd is a
+        set of (min, max) USD amount ranges a known external buyer (e.g. a
+        copy-trading bot with a small, predictable set of position sizes)
+        is known to use - a first-seen value landing in one of these is
+        classified "external_known", anything else "external_personal".
+        Only call this for a mint that already failed is_launch_guard_owned.
+        """
+        existing = self.connection.execute(
+            "SELECT classification FROM external_wallet_classifications WHERE token_address = ?",
+            (token_address,),
+        ).fetchone()
+        if existing is not None:
+            return existing[0]
+        classification = (
+            "external_known"
+            if any(lo <= current_value_usd <= hi for lo, hi in known_purchase_ranges_usd)
+            else "external_personal"
+        )
+        self.connection.execute(
+            "INSERT INTO external_wallet_classifications"
+            "(token_address, first_seen_value_usd, classification, classified_at) "
+            "VALUES (?, ?, ?, ?)",
+            (token_address, current_value_usd, classification, utc_now()),
+        )
+        self.connection.commit()
+        return classification
 
     def load_owned_holdings(self, chain: str | None = None) -> list[OwnedHolding]:
         if chain is None:

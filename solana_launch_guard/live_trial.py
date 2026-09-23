@@ -38,6 +38,21 @@ MAX_MODEL_REQUESTS = 100
 # that's a relabeling, not a change of mind, and must not block the exit.
 SELL_WORTHY_DECISIONS = ("EXIT WARNING", "TAKE PARTIAL", "PROTECT PROFIT")
 
+# The wallet-scan below used to treat every sell-worthy holding as fair
+# game, regardless of who bought it - it isn't only this trial's own
+# positions, since the same wallet is also used for a separate copy-
+# trading bot (CopyFomo, on Telegram) and for the operator's own manual
+# buys, and this loop has no business managing either. A holding this
+# ledger's own buy flow never recorded (see
+# SQLiteStore.is_launch_guard_owned) is classified once, the first time
+# it's ever seen, and remembered forever rather than re-checked each
+# cycle - current value drifts away from whatever was actually paid
+# within minutes on these tokens, so only a first-sight check is
+# meaningful. CopyFomo's own position sizes are small and predictable
+# ($5/$8/$10 with up to ~10% slippage/chase); the operator can keep their
+# own manual buys outside these ranges to stay distinguishable.
+COPYFOMO_PURCHASE_RANGES_USD = ((5.00, 5.50), (8.00, 8.80), (10.00, 11.00))
+
 # Deterministic emergency-liquidation escalation. Normal exits optimize
 # execution quality (tight slippage/impact ceiling, model-approved sizing);
 # an emergency exit optimizes the probability of getting out at all, so it
@@ -366,6 +381,16 @@ async def cycle(*, ledger: LiveTrialLedger, settings: Settings, rpc: SolanaRpc,
             value_floor = 0.01 if signal == "EXIT WARNING" else 2
             if not math.isfinite(value) or value < value_floor or not math.isfinite(liquidity) or liquidity <= 0:
                 continue
+            if not store.is_launch_guard_owned(chain="solana", token_address=mint):
+                classification = store.classify_external_wallet_position(
+                    mint, current_value_usd=value,
+                    known_purchase_ranges_usd=COPYFOMO_PURCHASE_RANGES_USD,
+                )
+                if classification == "external_known":
+                    continue
+                # "external_personal" (or any future non-CopyFomo external
+                # source) still gets managed normally below - only a
+                # recognized CopyFomo-sized buy is deliberately left alone.
             try:
                 pnl_pct = float(row["pnl_pct"]) if row.get("pnl_pct") is not None else None
             except (TypeError, ValueError):

@@ -4277,6 +4277,66 @@ def test_owned_holding_persists_and_dashboard_is_read_only(
     store.close()
 
 
+def test_is_launch_guard_owned_reflects_a_buy_that_was_later_fully_sold(
+    tmp_path: Path,
+) -> None:
+    """owned_holdings is upserted at buy confirmation and never deleted
+    (see save_owned_holding) - a mint fully exited long ago must still
+    read as Launch-Guard-owned, since the point is distinguishing "this
+    ledger's own trade" from "something else bought it", not "is it
+    still open"."""
+    store = SQLiteStore(str(tmp_path / "portfolio.db"))
+    assert not store.is_launch_guard_owned(chain="solana", token_address="MintA")
+    store.save_owned_holding(OwnedHolding(
+        chain="solana", token_address="MintA", symbol="A", quantity=100,
+        entry_price=0.01, price_currency="USD", cost_amount=1.0,
+    ))
+    assert store.is_launch_guard_owned(chain="solana", token_address="MintA")
+    # Simulate a full sell leaving nothing behind - still no delete path
+    # exists for owned_holdings, so re-saving at zero quantity is the
+    # closest real analogue and should still read as owned.
+    store.save_owned_holding(OwnedHolding(
+        chain="solana", token_address="MintA", symbol="A", quantity=0,
+        entry_price=0.01, price_currency="USD", cost_amount=1.0,
+    ))
+    assert store.is_launch_guard_owned(chain="solana", token_address="MintA")
+    store.close()
+
+
+def test_classify_external_wallet_position_matches_a_known_purchase_range(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(str(tmp_path / "portfolio.db"))
+    ranges = ((5.00, 5.50), (8.00, 8.80), (10.00, 11.00))
+    assert store.classify_external_wallet_position(
+        "MintB", current_value_usd=5.20, known_purchase_ranges_usd=ranges,
+    ) == "external_known"
+    assert store.classify_external_wallet_position(
+        "MintC", current_value_usd=6.75, known_purchase_ranges_usd=ranges,
+    ) == "external_personal"
+    store.close()
+
+
+def test_classify_external_wallet_position_is_locked_in_on_first_sight(
+    tmp_path: Path,
+) -> None:
+    """Current value drifts away from whatever was actually paid within
+    minutes on these tokens - re-classifying on a later, unrelated value
+    would make the whole mechanism meaningless. The first classification
+    must stick even when a later value would classify differently."""
+    store = SQLiteStore(str(tmp_path / "portfolio.db"))
+    ranges = ((5.00, 5.50),)
+    first = store.classify_external_wallet_position(
+        "MintD", current_value_usd=5.10, known_purchase_ranges_usd=ranges,
+    )
+    assert first == "external_known"
+    later = store.classify_external_wallet_position(
+        "MintD", current_value_usd=500.0, known_purchase_ranges_usd=ranges,
+    )
+    assert later == "external_known"
+    store.close()
+
+
 def test_phone_notifications_deduplicate_and_respect_cooldown(
     tmp_path: Path,
 ) -> None:
