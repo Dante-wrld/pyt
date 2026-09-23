@@ -341,6 +341,53 @@ def test_decide_hunter_entry_skips_the_model_once_the_daily_loss_limit_is_breach
     book.close()
 
 
+def test_momentum_buy_is_paused_and_never_reaches_the_model(tmp_path, monkeypatch):
+    """Paused 2026-09-23 after a full session showed 17 losses vs 1 win,
+    concentrated almost entirely in MOMENTUM BUY entries - it must not
+    originate a buy, or even call the model, while paused."""
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    book = LiveTrialLedger(tmp_path / "trial.sqlite")
+    book.start()
+    model = Model()
+    assert decide_hunter_entry(snapshot(decision="MOMENTUM BUY"), model=model, ledger=book) is None
+    assert model.calls == 0
+    assert book.status()["recent_decisions"][0]["state"] == "BUY_ZONE_SKIPPED"
+    assert "paused" in book.status()["recent_decisions"][0]["reason"].lower()
+    book.close()
+
+
+def test_pullback_entries_still_run_while_momentum_buy_is_paused(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    book = LiveTrialLedger(tmp_path / "trial.sqlite")
+    book.start()
+    model = Model()
+    decision = decide_hunter_entry(snapshot(decision="BUY NOW"), model=model, ledger=book)
+    assert decision is not None
+    assert model.calls == 1
+    book.close()
+
+
+def test_momentum_buy_would_otherwise_qualify_confirming_the_pause_is_what_blocks_it(tmp_path, monkeypatch):
+    """Proves MOMENTUM_BUY_PAUSED is the actual mechanism doing the
+    blocking, not some unrelated snapshot() default - the same candidate
+    is BUY_READY and gets bought once the pause is lifted."""
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    monkeypatch.setattr("solana_launch_guard.live_trial_runner.MOMENTUM_BUY_PAUSED", False)
+    book = LiveTrialLedger(tmp_path / "trial.sqlite")
+    book.start()
+    model = Model()
+    momentum_snapshot = snapshot(decision="MOMENTUM BUY")
+    # MOMENTUM BUY's own evidence bar also requires a minimum five-minute
+    # trade count, separate from confirmations - snapshot()'s default
+    # buys_m5/sells_m5 (20/10) clears every other decision's bar but not
+    # this one, so bump it to isolate the pause as what's actually tested.
+    momentum_snapshot["candidates"][0].update(buys_m5=40, sells_m5=20)
+    decision = decide_hunter_entry(momentum_snapshot, model=model, ledger=book)
+    assert decision is not None
+    assert model.calls == 1
+    book.close()
+
+
 def test_early_buy_entry_is_capped_at_half_the_normal_order_size(tmp_path, monkeypatch):
     """An early-buy entry has no proven move behind it yet, so it earns
     only half the normal $5 order size, even if the model requests more."""

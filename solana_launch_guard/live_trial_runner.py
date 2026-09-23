@@ -45,6 +45,19 @@ MINT_LOSS_STREAK_BLOCK = 2
 # ever calling the model - kept as one constant so the two can't drift apart.
 HUNTER_EQUITY_USD = 30
 
+# Paused 2026-09-23 pending a strategy review: across tonight's full
+# session, hunter-v1 realized 17 losses against 1 win (-$17.16 total),
+# and the losses were concentrated almost entirely in MOMENTUM BUY
+# entries - including the two largest of the night (-$4.87 and -$3.45).
+# Buying into an already-confirmed move, on a token population already
+# established as bimodal (instant-rug or instant-pump, rarely a real
+# trend), means the entry is often close to the top rather than the
+# start of a continuation. Pullback and EARLY BUY entries haven't shown
+# this pattern and keep running normally; only this one decision type is
+# paused. Flip back to False once the strategy issue is actually
+# addressed, not just because losses stop for a while.
+MOMENTUM_BUY_PAUSED = True
+
 # A mint hunter-v1 fully exits doesn't just get forgotten - the shared
 # recommendation engine evicts a crashed, low-scoring candidate from its own
 # tracking pool quickly (see RecommendationBook._trim), so nothing else is
@@ -193,6 +206,17 @@ def decide_hunter_entry(
         (c, assess_entry(c, policy))
         for c in _fresh_candidates(snapshot, now=at, min_liquidity_usd=policy.min_liquidity_usd)
     ]
+    if MOMENTUM_BUY_PAUSED:
+        # Reuses the exact same "not BUY_READY" path below (dedup'd
+        # BUY_ZONE_SKIPPED logging included) rather than a separate code
+        # path, by synthesizing the same review shape assess_entry itself
+        # returns for a candidate that isn't ready yet.
+        assessed = [
+            (c, review) if c.get("decision") != "MOMENTUM BUY" else
+            (c, {**review, "state": "PAUSED",
+                 "reasons": ["MOMENTUM BUY is paused pending a strategy review"]})
+            for c, review in assessed
+        ]
     ready = [c for c, review in assessed if review["state"] == "BUY_READY"]
     if not ready:
         # A candidate can already show BUY ZONE/BUY NOW in the recommendation
