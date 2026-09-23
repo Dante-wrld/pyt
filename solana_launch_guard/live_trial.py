@@ -27,7 +27,7 @@ from .live_trial_runner import (
     execute_hunter_entry, execute_live_exit,
 )
 from .market import DexScreenerOracle
-from .wallet import SolanaRpc
+from .wallet import SolanaRpc, TransactionSimulationFailed
 
 MAX_MODEL_REQUESTS = 100
 
@@ -248,14 +248,17 @@ async def _guarded_entry(decision: LiveEntryDecision, *, ledger: LiveTrialLedger
     generic handler, which can't tell a buy failure from a sell failure and
     always mislabels it agent="portfolio-v1". Anything past reservation is
     already handled and logged by execute_hunter_entry's own except block, so
-    only pre-reservation ValueErrors are routine here - re-raise anything
-    else, same as _guarded_exit does for the sell side.
+    only pre-reservation ValueErrors (and a preflight TransactionSimulationFailed,
+    which never reaches Jupiter's own retryable-vs-fatal distinction - it's
+    a bare on-chain revert during simulation, most often slippage, equally
+    routine) are handled here - re-raise anything else, same as
+    _guarded_exit does for the sell side.
     """
     try:
         return await execute_hunter_entry(decision, ledger=ledger, **kwargs)
     except AdditionalSignerError as exc:
         raise TrialHalted("buy signing failure; stop new buys and inspect wallet") from exc
-    except ValueError as exc:
+    except (ValueError, TransactionSimulationFailed) as exc:
         if ledger.unresolved():
             raise
         ledger.assert_active()
@@ -270,7 +273,7 @@ async def _guarded_exit(*, ledger: LiveTrialLedger, agent: str, mint: str,
         return await execute_live_exit(ledger=ledger, agent=agent, mint=mint, **kwargs)
     except AdditionalSignerError as exc:
         raise TrialHalted("sell signing failure; stop new buys and inspect wallet") from exc
-    except (ValueError, ConnectionError, TrialHalted) as exc:
+    except (ValueError, ConnectionError, TrialHalted, TransactionSimulationFailed) as exc:
         if ledger.unresolved() or (isinstance(exc, TrialHalted) and not str(exc).startswith("EXIT BLOCKED")):
             raise
         ledger.assert_active()
@@ -315,7 +318,8 @@ async def cycle(*, ledger: LiveTrialLedger, settings: Settings, rpc: SolanaRpc,
                 exit_block_streaks: dict[str, int],
                 buy_zone_skip_reasons: dict[str, str],
                 chase_first_target: dict[str, float],
-                regrowth_skip_reasons: dict[str, str]) -> None:
+                regrowth_skip_reasons: dict[str, str],
+                regrowth_confirmation_counts: dict[str, int]) -> None:
     ledger.assert_active()
     if ledger.unresolved():
         raise TrialHalted("unresolved order; stop for chain reconciliation")
@@ -548,7 +552,8 @@ async def cycle(*, ledger: LiveTrialLedger, settings: Settings, rpc: SolanaRpc,
     # every cycle the normal path didn't already act, not only when it's
     # empty.
     regrowth_decision = await decide_regrowth_rebuy(model=model, ledger=ledger, oracle=oracle,
-                                                     regrowth_skip_reasons=regrowth_skip_reasons)
+                                                     regrowth_skip_reasons=regrowth_skip_reasons,
+                                                     regrowth_confirmation_counts=regrowth_confirmation_counts)
     if regrowth_decision is not None:
         exit_price = regrowth_decision.candidate["regrowth_exit_price"]
 
@@ -605,6 +610,7 @@ async def supervise(*, interval_seconds: int = 30) -> dict:
         buy_zone_skip_reasons: dict[str, str] = {}
         chase_first_target: dict[str, float] = {}
         regrowth_skip_reasons: dict[str, str] = {}
+        regrowth_confirmation_counts: dict[str, int] = {}
         while ledger.status()["status"] == "ACTIVE":
             require_exclusive_trial_flags()
             if monitor.poll() is not None:
@@ -615,7 +621,8 @@ async def supervise(*, interval_seconds: int = 30) -> dict:
                             exit_block_streaks=exit_block_streaks,
                             buy_zone_skip_reasons=buy_zone_skip_reasons,
                             chase_first_target=chase_first_target,
-                            regrowth_skip_reasons=regrowth_skip_reasons)
+                            regrowth_skip_reasons=regrowth_skip_reasons,
+                            regrowth_confirmation_counts=regrowth_confirmation_counts)
                 consecutive_cycle_failures = 0
             except TrialHalted:
                 raise

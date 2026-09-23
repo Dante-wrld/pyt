@@ -16,6 +16,18 @@ import websockets
 
 LOGGER = logging.getLogger("solana_launch_guard")
 LAMPORTS_PER_SOL = Decimal("1000000000")
+
+
+class TransactionSimulationFailed(RuntimeError):
+    """A signed transaction reverted during on-chain simulation - most
+    often the AMM's own slippage-tolerance check (e.g. Solana program
+    error 6001), a routine, market-condition-dependent failure rather
+    than an infrastructure or logic problem. Broadcast never happened
+    (this is simulation-only), so callers on the live-trial buy/sell
+    preflight path treat it the same as any other pre-reservation
+    ValueError: skip this attempt, retry next cycle, never halt the
+    trial over it."""
+
 IGNORED_MINTS = {
     "So11111111111111111111111111111111111111112",  # wrapped SOL
     "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",  # USDC
@@ -207,7 +219,7 @@ class SolanaRpc:
         error = value.get("err")
         if error is not None:
             detail = json.dumps(error, sort_keys=True, separators=(",", ":"))
-            raise RuntimeError(f"Solana transaction simulation failed: {detail}")
+            raise TransactionSimulationFailed(f"Solana transaction simulation failed: {detail}")
         return value
 
     def _get_transaction_sync(self, signature: str) -> dict[str, Any] | None:

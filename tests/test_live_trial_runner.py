@@ -6,7 +6,7 @@ import pytest
 
 from solana_launch_guard.live_trial_ledger import LiveTrialLedger, TrialHalted
 from solana_launch_guard.live_trial_runner import (
-    REGROWTH_MIN_GROWTH_PCT, REGROWTH_MIN_LIQUIDITY_USD, LiveEntryDecision,
+    REGROWTH_CONFIRMATION_POLLS, REGROWTH_MIN_GROWTH_PCT, REGROWTH_MIN_LIQUIDITY_USD, LiveEntryDecision,
     _live_arbiter, _mint_round_trip_history, _regrowth_bar_clears, can_submit,
     decide_hunter_entry, decide_regrowth_rebuy, execute_hunter_entry, execute_live_exit,
 )
@@ -1494,18 +1494,54 @@ def test_decide_regrowth_rebuy_skips_the_model_when_the_bar_is_not_cleared(tmp_p
     book.close()
 
 
-def test_decide_regrowth_rebuy_buys_a_mint_that_cleared_the_bar(tmp_path, monkeypatch):
+def test_decide_regrowth_rebuy_requires_consecutive_confirmations_not_just_one(tmp_path, monkeypatch):
+    """A single snapshot clearing the growth bar is much weaker evidence
+    than every other buy path in this system requires - it must clear the
+    bar REGROWTH_CONFIRMATION_POLLS cycles in a row before the model is
+    even asked, not just once."""
     monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
     book = LiveTrialLedger(tmp_path / "trial.sqlite")
     book.start()
     _seed_closed_position(book, mint=MINT, exit_price=1.0)
     model = Model(requested=5)
     oracle = FakeOracle(_quote(price=1 + REGROWTH_MIN_GROWTH_PCT / 100 * 1.5))
-    decision = asyncio.run(decide_regrowth_rebuy(model=model, ledger=book, oracle=oracle))
+    confirmations: dict[str, int] = {}
+    for _ in range(REGROWTH_CONFIRMATION_POLLS - 1):
+        assert asyncio.run(decide_regrowth_rebuy(
+            model=model, ledger=book, oracle=oracle, regrowth_confirmation_counts=confirmations,
+        )) is None
+    assert model.calls == 0
+    decision = asyncio.run(decide_regrowth_rebuy(
+        model=model, ledger=book, oracle=oracle, regrowth_confirmation_counts=confirmations,
+    ))
     assert decision is not None
     assert decision.mint == MINT
     assert decision.approved_cents == 500
     assert model.calls == 1
+    book.close()
+
+
+def test_decide_regrowth_rebuy_resets_the_streak_when_the_bar_stops_clearing(tmp_path, monkeypatch):
+    """A mint that clears the bar, then drops back below it, must re-earn
+    confirmation from scratch - a blip doesn't get to keep partial credit
+    toward the next genuine run."""
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    book = LiveTrialLedger(tmp_path / "trial.sqlite")
+    book.start()
+    _seed_closed_position(book, mint=MINT, exit_price=1.0)
+    model = Model(requested=5)
+    growing = FakeOracle(_quote(price=1 + REGROWTH_MIN_GROWTH_PCT / 100 * 1.5))
+    flat = FakeOracle(_quote(price=1.01))  # below the growth bar
+    confirmations: dict[str, int] = {}
+    assert asyncio.run(decide_regrowth_rebuy(
+        model=model, ledger=book, oracle=growing, regrowth_confirmation_counts=confirmations,
+    )) is None
+    assert confirmations[MINT] == 1
+    assert asyncio.run(decide_regrowth_rebuy(
+        model=model, ledger=book, oracle=flat, regrowth_confirmation_counts=confirmations,
+    )) is None
+    assert MINT not in confirmations
+    assert model.calls == 0
     book.close()
 
 
@@ -1562,9 +1598,11 @@ def test_decide_regrowth_rebuy_only_logs_a_loss_streak_block_once_per_reason(tmp
     model = Model()
     oracle = FakeOracle(_quote(price=1 + REGROWTH_MIN_GROWTH_PCT / 100 * 1.5))
     skip_reasons: dict[str, str] = {}
-    for _ in range(3):
+    confirmations: dict[str, int] = {}
+    for _ in range(REGROWTH_CONFIRMATION_POLLS + 2):
         assert asyncio.run(decide_regrowth_rebuy(
             model=model, ledger=book, oracle=oracle, regrowth_skip_reasons=skip_reasons,
+            regrowth_confirmation_counts=confirmations,
         )) is None
     blocked = book.db.execute(
         "SELECT COUNT(*) FROM decisions WHERE agent='hunter-v1' AND mint=? AND state='BLOCKED'", (MINT,),

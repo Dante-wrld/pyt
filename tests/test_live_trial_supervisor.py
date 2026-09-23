@@ -23,6 +23,7 @@ from solana_launch_guard.live_trial_ledger import LiveTrialLedger, TrialHalted
 from solana_launch_guard.live_trial_runner import LiveEntryDecision
 from solana_launch_guard.execution import USDC_MINT
 from solana_launch_guard.agents import AgentRole
+from solana_launch_guard.wallet import TransactionSimulationFailed
 
 
 def test_live_start_flags_block_parallel_auto_execution(monkeypatch):
@@ -346,6 +347,82 @@ def test_price_impact_rejection_blocks_one_buy_without_stopping_trial(tmp_path, 
     assert decisions[0]["agent"] == "hunter-v1"
     assert decisions[0]["state"] == "BUY_BLOCKED"
     assert "price impact" in decisions[0]["reason"]
+    book.close()
+
+
+def test_a_simulation_revert_blocks_one_buy_without_stopping_trial(tmp_path, monkeypatch):
+    """A signed transaction reverting during on-chain simulation (most
+    often the AMM's own slippage check, e.g. program error 6001) is a raw
+    RuntimeError from SolanaRpc.simulate_transaction - observed live to
+    propagate straight past this wrapper's ValueError-only handling and
+    crash the whole supervisor, even though broadcast never happened and
+    the same routine, market-condition-dependent failure is treated as
+    retryable everywhere else on this path."""
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    book = LiveTrialLedger(tmp_path / "trial.sqlite")
+    book.start()
+    decision = LiveEntryDecision(
+        agent="hunter-v1", mint="A" * 44, requested_cents=500,
+        approved_cents=500, reason="test", candidate={},
+    )
+
+    class Rpc:
+        async def token_balance(self, owner, mint):
+            if mint == USDC_MINT:
+                return SimpleNamespace(raw_amount=20_000_000)
+            return SimpleNamespace(raw_amount=0)
+        async def mint_decimals(self, mint):
+            return 6
+
+    class Buyer:
+        max_price_impact_pct = 3
+        max_slippage_bps = 300
+        async def preflight(self, intent, rpc):
+            raise TransactionSimulationFailed(
+                'Solana transaction simulation failed: {"InstructionError":[2,{"Custom":6001}]}'
+            )
+
+    result = asyncio.run(_guarded_entry(
+        decision, ledger=book, rpc=Rpc(), buyer=Buyer(), store=None,
+        wallet="synthetic-owner", current_snapshot=lambda: {},
+    ))
+    assert result is None
+    assert book.status()["status"] == "ACTIVE"
+    assert not book.unresolved()
+    decisions = book.status()["recent_decisions"]
+    assert decisions[0]["agent"] == "hunter-v1"
+    assert decisions[0]["state"] == "BUY_BLOCKED"
+    book.close()
+
+
+def test_a_simulation_revert_blocks_one_sell_without_stopping_trial(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    book = LiveTrialLedger(tmp_path / "trial.sqlite")
+    book.start()
+    seller = SimpleNamespace(max_price_impact_pct=3, max_slippage_bps=300)
+
+    class Rpc:
+        async def token_balance(self, owner, mint):
+            return SimpleNamespace(raw_amount=100_000, decimals=6)
+
+    async def _reverting_preflight(plan, rpc):
+        raise TransactionSimulationFailed(
+            'Solana transaction simulation failed: {"InstructionError":[2,{"Custom":6001}]}'
+        )
+    seller.preflight = _reverting_preflight
+
+    result = asyncio.run(_guarded_exit(
+        ledger=book, agent="portfolio-v1", mint="A" * 44,
+        requested_usd=12, current_exit_allowed=lambda: True,
+        decision="SELL", fraction=1, position_value_usd=12,
+        quote_age_seconds=2, liquidity_usd=60_000,
+        rpc=Rpc(), seller=seller, store=None, wallet="synthetic-owner",
+        symbol="TEST",
+    ))
+    assert result is None
+    assert book.status()["status"] == "ACTIVE"
+    assert not book.unresolved()
+    assert book.status()["recent_decisions"][0]["state"] == "EXIT_BLOCKED"
     book.close()
 
 

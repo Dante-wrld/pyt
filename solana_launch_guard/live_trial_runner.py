@@ -52,13 +52,23 @@ HUNTER_EQUITY_USD = 30
 # define that separate watch: how far above the exit price counts as
 # genuine regrowth, how long to keep watching before giving up on a mint
 # that never recovers, and the minimum liquidity to even consider it (same
-# floor as a fresh entry). Kept deliberately simple and deterministic -
-# no confirmation-count state machine, since that machinery lives in the
-# recommendation engine and can't be reconstructed here from a single
-# oracle quote.
+# floor as a fresh entry).
 REGROWTH_MIN_GROWTH_PCT = 15.0
 REGROWTH_MAX_AGE_SECONDS = 4 * 3600
 REGROWTH_MIN_LIQUIDITY_USD = 50_000.0
+# A single oracle quote clearing the growth bar is a much weaker signal
+# than every other buy path in this system requires (a pullback needs 3+
+# confirmations; even MOMENTUM BUY's lowered 1-poll bar rests on the
+# recommendation engine's OWN prior multi-poll evidence, not a single
+# snapshot) - these tokens are also bimodal (instant-rug or instant-pump,
+# rarely a clean trend), so "up 15% from where it crashed" could as easily
+# be noise as real recovery. Requiring the bar to clear on this many
+# CONSECUTIVE cycles (tracked in-memory per mint, reset the moment it
+# fails to clear) closes most of that gap without needing to reconstruct
+# the recommendation engine's full momentum/volume-label state machine -
+# it's the same "sustained, not a blip" philosophy, just built from
+# repeated simple checks instead of rich per-poll classification.
+REGROWTH_CONFIRMATION_POLLS = 3
 # Its own cap, separate from hunter-v1's 2-position fresh-discovery cap
 # (see decide_hunter_entry) - a regrowth re-entry never crowds out, or gets
 # crowded out by, a fresh discovery. Smaller than the fresh cap since this
@@ -554,6 +564,7 @@ def _regrowth_bar_clears(quote, exit_price: float) -> bool:
 async def decide_regrowth_rebuy(
     *, model, ledger: LiveTrialLedger, oracle, now: float | None = None,
     regrowth_skip_reasons: dict[str, str] | None = None,
+    regrowth_confirmation_counts: dict[str, int] | None = None,
 ) -> LiveEntryDecision | None:
     """A mint hunter-v1 has already fully exited this session, watched for
     genuine renewed growth instead of left permanently forgotten once it
@@ -562,8 +573,9 @@ async def decide_regrowth_rebuy(
     RecommendationBook._trim - so nothing else is watching it). Reuses
     every downstream risk gate a fresh buy gets: daily loss limit, mint
     loss-streak block, agent budget cap, and a real model confirmation.
-    Only the entry SIGNAL differs (see _regrowth_bar_clears), and
-    open-position capacity is tracked separately from hunter-v1's own
+    Only the entry SIGNAL differs - REGROWTH_CONFIRMATION_POLLS consecutive
+    cycles clearing _regrowth_bar_clears, tracked in regrowth_confirmation_counts -
+    and open-position capacity is tracked separately from hunter-v1's own
     fresh discoveries (see REGROWTH_MAX_OPEN_POSITIONS) so neither pool
     can crowd out the other.
     """
@@ -583,6 +595,7 @@ async def decide_regrowth_rebuy(
     if max_daily_loss_usd > 0 and daily_pnl_usd <= -max_daily_loss_usd:
         return None
     open_mints = {p["mint"] for p in positions}
+    confirmations = regrowth_confirmation_counts if regrowth_confirmation_counts is not None else {}
     for closed in ledger.closed_positions_for_regrowth(
         "hunter-v1", max_age_seconds=REGROWTH_MAX_AGE_SECONDS, now=at
     ):
@@ -591,6 +604,13 @@ async def decide_regrowth_rebuy(
             continue
         quote = await oracle.quote(mint)
         if not _regrowth_bar_clears(quote, closed["exit_price"]):
+            # A blip, not a trend - forfeits any confirmation streak
+            # already built up, so a mint has to clear the bar this many
+            # cycles IN A ROW, not just this many times total.
+            confirmations.pop(mint, None)
+            continue
+        confirmations[mint] = confirmations.get(mint, 0) + 1
+        if confirmations[mint] < REGROWTH_CONFIRMATION_POLLS:
             continue
         mint_history = _mint_round_trip_history(ledger, mint)
         if mint_history["consecutive_losses"] >= MINT_LOSS_STREAK_BLOCK:
@@ -626,7 +646,9 @@ async def decide_regrowth_rebuy(
             {"mode": "live_trial", "candidate": candidate,
              "closed_position": {"exit_price_usd": closed["exit_price"],
                                   "closed_at": closed["closed_at"],
-                                  "growth_since_exit_pct": round(growth_pct, 1)},
+                                  "growth_since_exit_pct": round(growth_pct, 1),
+                                  "consecutive_confirmations": confirmations[mint],
+                                  "confirmations_required": REGROWTH_CONFIRMATION_POLLS},
              "maximum_order_usd": 5,
              "remaining_gross_budget_usd": status["remaining_buy_cap_cents"] / 100,
              "mint_trade_history": mint_history},
@@ -650,7 +672,9 @@ async def decide_regrowth_rebuy(
         if not 0 < approved_cents <= requested_cents:
             continue
         ledger.log(agent="hunter-v1", mint=mint, state="APPROVED",
-                   reason=f"regrowth re-entry approved ({growth_pct:.1f}% above exit); {approved_cents} cents")
+                   reason=f"regrowth re-entry approved ({growth_pct:.1f}% above exit, "
+                          f"{confirmations[mint]} consecutive confirmations); {approved_cents} cents")
+        confirmations.pop(mint, None)
         return LiveEntryDecision("hunter-v1", mint, requested_cents, approved_cents, proposal.thesis, candidate)
     return None
 
