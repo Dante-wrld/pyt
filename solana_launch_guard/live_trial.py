@@ -29,7 +29,7 @@ from .live_trial_runner import (
 from .market import DexScreenerOracle
 from .wallet import SolanaRpc, TransactionSimulationFailed
 
-MAX_MODEL_REQUESTS = 100
+MAX_MODEL_REQUESTS = 200
 
 # Decisions that still warrant a sell attempt. The portfolio monitor
 # recomputes this label independently every ~15s, and for a small, volatile
