@@ -106,11 +106,21 @@ class ShadowRecoveryPolicy:
             min_sell_usd=get("PORTFOLIO_MIN_SELL_VALUE_USD", 2),
             require_medium_risk=get_bool("ENTRY_REQUIRE_MEDIUM_RISK", True),
         )
-        if (policy.confirmations < 3 or policy.pullback_pct <= 0
+        # policy.confirmations itself has no independent floor here: its one
+        # use (assess_entry's `required`, below) always clamps it inside
+        # max(3, policy.confirmations, ...), so the effective minimum is
+        # already 3 regardless of what this field holds - a separate check
+        # on it here would just duplicate that clamp, and would wrongly
+        # couple this module's own floor to ENTRY_CONFIRMATION_POLLS
+        # (confirmed live 2026-09-23: lowering that setting to 2 for the
+        # general entry path raised this validation error every cycle and
+        # halted the trial, even though nothing here actually needed it
+        # to be >= 3 - only the general recommendation-engine path did).
+        if (policy.pullback_pct <= 0
                 or not 0 < policy.trailing_stop_pct < 100
                 or not policy.trailing_stop_pct < policy.principal_recovered_trailing_stop_pct < 100
                 or policy.stagnation_window_seconds <= 0):
-            raise ValueError("invalid shadow recovery configuration: confirmations >= 3, pullback, "
+            raise ValueError("invalid shadow recovery configuration: pullback, "
                              "trailing stop (with the principal-recovered variant exceeding it) and "
                              "stagnation window required")
         return policy
