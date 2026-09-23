@@ -264,6 +264,35 @@ def _sell_choice(raw: dict, mint: str, value: float, signal: str,
     return None
 
 
+def _profit_protecting_slippage_bps(
+    *, gain_pct: float | None, base_slippage_bps: int,
+    ceiling_bps: int, margin_bps: int,
+) -> int:
+    """Widen a profit-taking exit's slippage tolerance up to (but never
+    past) the point a fill would still leave real profit - a fixed cap
+    tuned for "don't accept a terrible price" has no way to know a large
+    paper gain has room to give back and still come out ahead. Never
+    widens a loss-cutting exit (gain_pct <= 0 or unknown: returns
+    base_slippage_bps unchanged), and never exceeds ceiling_bps regardless
+    of how large the paper gain is - a quote demanding extreme slippage is
+    itself a sign the liquidity is gone, not a real fill worth chasing.
+    margin_bps shaves a safety buffer off the literal breakeven point, so
+    the fill is required to still be profitable, not just break even
+    exactly (which fees/rounding could tip into a small loss anyway).
+
+    Confirmed live 2026-09-23 (MOLTYATT): a TAKE_PARTIAL at +155.3%
+    unrealized needed ~20.01% slippage to fill and was blocked by the
+    fixed 15% cap; liquidity collapsed about a minute later before a
+    wider attempt could run, turning a peak +399.97% paper gain into a
+    realized loss. At +155.3%, breakeven slippage is ~60.8% - the
+    blocked 20.01% fill would have locked in the vast majority of it.
+    """
+    if gain_pct is None or gain_pct <= 0:
+        return base_slippage_bps
+    breakeven_bps = (gain_pct / (100 + gain_pct)) * 10000
+    return max(0, min(ceiling_bps, int(breakeven_bps) - margin_bps))
+
+
 async def _notify(settings: Settings, *, title: str, message: str) -> None:
     if not settings.pushover_app_token or not settings.pushover_user_key:
         return
@@ -442,7 +471,12 @@ async def cycle(*, ledger: LiveTrialLedger, settings: Settings, rpc: SolanaRpc,
                 chosen = ("SELL", 1.0)
                 active_seller = seller
                 active_max_impact = min(8, settings.auto_sell_max_price_impact_pct)
-                active_max_slippage = min(1500, settings.auto_sell_max_slippage_bps)
+                active_max_slippage = _profit_protecting_slippage_bps(
+                    gain_pct=pnl_pct,
+                    base_slippage_bps=min(1500, settings.auto_sell_max_slippage_bps),
+                    ceiling_bps=settings.emergency_sell_max_slippage_bps,
+                    margin_bps=settings.profit_protecting_slippage_margin_bps,
+                )
             else:
                 raw = model.propose(role=AgentRole.PORTFOLIO_MANAGER,
                     context={"mode": "live_trial", "owned_position": row,
@@ -457,7 +491,12 @@ async def cycle(*, ledger: LiveTrialLedger, settings: Settings, rpc: SolanaRpc,
                 chosen = sell_choice
                 active_seller = seller
                 active_max_impact = min(8, settings.auto_sell_max_price_impact_pct)
-                active_max_slippage = min(1500, settings.auto_sell_max_slippage_bps)
+                active_max_slippage = _profit_protecting_slippage_bps(
+                    gain_pct=pnl_pct,
+                    base_slippage_bps=min(1500, settings.auto_sell_max_slippage_bps),
+                    ceiling_bps=settings.emergency_sell_max_slippage_bps,
+                    margin_bps=settings.profit_protecting_slippage_margin_bps,
+                )
             owner = next((p["agent"] for p in ledger.positions() if p["mint"] == mint), "portfolio-v1")
             result = await _guarded_exit(
                 ledger=ledger, agent=owner, mint=mint, requested_usd=value * chosen[1],
@@ -544,7 +583,12 @@ async def cycle(*, ledger: LiveTrialLedger, settings: Settings, rpc: SolanaRpc,
             chosen = sell_choice
             active_seller = seller
             active_max_impact = min(8, settings.auto_sell_max_price_impact_pct)
-            active_max_slippage = min(1500, settings.auto_sell_max_slippage_bps)
+            active_max_slippage = _profit_protecting_slippage_bps(
+                gain_pct=gain_pct,
+                base_slippage_bps=min(1500, settings.auto_sell_max_slippage_bps),
+                ceiling_bps=settings.emergency_sell_max_slippage_bps,
+                margin_bps=settings.profit_protecting_slippage_margin_bps,
+            )
         def fresh_exit() -> bool:
             # Sells need a new oracle quote in cycle; flag and ledger enforce
             # stop/deadline, while the seller creates another fresh market quote.

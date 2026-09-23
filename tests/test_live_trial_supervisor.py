@@ -14,6 +14,7 @@ from solana_launch_guard.live_trial import (
     _exit_warning_model_call_is_redundant,
     _guarded_entry,
     _guarded_exit,
+    _profit_protecting_slippage_bps,
     _sell_choice,
     _should_escalate_to_emergency,
     _track_exit_block_streak,
@@ -56,6 +57,49 @@ def test_exit_choice_requires_matched_signal_mint_confidence_and_amount():
     assert _sell_choice(partial, "mint", 12, "TAKE_PARTIAL") == ("TAKE_PARTIAL", 1 / 3)
     assert _sell_choice(partial, "mint", 12, "TAKE_PARTIAL", .25) is None
     assert _sell_choice(partial, "mint", 12, "TAKE_PARTIAL", .5) == ("TAKE_PARTIAL", 1 / 3)
+
+
+def test_profit_protecting_slippage_never_widens_a_loss_or_unknown_gain():
+    kwargs = dict(base_slippage_bps=1500, ceiling_bps=4000, margin_bps=200)
+    assert _profit_protecting_slippage_bps(gain_pct=None, **kwargs) == 1500
+    assert _profit_protecting_slippage_bps(gain_pct=0, **kwargs) == 1500
+    assert _profit_protecting_slippage_bps(gain_pct=-12.5, **kwargs) == 1500
+
+
+def test_profit_protecting_slippage_widens_up_to_breakeven_minus_margin():
+    """Confirmed live 2026-09-23 (MOLTYATT): a TAKE_PARTIAL at +155.3%
+    unrealized needed ~20.01% (2001 bps) slippage to fill and was blocked
+    by the fixed 1500 bps cap - the dynamic cap must clear that."""
+    widened = _profit_protecting_slippage_bps(
+        gain_pct=155.3, base_slippage_bps=1500, ceiling_bps=4000, margin_bps=200,
+    )
+    assert widened > 2001
+    # Exact breakeven at +155.3% is ~6083 bps; even after the 200 bps
+    # margin (~5883 bps) that's still above the 4000 bps ceiling, so the
+    # ceiling - not breakeven - is what actually binds here.
+    assert widened == 4000
+
+
+def test_profit_protecting_slippage_never_exceeds_the_ceiling():
+    """An enormous paper gain (e.g. a 50x pump) must not translate into
+    near-100% slippage tolerance - a quote demanding that much slippage
+    is a sign of vanished liquidity, not a real fill worth chasing."""
+    widened = _profit_protecting_slippage_bps(
+        gain_pct=5000, base_slippage_bps=1500, ceiling_bps=4000, margin_bps=200,
+    )
+    assert widened == 4000
+
+
+def test_profit_protecting_slippage_can_tighten_a_small_gains_cap():
+    """A small paper gain has little room to give back - the breakeven-
+    based cap can end up tighter than the old flat 1500 bps, which is the
+    point: never accept a fill that would turn this specific profit into
+    a loss, even if that means being more conservative than before."""
+    widened = _profit_protecting_slippage_bps(
+        gain_pct=15, base_slippage_bps=1500, ceiling_bps=4000, margin_bps=200,
+    )
+    assert widened < 1500
+    assert widened == 1104  # breakeven ~1304 bps, minus the 200 bps margin
 
 
 def test_emergency_escalation_requires_a_hard_stop_loss_plus_a_prior_block():

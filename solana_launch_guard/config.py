@@ -208,6 +208,11 @@ class Settings:
     # execute_live_exit's catastrophic-proceeds floor applies regardless.
     emergency_sell_max_price_impact_pct: float = 35.0
     emergency_sell_max_slippage_bps: int = 4000
+    # Safety buffer (see live_trial.py's _profit_protecting_slippage_bps):
+    # a profit-taking exit's dynamically-widened slippage cap stops this
+    # many bps short of the position's literal breakeven point, so a fill
+    # is still required to leave real profit, not just avoid an exact loss.
+    profit_protecting_slippage_margin_bps: int = 200
     auto_sell_adaptive_chunks: bool = False
     auto_sell_min_chunk_fraction: float = 0.01
     auto_sell_max_chunk_attempts: int = 8
@@ -494,6 +499,9 @@ class Settings:
             emergency_sell_max_slippage_bps=_int(
                 "EMERGENCY_SELL_MAX_SLIPPAGE_BPS", 4000
             ),
+            profit_protecting_slippage_margin_bps=_int(
+                "PROFIT_PROTECTING_SLIPPAGE_MARGIN_BPS", 200
+            ),
             auto_sell_adaptive_chunks=_bool(
                 "AUTO_SELL_ADAPTIVE_CHUNKS", False
             ),
@@ -743,6 +751,11 @@ class Settings:
             raise ValueError(
                 "EMERGENCY_SELL_MAX_SLIPPAGE_BPS must exceed the normal "
                 "ceiling and be from 1 through 9000"
+            )
+        if not 0 <= self.profit_protecting_slippage_margin_bps < self.emergency_sell_max_slippage_bps:
+            raise ValueError(
+                "PROFIT_PROTECTING_SLIPPAGE_MARGIN_BPS must be non-negative "
+                "and less than EMERGENCY_SELL_MAX_SLIPPAGE_BPS"
             )
         if not 0 < self.auto_sell_min_chunk_fraction <= 0.25:
             raise ValueError(
