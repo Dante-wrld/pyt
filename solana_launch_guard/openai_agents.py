@@ -127,7 +127,8 @@ class OpenAIProposalModel:
         resolved_key = api_key or os.getenv("OPENAI_API_KEY")
         if not resolved_key:
             raise ValueError("OPENAI_API_KEY is not set")
-        self.model = model or os.getenv("OPENAI_AGENT_MODEL", "gpt-5-mini")
+        default_model = os.getenv("OPENAI_AGENT_MODEL", "gpt-5-mini")
+        self.model = model or default_model
         self.client = OpenAI(api_key=resolved_key, timeout=timeout_seconds)
 
     def propose(self, *, role: AgentRole, context: dict[str, Any]) -> dict[str, Any]:

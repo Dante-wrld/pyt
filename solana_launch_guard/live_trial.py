@@ -427,9 +427,10 @@ async def cycle(*, ledger: LiveTrialLedger, settings: Settings, rpc: SolanaRpc,
                 ledger.log(agent="portfolio-v1", mint=mint, state="PROPOSAL", reason=thesis)
                 permitted_fraction = (settings.auto_sell_take_partial_fraction if signal == "TAKE PARTIAL"
                                       else settings.auto_sell_protect_profit_fraction)
-                chosen = _sell_choice(raw, mint, value, signal, permitted_fraction)
-                if chosen is None:
+                sell_choice = _sell_choice(raw, mint, value, signal, permitted_fraction)
+                if sell_choice is None:
                     continue
+                chosen = sell_choice
                 active_seller = seller
                 active_max_impact = min(8, settings.auto_sell_max_price_impact_pct)
                 active_max_slippage = min(1500, settings.auto_sell_max_slippage_bps)
@@ -513,9 +514,10 @@ async def cycle(*, ledger: LiveTrialLedger, settings: Settings, rpc: SolanaRpc,
                 context={"mode": "live_trial", "owned_position": marked,
                          "fresh_quote": market, "reversal_review": review,
                          "constraint": "Choose SELL for EXIT/EMERGENCY_EXIT or TAKE_PARTIAL for TAKE_PARTIAL, or HOLD. No buys."})
-            chosen = _sell_choice(raw, position["mint"], current_value, review["state"], partial_limit)
-            if chosen is None:
+            sell_choice = _sell_choice(raw, position["mint"], current_value, review["state"], partial_limit)
+            if sell_choice is None:
                 continue
+            chosen = sell_choice
             active_seller = seller
             active_max_impact = min(8, settings.auto_sell_max_price_impact_pct)
             active_max_slippage = min(1500, settings.auto_sell_max_slippage_bps)
@@ -581,8 +583,9 @@ async def cycle(*, ledger: LiveTrialLedger, settings: Settings, rpc: SolanaRpc,
                                                      regrowth_confirmation_counts=regrowth_confirmation_counts)
     if regrowth_decision is not None:
         exit_price = regrowth_decision.candidate["regrowth_exit_price"]
+        regrowth_mint = regrowth_decision.mint
 
-        async def _still_growing(mint=regrowth_decision.mint, exit_price=exit_price) -> bool:
+        async def _still_growing(mint=regrowth_mint, exit_price=exit_price) -> bool:
             return _regrowth_bar_clears(await oracle.quote(mint), exit_price)
 
         result = await _guarded_entry(regrowth_decision, ledger=ledger, rpc=rpc,

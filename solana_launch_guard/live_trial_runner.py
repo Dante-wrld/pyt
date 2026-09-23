@@ -287,7 +287,12 @@ def decide_hunter_entry(
     # past what we ourselves judged worth exiting at is not - we'd be buying
     # at what would have been our own take-profit level.
     chase_targets = chase_first_target if chase_first_target is not None else {}
-    frozen_target = chase_targets.setdefault(mint, candidate.get("planned_target_price"))
+    frozen_target = chase_targets.get(mint)
+    if frozen_target is None:
+        candidate_target = candidate.get("planned_target_price")
+        if candidate_target is not None:
+            frozen_target = float(candidate_target)
+            chase_targets[mint] = frozen_target
     current_price = candidate.get("price")
     if (frozen_target is not None and current_price is not None
             and float(current_price) >= float(frozen_target)):

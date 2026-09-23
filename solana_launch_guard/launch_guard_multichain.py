@@ -163,7 +163,9 @@ class MultichainMixin(LaunchGuardState):
             # launch_guard_ingestion.py's equivalent check is chain-agnostic
             # too, so this must not be narrower than that.
             stock_symbols = await self.oracle.robinhood_stock_token_symbols()
-            if _is_stock_token_symbol(quote.symbol, stock_symbols):
+            if stock_symbols is not None and _is_stock_token_symbol(
+                quote.symbol, stock_symbols
+            ):
                 LOGGER.info(
                     "%s REJECT %-10s contract=%s reason=tokenized stock symbol",
                     transfer.chain.upper(),
