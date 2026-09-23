@@ -28,6 +28,7 @@ from .execution import (
     SolanaAutoBuyer,
     SolanaAutoSeller,
 )
+from .geckoterminal import GeckoTerminalClient
 from .intelligence import CoinIntelligence
 from .market import DexScreenerOracle
 from .market_structure import MarketStructureScanner
@@ -51,6 +52,7 @@ class LaunchGuardState(Protocol):
     multichain_last_result: dict[str, tuple[str, int]]
     bitquery_client: BitqueryClient | None
     launchlab_last_result: dict[str, tuple[str, int]]
+    gecko_client: GeckoTerminalClient
     solana_momentum_last_result: dict[str, tuple[str, int]]
     recommendation_console_output: bool
     portfolio_monitor_enabled: bool
