@@ -49,6 +49,30 @@ SELL_WORTHY_DECISIONS = ("EXIT WARNING", "TAKE PARTIAL", "PROTECT PROFIT")
 EMERGENCY_STOP_LOSS_PCT = 20
 EMERGENCY_BLOCK_STREAK = 2
 
+# EXIT WARNING positions scanned from the wallet (not bought through this
+# ledger) often have no recorded cost basis, so pnl_pct is None and
+# _should_escalate_to_emergency can never fire for them no matter how long
+# they stay stuck - observed live: two sub-$0.25 dust positions consumed 43
+# of a single trial's 100-request model budget, proposing a full exit every
+# single cycle for hours with the model recommending the identical "sell
+# it" answer every time and execution failing for the same structural
+# reason (below the exchange minimum / too illiquid for any slippage
+# ceiling) each time. Once a position has given the same obvious signal
+# this many consecutive cycles in a row, asking the model again adds no
+# information - fall back to the answer it already gave and keep retrying
+# the exit deterministically. Only applies to EXIT WARNING (a full,
+# unambiguous liquidation): TAKE_PARTIAL/PROTECT PROFIT sizing genuinely
+# depends on model judgment and is left untouched.
+EXIT_WARNING_MODEL_SKIP_STREAK = 5
+
+
+def _exit_warning_model_call_is_redundant(signal: str, block_streak: int) -> bool:
+    """True once an EXIT WARNING position has repeated the same obvious
+    full-exit signal for EXIT_WARNING_MODEL_SKIP_STREAK consecutive blocked
+    cycles - asking the model again adds no information (see
+    EXIT_WARNING_MODEL_SKIP_STREAK above)."""
+    return signal == "EXIT WARNING" and block_streak >= EXIT_WARNING_MODEL_SKIP_STREAK
+
 
 def _should_escalate_to_emergency(*, pnl_pct: float | None, block_streak: int,
                                   liquidity_collapse: bool = False) -> bool:
@@ -355,6 +379,15 @@ async def cycle(*, ledger: LiveTrialLedger, settings: Settings, rpc: SolanaRpc,
                 active_seller = emergency_seller
                 active_max_impact = settings.emergency_sell_max_price_impact_pct
                 active_max_slippage = settings.emergency_sell_max_slippage_bps
+            elif _exit_warning_model_call_is_redundant(signal, exit_block_streaks.get(mint, 0)):
+                thesis = (f"deterministic: EXIT WARNING for {exit_block_streaks[mint]} "
+                          "consecutive blocked cycles with no cost basis to evaluate - "
+                          "repeating the model's already-consistent full-exit answer")
+                ledger.log(agent="portfolio-v1", mint=mint, state="PROPOSAL", reason=thesis)
+                chosen = ("SELL", 1.0)
+                active_seller = seller
+                active_max_impact = min(8, settings.auto_sell_max_price_impact_pct)
+                active_max_slippage = min(1500, settings.auto_sell_max_slippage_bps)
             else:
                 raw = model.propose(role=AgentRole.PORTFOLIO_MANAGER,
                     context={"mode": "live_trial", "owned_position": row,

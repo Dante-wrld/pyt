@@ -8,8 +8,10 @@ from solana_launch_guard.live_trial import (
     EMERGENCY_BLOCK_STREAK,
     EMERGENCY_STOP_LOSS_PCT,
     EXIT_STUCK_ALERT_STREAK,
+    EXIT_WARNING_MODEL_SKIP_STREAK,
     BoundedTrialModel,
     _eligible_exit,
+    _exit_warning_model_call_is_redundant,
     _guarded_entry,
     _guarded_exit,
     _sell_choice,
@@ -81,6 +83,23 @@ def test_emergency_escalation_liquidity_collapse_overrides_everything():
     assess_exit signal) forces emergency handling even for a profitable,
     never-blocked position - it threatens a winning position too."""
     assert _should_escalate_to_emergency(pnl_pct=50, block_streak=0, liquidity_collapse=True)
+
+
+def test_exit_warning_model_call_is_redundant_only_after_enough_repeated_blocks():
+    """A wallet-scanned position often has no recorded cost basis (pnl_pct
+    is None), so it can never reach _should_escalate_to_emergency no matter
+    how long it stays stuck - without this separate check it would ask the
+    model the same already-answered question forever."""
+    assert not _exit_warning_model_call_is_redundant("EXIT WARNING", EXIT_WARNING_MODEL_SKIP_STREAK - 1)
+    assert _exit_warning_model_call_is_redundant("EXIT WARNING", EXIT_WARNING_MODEL_SKIP_STREAK)
+
+
+def test_exit_warning_model_call_is_redundant_only_for_a_full_exit_signal():
+    """TAKE_PARTIAL/PROTECT PROFIT sizing genuinely depends on model
+    judgment, even after many blocked attempts, so only the unambiguous
+    full-liquidation EXIT WARNING signal ever skips the model call."""
+    assert not _exit_warning_model_call_is_redundant("TAKE PARTIAL", EXIT_WARNING_MODEL_SKIP_STREAK + 10)
+    assert not _exit_warning_model_call_is_redundant("PROTECT PROFIT", EXIT_WARNING_MODEL_SKIP_STREAK + 10)
 
 
 def test_full_liquidation_bypasses_the_two_dollar_floor_but_partial_sells_do_not():
