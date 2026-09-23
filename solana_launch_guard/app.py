@@ -40,6 +40,7 @@ from .launch_guard_auto_sell import AutoSellMixin
 from .launch_guard_ingestion import LaunchIngestionMixin
 from .launch_guard_launchlab import LaunchLabFeedMixin
 from .launch_guard_multichain import MultichainMixin
+from .launch_guard_solana_momentum import SolanaMomentumFeedMixin
 from .launch_guard_portfolio_monitor import PortfolioMonitorMixin
 from .launch_guard_recommendations import RecommendationMonitorMixin
 from .launch_guard_support import (  # noqa: F401 - re-exported for callers/tests
@@ -95,6 +96,7 @@ class LaunchGuard(
     RecommendationMonitorMixin,
     MultichainMixin,
     LaunchLabFeedMixin,
+    SolanaMomentumFeedMixin,
 ):
     """Owns shared state (settings, store, broker, risk, oracle, ...) and
     composes the trading behaviors implemented by the mixins above; see
@@ -134,6 +136,7 @@ class LaunchGuard(
                 client_secret=settings.bitquery_client_secret,
             )
         self.launchlab_last_result: dict[str, tuple[str, int]] = {}
+        self.solana_momentum_last_result: dict[str, tuple[str, int]] = {}
         self.recommendation_console_output = True
         self.portfolio_monitor_enabled = False
         self.portfolio_last_decisions: dict[str, str] = {}
@@ -355,6 +358,7 @@ class LaunchGuard(
                 )
             if self.bitquery_client is not None:
                 tasks.append(asyncio.create_task(self.run_launchlab_feed()))
+            tasks.append(asyncio.create_task(self.run_solana_momentum_feed()))
 
         if mode == "robinhood":
             tasks.append(

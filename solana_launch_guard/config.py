@@ -264,6 +264,15 @@ class Settings:
     hyperevm_token_addresses: tuple[str, ...] = ()
     robinhood_poll_seconds: float = 15.0
     multichain_poll_seconds: float = 15.0
+    # Discovers established Solana tokens (age >= solana_momentum_min_age_days,
+    # no upper bound) via the same DexScreener token-profiles/boosts feed the
+    # multichain mixin already uses for EVM chains - pump.fun/LaunchLab only
+    # ever see a mint at launch, so this is the only source for a token
+    # regaining momentum well after its first hours/days. 30s, slower than
+    # multichain_poll_seconds, since this adds its own DexScreener call volume
+    # on top of the existing feeds sharing that same rate limit.
+    solana_momentum_poll_seconds: float = 30.0
+    solana_momentum_min_age_days: float = 3.0
     bitquery_client_id: str | None = None
     bitquery_client_secret: str | None = None
     # 60s, not the 15-20s the other feeds use: each poll spends 3 Bitquery
@@ -602,6 +611,12 @@ class Settings:
             multichain_poll_seconds=_float(
                 "MULTICHAIN_POLL_SECONDS",
                 _float("ROBINHOOD_POLL_SECONDS", 15.0),
+            ),
+            solana_momentum_poll_seconds=_float(
+                "SOLANA_MOMENTUM_POLL_SECONDS", 30.0
+            ),
+            solana_momentum_min_age_days=_float(
+                "SOLANA_MOMENTUM_MIN_AGE_DAYS", 3.0
             ),
             bitquery_client_id=(os.getenv("BITQUERY_CLIENT_ID") or None),
             bitquery_client_secret=(os.getenv("BITQUERY_CLIENT_SECRET") or None),

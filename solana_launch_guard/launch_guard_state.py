@@ -51,6 +51,7 @@ class LaunchGuardState(Protocol):
     multichain_last_result: dict[str, tuple[str, int]]
     bitquery_client: BitqueryClient | None
     launchlab_last_result: dict[str, tuple[str, int]]
+    solana_momentum_last_result: dict[str, tuple[str, int]]
     recommendation_console_output: bool
     portfolio_monitor_enabled: bool
     portfolio_last_decisions: dict[str, str]
