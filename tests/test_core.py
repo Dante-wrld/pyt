@@ -79,6 +79,7 @@ from solana_launch_guard.strategy import AdaptiveStrategy
 from solana_launch_guard.wallet import (
     SolanaRpc,
     SolanaTokenHolding,
+    WalletTrade,
     parse_wallet_trades,
 )
 
@@ -5307,3 +5308,81 @@ def test_persistent_discovery_retries_missing_quote_and_restores_candidate(
     restored_guard = LaunchGuard(config, reopened)
     assert quote.recommendation_key in restored_guard.recommendations.candidates
     reopened.close()
+
+
+def test_handle_copyfomo_evm_transfer_logs_without_scoring_or_recommending(
+    tmp_path: Path,
+) -> None:
+    """CopyFomo trades from its own wallet, never Launch Guard's - this
+    handler only watches and logs, for a later performance report, unlike
+    handle_evm_transfer (which feeds the recommendation engine)."""
+    database = tmp_path / "copyfomo-evm.db"
+    config = settings(database)
+    store = SQLiteStore(str(database))
+    guard = LaunchGuard(config, store)
+
+    quote = MarketQuote(
+        mint="0xCopiedToken", symbol="COPIED", price_sol=0, price_usd=1.5,
+        chain="base", liquidity_usd=50_000, market_cap_usd=100_000,
+        pair_address="0xPair", pair_created_at_ms=1, buys_m5=10, sells_m5=2,
+        volume_m5_usd=5_000, price_change_m5_pct=5,
+    )
+
+    class FakeOracle:
+        async def quote(self, mint: str, *, chain: str = "solana") -> MarketQuote | None:
+            return quote
+
+    guard.oracle = FakeOracle()  # type: ignore[assignment]
+    transfer = EvmTransfer(
+        chain="base", wallet="0xCopyFomoWallet", transaction_hash="0xTx",
+        block_number=1, log_index=0, contract="0xCopiedToken",
+        symbol="COPIED", direction="BUY", token_amount=100,
+    )
+
+    asyncio.run(guard.handle_copyfomo_evm_transfer(transfer))
+
+    row = store.connection.execute(
+        "SELECT wallet, chain, token_address, direction, source FROM wallet_events"
+    ).fetchone()
+    assert row["wallet"] == "0xCopyFomoWallet"
+    assert row["chain"] == "base"
+    assert row["token_address"] == "0xCopiedToken"
+    assert row["direction"] == "BUY"
+    assert row["source"] == "copyfomo_monitor"
+    assert quote.recommendation_key not in guard.recommendations.candidates
+    store.close()
+
+
+def test_handle_copyfomo_solana_trade_logs_without_opening_a_paper_position(
+    tmp_path: Path,
+) -> None:
+    """Same as the EVM handler above, on the Solana side - unlike
+    handle_wallet_trade (which opens a simulated paper position), this
+    only logs the trade for later analysis."""
+    database = tmp_path / "copyfomo-solana.db"
+    config = settings(database)
+    store = SQLiteStore(str(database))
+    guard = LaunchGuard(config, store)
+
+    class FakeOracle:
+        async def quote(self, mint: str, *, chain: str = "solana") -> MarketQuote | None:
+            return None
+
+    guard.oracle = FakeOracle()  # type: ignore[assignment]
+    trade = WalletTrade(
+        wallet="CopyFomoSolanaWallet111111111111111111111",
+        signature="sig-1", slot=1, mint="CopiedMint1111111111111111111111111111111",
+        side="BUY", token_delta=1000.0, native_sol_delta=-1.5,
+    )
+
+    asyncio.run(guard.handle_copyfomo_solana_trade(trade))
+
+    row = store.connection.execute(
+        "SELECT wallet, mint, side, signature FROM wallet_trades"
+    ).fetchone()
+    assert row["wallet"] == "CopyFomoSolanaWallet111111111111111111111"
+    assert row["mint"] == "CopiedMint1111111111111111111111111111111"
+    assert row["side"] == "BUY"
+    assert row["signature"] == "sig-1"
+    assert not guard.broker.has_position("CopiedMint1111111111111111111111111111111")
+    store.close()

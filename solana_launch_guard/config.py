@@ -285,6 +285,15 @@ class Settings:
     evm_wallet_address: str | None = None
     hyperliquid_address: str | None = None
     evm_wallet_poll_seconds: float = 10.0
+    # CopyFomo (a Telegram copy-trading bot) trades from its own wallet(s),
+    # never Launch Guard's - read-only monitoring only (logs its trades for
+    # a later weekly performance report), never scores or acts on them.
+    # Which chain the EVM wallet is watched on comes from evm_rpc_urls, so
+    # only that chain's own *_RPC_URL needs to be configured.
+    copyfomo_solana_wallet: str | None = None
+    copyfomo_evm_wallet: str | None = None
+    copyfomo_evm_chain: str = "base"
+    copyfomo_evm_poll_seconds: float = 15.0
     ethereum_rpc_url: str = ""
     base_rpc_url: str = ""
     bnb_rpc_url: str = ""
@@ -628,6 +637,10 @@ class Settings:
                 or None
             ),
             evm_wallet_poll_seconds=_float("EVM_WALLET_POLL_SECONDS", 10.0),
+            copyfomo_solana_wallet=(os.getenv("COPYFOMO_SOLANA_WALLET") or None),
+            copyfomo_evm_wallet=(os.getenv("COPYFOMO_EVM_WALLET") or None),
+            copyfomo_evm_chain=os.getenv("COPYFOMO_EVM_CHAIN", "base"),
+            copyfomo_evm_poll_seconds=_float("COPYFOMO_EVM_POLL_SECONDS", 15.0),
             ethereum_rpc_url=os.getenv("ETHEREUM_RPC_URL", ""),
             base_rpc_url=os.getenv("BASE_RPC_URL", ""),
             bnb_rpc_url=os.getenv("BNB_RPC_URL", ""),
@@ -1042,9 +1055,13 @@ class Settings:
         if self.evm_wallet_poll_seconds < 5:
             raise ValueError("EVM_WALLET_POLL_SECONDS must be at least 5")
         evm_address_pattern = r"0x[0-9a-fA-F]{40}"
-        for address in (self.evm_wallet_address, self.hyperliquid_address):
+        for address in (self.evm_wallet_address, self.hyperliquid_address, self.copyfomo_evm_wallet):
             if address and re.fullmatch(evm_address_pattern, address) is None:
                 raise ValueError(f"invalid EVM public address: {address}")
+        if self.copyfomo_solana_wallet and not 32 <= len(self.copyfomo_solana_wallet) <= 44:
+            raise ValueError(f"invalid COPYFOMO_SOLANA_WALLET: {self.copyfomo_solana_wallet}")
+        if self.copyfomo_evm_poll_seconds < 5:
+            raise ValueError("COPYFOMO_EVM_POLL_SECONDS must be at least 5")
         token_groups = (
             self.ethereum_token_addresses,
             self.base_token_addresses,

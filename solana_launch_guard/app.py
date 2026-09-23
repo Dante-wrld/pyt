@@ -38,6 +38,7 @@ from .intelligence import CoinIntelligence
 from .launch_guard_auto_buy import AutoBuyMixin
 from .launch_guard_auto_rebuy import AutoRebuyMixin
 from .launch_guard_auto_sell import AutoSellMixin
+from .launch_guard_copyfomo_monitor import CopyFomoMonitorMixin
 from .launch_guard_ingestion import LaunchIngestionMixin
 from .launch_guard_launchlab import LaunchLabFeedMixin
 from .launch_guard_multichain import MultichainMixin
@@ -98,6 +99,7 @@ class LaunchGuard(
     MultichainMixin,
     LaunchLabFeedMixin,
     SolanaMomentumFeedMixin,
+    CopyFomoMonitorMixin,
 ):
     """Owns shared state (settings, store, broker, risk, oracle, ...) and
     composes the trading behaviors implemented by the mixins above; see
@@ -361,6 +363,7 @@ class LaunchGuard(
             if self.bitquery_client is not None:
                 tasks.append(asyncio.create_task(self.run_launchlab_feed()))
             tasks.append(asyncio.create_task(self.run_solana_momentum_feed()))
+            tasks.extend(self.build_copyfomo_wallet_tasks())
 
         if mode == "robinhood":
             tasks.append(
