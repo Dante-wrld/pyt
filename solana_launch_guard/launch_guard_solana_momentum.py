@@ -18,7 +18,7 @@ import time
 
 from .geckoterminal import build_gecko_quotes
 from .launch_guard_state import LaunchGuardState
-from .launch_guard_support import _is_stock_token_symbol
+from .launch_guard_support import _is_stock_token_symbol, hunter_v1_is_at_capacity
 
 LOGGER = logging.getLogger("solana_launch_guard")
 
@@ -34,6 +34,15 @@ class SolanaMomentumFeedMixin(LaunchGuardState):
         )
         min_age_ms = self.settings.solana_momentum_min_age_days * 86_400_000
         while True:
+            if hunter_v1_is_at_capacity(path=self.settings.hunter_capacity_snapshot_path):
+                # This feed only ever produces fresh-origin candidates, so
+                # hunter-v1 having no room for a new fresh position means
+                # nothing could act on a poll's result anyway - skip the
+                # GeckoTerminal call entirely rather than spending quota on
+                # it, but keep checking at a slow trickle (not a full stop)
+                # so the pool isn't cold the moment a slot frees up.
+                await asyncio.sleep(self.settings.solana_momentum_throttled_poll_seconds)
+                continue
             try:
                 pools = await self.gecko_client.trending_pools()
                 quotes = build_gecko_quotes(pools)

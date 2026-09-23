@@ -13,6 +13,7 @@ import logging
 
 from .bitquery import BitqueryAuthError, build_launchlab_quotes
 from .launch_guard_state import LaunchGuardState
+from .launch_guard_support import hunter_v1_is_at_capacity
 
 LOGGER = logging.getLogger("solana_launch_guard")
 
@@ -33,6 +34,15 @@ class LaunchLabFeedMixin(LaunchGuardState):
         )
         seen_creation_signatures: set[str] = set()
         while True:
+            if hunter_v1_is_at_capacity(path=self.settings.hunter_capacity_snapshot_path):
+                # This feed only ever produces fresh-origin candidates, so
+                # hunter-v1 having no room for a new fresh position means
+                # nothing could act on a poll's result anyway - skip the
+                # Bitquery calls entirely rather than spending quota on
+                # them, but keep checking at a slow trickle (not a full
+                # stop) so the pool isn't cold the moment a slot frees up.
+                await asyncio.sleep(self.settings.launchlab_throttled_poll_seconds)
+                continue
             try:
                 creations, trades, pools = await asyncio.gather(
                     client.recent_pool_creations(),

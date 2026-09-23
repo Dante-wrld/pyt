@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 import sqlite3
 import time
 import urllib.error
@@ -50,6 +51,7 @@ from solana_launch_guard.execution import (
     store_fomo_solana_key,
 )
 from solana_launch_guard.intelligence import CoinIntelligence
+from solana_launch_guard.launch_guard_support import hunter_v1_is_at_capacity
 from solana_launch_guard.market import DexScreenerOracle, MarketQuote
 from solana_launch_guard.multichain import EvmRpc, EvmTransfer, HyperCoreWatcher
 from solana_launch_guard.notifications import (
@@ -5386,3 +5388,37 @@ def test_handle_copyfomo_solana_trade_logs_without_opening_a_paper_position(
     assert row["signature"] == "sig-1"
     assert not guard.broker.has_position("CopiedMint1111111111111111111111111111111")
     store.close()
+
+
+def test_hunter_v1_is_at_capacity_reads_a_fresh_snapshot(tmp_path: Path) -> None:
+    path = tmp_path / "capacity.json"
+    path.write_text(json.dumps({"hunter_v1_at_capacity": True, "generated_at": time.time()}))
+    assert hunter_v1_is_at_capacity(path=str(path)) is True
+
+    path.write_text(json.dumps({"hunter_v1_at_capacity": False, "generated_at": time.time()}))
+    assert hunter_v1_is_at_capacity(path=str(path)) is False
+
+
+def test_hunter_v1_is_at_capacity_fails_open_on_a_missing_file(tmp_path: Path) -> None:
+    assert hunter_v1_is_at_capacity(path=str(tmp_path / "does-not-exist.json")) is False
+
+
+def test_hunter_v1_is_at_capacity_fails_open_on_a_malformed_file(tmp_path: Path) -> None:
+    path = tmp_path / "capacity.json"
+    path.write_text("not json")
+    assert hunter_v1_is_at_capacity(path=str(path)) is False
+
+    path.write_text(json.dumps([1, 2, 3]))
+    assert hunter_v1_is_at_capacity(path=str(path)) is False
+
+
+def test_hunter_v1_is_at_capacity_fails_open_on_a_stale_snapshot(tmp_path: Path) -> None:
+    """A live trial that crashed or stopped writing this file must never
+    silently starve a discovery feed forever - staleness reads the same
+    as "not at capacity", not as "still at capacity"."""
+    path = tmp_path / "capacity.json"
+    path.write_text(json.dumps({
+        "hunter_v1_at_capacity": True,
+        "generated_at": time.time() - 200,
+    }))
+    assert hunter_v1_is_at_capacity(path=str(path), max_age_seconds=90) is False

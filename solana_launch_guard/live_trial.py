@@ -165,6 +165,29 @@ def _read_portfolio() -> dict:
     return _read_json(os.getenv("PORTFOLIO_SNAPSHOT_PATH", "launch_guard_portfolio.json"))
 
 
+def _write_hunter_capacity_snapshot(ledger: LiveTrialLedger) -> None:
+    """Lets the ingestion process's discovery feeds (LaunchLab, GeckoTerminal
+    momentum - see launch_guard_launchlab.py/launch_guard_solana_momentum.py)
+    throttle their own external-API polling when hunter-v1 has no room for a
+    new fresh position anyway: both feeds only ever produce fresh-origin
+    candidates, so polling at full speed while hunter-v1 is already at its
+    fresh-position cap just spends metered quota (GeckoTerminal/Bitquery)
+    with nothing able to act on the result. Same one-way JSON-snapshot
+    pattern as _write_report/_read_portfolio/_read_recommendations below,
+    not a new kind of process coupling - and if this file goes missing or
+    stale (e.g. no live trial running), readers default to "not at
+    capacity" and poll normally, so this can never silently starve them."""
+    fresh_open_positions = sum(1 for p in ledger.positions("hunter-v1") if p["origin"] == "fresh")
+    path = Path(os.getenv("HUNTER_CAPACITY_SNAPSHOT_PATH", "launch_guard_hunter_capacity.json"))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        json.dump({"hunter_v1_at_capacity": fresh_open_positions >= 2, "generated_at": time.time()}, handle)
+        handle.write("\n")
+    os.replace(temporary, path)
+
+
 def _write_report(ledger: LiveTrialLedger) -> None:
     path = Path(os.getenv("AGENT_LIVE_TRIAL_REPORT_PATH", "launch_guard_live_trial_report.json"))
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -338,6 +361,7 @@ async def cycle(*, ledger: LiveTrialLedger, settings: Settings, rpc: SolanaRpc,
     ledger.assert_active()
     if ledger.unresolved():
         raise TrialHalted("unresolved order; stop for chain reconciliation")
+    _write_hunter_capacity_snapshot(ledger)
     wallet = settings.solana_wallet_address
     if not wallet or not settings.jupiter_api_key:
         raise TrialHalted("Solana wallet and Jupiter API key are required")

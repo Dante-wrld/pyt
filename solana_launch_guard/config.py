@@ -183,6 +183,12 @@ class Settings:
     color_output: bool = True
     recommendation_snapshot_path: str = "launch_guard_recommendations.json"
     portfolio_snapshot_path: str = "launch_guard_portfolio.json"
+    # Written by live_trial.py once per cycle (see _write_hunter_capacity_
+    # snapshot); read by the LaunchLab/Solana-momentum feeds to throttle
+    # their own metered-API polling while hunter-v1 has no room for a new
+    # fresh position. Same env var name on both sides keeps them in sync
+    # regardless of which one reads it via Settings vs. os.getenv directly.
+    hunter_capacity_snapshot_path: str = "launch_guard_hunter_capacity.json"
     portfolio_poll_seconds: float = 15.0
     portfolio_min_value_usd: float = 0.01
     portfolio_min_sell_value_usd: float = 2.0
@@ -273,6 +279,13 @@ class Settings:
     # Limit"), the same lesson as launchlab_poll_seconds below.
     solana_momentum_poll_seconds: float = 120.0
     solana_momentum_min_age_days: float = 3.0
+    # Used instead of solana_momentum_poll_seconds while hunter-v1's own
+    # fresh-position cap is full (see hunter_capacity_snapshot_path) - this
+    # feed only ever produces fresh-origin candidates, so polling at normal
+    # speed while nothing can act on the result just spends GeckoTerminal's
+    # metered quota. Not a full stop: still slow, deliberately-infrequent
+    # polling, so the pool isn't stone cold the moment a slot frees up.
+    solana_momentum_throttled_poll_seconds: float = 600.0
     bitquery_client_id: str | None = None
     bitquery_client_secret: str | None = None
     # 60s, not the 15-20s the other feeds use: each poll spends 3 Bitquery
@@ -282,6 +295,9 @@ class Settings:
     # LaunchLab's launch volume is high enough that 60s still catches
     # meaningful activity without burning through the quota this fast.
     launchlab_poll_seconds: float = 60.0
+    # Same idea and same reason as solana_momentum_throttled_poll_seconds
+    # above - LaunchLab candidates are also fresh-origin only.
+    launchlab_throttled_poll_seconds: float = 300.0
     evm_wallet_address: str | None = None
     hyperliquid_address: str | None = None
     evm_wallet_poll_seconds: float = 10.0
@@ -441,6 +457,9 @@ class Settings:
             ),
             portfolio_snapshot_path=os.getenv(
                 "PORTFOLIO_SNAPSHOT_PATH", "launch_guard_portfolio.json"
+            ),
+            hunter_capacity_snapshot_path=os.getenv(
+                "HUNTER_CAPACITY_SNAPSHOT_PATH", "launch_guard_hunter_capacity.json"
             ),
             portfolio_poll_seconds=_float("PORTFOLIO_POLL_SECONDS", 15.0),
             portfolio_min_value_usd=_float(
@@ -624,12 +643,18 @@ class Settings:
             solana_momentum_poll_seconds=_float(
                 "SOLANA_MOMENTUM_POLL_SECONDS", 120.0
             ),
+            solana_momentum_throttled_poll_seconds=_float(
+                "SOLANA_MOMENTUM_THROTTLED_POLL_SECONDS", 600.0
+            ),
             solana_momentum_min_age_days=_float(
                 "SOLANA_MOMENTUM_MIN_AGE_DAYS", 3.0
             ),
             bitquery_client_id=(os.getenv("BITQUERY_CLIENT_ID") or None),
             bitquery_client_secret=(os.getenv("BITQUERY_CLIENT_SECRET") or None),
             launchlab_poll_seconds=_float("LAUNCHLAB_POLL_SECONDS", 60.0),
+            launchlab_throttled_poll_seconds=_float(
+                "LAUNCHLAB_THROTTLED_POLL_SECONDS", 300.0
+            ),
             evm_wallet_address=(os.getenv("EVM_WALLET_ADDRESS") or None),
             hyperliquid_address=(
                 os.getenv("HYPERLIQUID_ADDRESS")
