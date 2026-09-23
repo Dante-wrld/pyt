@@ -232,6 +232,29 @@ def test_a_regrowth_rebuy_is_tagged_with_its_origin_and_clears_the_watch(tmp_pat
     book.close()
 
 
+def test_only_hunter_v1_exits_are_watched_for_regrowth(tmp_path, monkeypatch):
+    """Only hunter-v1's own regrowth mechanism ever reads closed_positions
+    (see decide_regrowth_rebuy, scoped to agent='hunter-v1') - a copy-v1
+    exit has nothing that would ever look at its row, so it shouldn't be
+    recorded there at all."""
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    book = LiveTrialLedger(tmp_path / "trial.sqlite")
+    book.start(now=100)
+    book.reserve_buy(intent="buy", agent="copy-v1", mint="token", requested_cents=500,
+                     approved_cents=500, now=101)
+    book.transition("buy", "SUBMITTED", signature="buy-sig")
+    book.confirm_buy(intent="buy", signature="buy-sig", executed_cents=500,
+                     quantity_raw=100, decimals=6, entry_price=0.05,
+                     entry_liquidity_usd=60000, verified_on_chain=True)
+    book.reserve_sell(intent="sell", agent="copy-v1", mint="token", now=102)
+    book.transition("sell", "SUBMITTED", signature="sell-sig")
+    book.confirm_sell(intent="sell", signature="sell-sig", quantity_raw=100,
+                      proceeds_cents=700, verified_on_chain=True)
+    assert book.closed_positions_for_regrowth("copy-v1", max_age_seconds=1000) == []
+    assert book.closed_positions_for_regrowth("hunter-v1", max_age_seconds=1000) == []
+    book.close()
+
+
 def test_partial_profit_stages_and_remaining_cost_survive_restart(tmp_path, monkeypatch):
     monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
     path = tmp_path / "stages.sqlite"

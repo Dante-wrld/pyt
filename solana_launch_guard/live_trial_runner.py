@@ -553,6 +553,7 @@ def _regrowth_bar_clears(quote, exit_price: float) -> bool:
 
 async def decide_regrowth_rebuy(
     *, model, ledger: LiveTrialLedger, oracle, now: float | None = None,
+    regrowth_skip_reasons: dict[str, str] | None = None,
 ) -> LiveEntryDecision | None:
     """A mint hunter-v1 has already fully exited this session, watched for
     genuine renewed growth instead of left permanently forgotten once it
@@ -593,10 +594,19 @@ async def decide_regrowth_rebuy(
             continue
         mint_history = _mint_round_trip_history(ledger, mint)
         if mint_history["consecutive_losses"] >= MINT_LOSS_STREAK_BLOCK:
-            ledger.log(agent="hunter-v1", mint=mint, state="BLOCKED",
-                       reason=f"{mint_history['consecutive_losses']} consecutive losing round trips "
-                              f"on this mint this session (total {mint_history['total_realized_usd']:+.2f} "
-                              "USD); declining a regrowth re-entry into the same pattern")
+            # A mint stuck here keeps clearing the growth bar every cycle
+            # (it's still climbing) while permanently failing the same
+            # loss-streak check - logging that on every cycle would grow
+            # the ledger unbounded and crowd out real activity, same
+            # problem decide_hunter_entry's buy_zone_skip_reasons solves.
+            # Only log when the reason actually changes for that mint.
+            skip_reasons = regrowth_skip_reasons if regrowth_skip_reasons is not None else {}
+            reason = (f"{mint_history['consecutive_losses']} consecutive losing round trips "
+                     f"on this mint this session (total {mint_history['total_realized_usd']:+.2f} "
+                     "USD); declining a regrowth re-entry into the same pattern")
+            if skip_reasons.get(mint) != reason:
+                skip_reasons[mint] = reason
+                ledger.log(agent="hunter-v1", mint=mint, state="BLOCKED", reason=reason)
             continue
         growth_pct = (quote.price_usd / closed["exit_price"] - 1) * 100
         candidate = {

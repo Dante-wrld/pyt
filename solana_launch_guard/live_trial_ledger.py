@@ -412,14 +412,19 @@ class LiveTrialLedger:
                     # A full exit's own fill price, watched afterward for
                     # renewed growth (see closed_positions_for_regrowth) -
                     # a mint hunter-v1 fully exits doesn't just vanish, in
-                    # case it's still climbing.
-                    exit_price = (proceeds_cents / 100) / (quantity_raw / 10 ** pos[2])
-                    self.db.execute(
-                        "INSERT INTO closed_positions(agent,mint,exit_price,closed_at) VALUES(?,?,?,?) "
-                        "ON CONFLICT(agent,mint) DO UPDATE SET exit_price=excluded.exit_price,"
-                        "closed_at=excluded.closed_at",
-                        (order[0], order[1], exit_price, time.time()),
-                    )
+                    # case it's still climbing. Only hunter-v1's own regrowth
+                    # mechanism ever reads this table (see
+                    # decide_regrowth_rebuy), so only its exits are worth
+                    # recording here - a copy-v1 or portfolio-v1 exit would
+                    # otherwise sit unused forever.
+                    if order[0] == "hunter-v1":
+                        exit_price = (proceeds_cents / 100) / (quantity_raw / 10 ** pos[2])
+                        self.db.execute(
+                            "INSERT INTO closed_positions(agent,mint,exit_price,closed_at) VALUES(?,?,?,?) "
+                            "ON CONFLICT(agent,mint) DO UPDATE SET exit_price=excluded.exit_price,"
+                            "closed_at=excluded.closed_at",
+                            (order[0], order[1], exit_price, time.time()),
+                        )
             self.db.execute("UPDATE orders SET state='CONFIRMED',proceeds_cents=?,realized_cents=? WHERE intent=?", (proceeds_cents,realized,intent))
             self.db.commit()
         except BaseException:

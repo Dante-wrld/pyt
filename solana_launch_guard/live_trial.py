@@ -314,7 +314,8 @@ async def cycle(*, ledger: LiveTrialLedger, settings: Settings, rpc: SolanaRpc,
                 oracle: DexScreenerOracle,
                 exit_block_streaks: dict[str, int],
                 buy_zone_skip_reasons: dict[str, str],
-                chase_first_target: dict[str, float]) -> None:
+                chase_first_target: dict[str, float],
+                regrowth_skip_reasons: dict[str, str]) -> None:
     ledger.assert_active()
     if ledger.unresolved():
         raise TrialHalted("unresolved order; stop for chain reconciliation")
@@ -546,7 +547,8 @@ async def cycle(*, ledger: LiveTrialLedger, settings: Settings, rpc: SolanaRpc,
     # candidate path above (see decide_regrowth_rebuy), so it's checked
     # every cycle the normal path didn't already act, not only when it's
     # empty.
-    regrowth_decision = await decide_regrowth_rebuy(model=model, ledger=ledger, oracle=oracle)
+    regrowth_decision = await decide_regrowth_rebuy(model=model, ledger=ledger, oracle=oracle,
+                                                     regrowth_skip_reasons=regrowth_skip_reasons)
     if regrowth_decision is not None:
         exit_price = regrowth_decision.candidate["regrowth_exit_price"]
 
@@ -602,6 +604,7 @@ async def supervise(*, interval_seconds: int = 30) -> dict:
         exit_block_streaks: dict[str, int] = {}
         buy_zone_skip_reasons: dict[str, str] = {}
         chase_first_target: dict[str, float] = {}
+        regrowth_skip_reasons: dict[str, str] = {}
         while ledger.status()["status"] == "ACTIVE":
             require_exclusive_trial_flags()
             if monitor.poll() is not None:
@@ -611,7 +614,8 @@ async def supervise(*, interval_seconds: int = 30) -> dict:
                             model=model, store=store, oracle=oracle,
                             exit_block_streaks=exit_block_streaks,
                             buy_zone_skip_reasons=buy_zone_skip_reasons,
-                            chase_first_target=chase_first_target)
+                            chase_first_target=chase_first_target,
+                            regrowth_skip_reasons=regrowth_skip_reasons)
                 consecutive_cycle_failures = 0
             except TrialHalted:
                 raise

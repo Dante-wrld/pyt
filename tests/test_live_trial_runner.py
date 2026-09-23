@@ -1548,6 +1548,32 @@ def test_decide_regrowth_rebuy_blocks_a_mint_after_two_consecutive_losses(tmp_pa
     book.close()
 
 
+def test_decide_regrowth_rebuy_only_logs_a_loss_streak_block_once_per_reason(tmp_path, monkeypatch):
+    """A mint stuck here clears the growth bar every cycle (it's still
+    climbing) while permanently failing the loss-streak check - logging
+    that every cycle would grow the ledger unbounded, same problem
+    decide_hunter_entry's buy_zone_skip_reasons solves for the fresh
+    path."""
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    book = LiveTrialLedger(tmp_path / "trial.sqlite")
+    book.start()
+    _seed_closed_position(book, mint=MINT, exit_price=1.0, label="first", cost_cents=200)
+    _seed_closed_position(book, mint=MINT, exit_price=1.0, label="second", cost_cents=200)
+    model = Model()
+    oracle = FakeOracle(_quote(price=1 + REGROWTH_MIN_GROWTH_PCT / 100 * 1.5))
+    skip_reasons: dict[str, str] = {}
+    for _ in range(3):
+        assert asyncio.run(decide_regrowth_rebuy(
+            model=model, ledger=book, oracle=oracle, regrowth_skip_reasons=skip_reasons,
+        )) is None
+    blocked = book.db.execute(
+        "SELECT COUNT(*) FROM decisions WHERE agent='hunter-v1' AND mint=? AND state='BLOCKED'", (MINT,),
+    ).fetchone()[0]
+    assert blocked == 1
+    assert model.calls == 0
+    book.close()
+
+
 def test_decide_regrowth_rebuy_skips_the_model_once_the_daily_loss_limit_is_breached(tmp_path, monkeypatch):
     monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
     book = LiveTrialLedger(tmp_path / "trial.sqlite")
