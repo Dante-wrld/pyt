@@ -265,13 +265,13 @@ class Settings:
     robinhood_poll_seconds: float = 15.0
     multichain_poll_seconds: float = 15.0
     # Discovers established Solana tokens (age >= solana_momentum_min_age_days,
-    # no upper bound) via the same DexScreener token-profiles/boosts feed the
-    # multichain mixin already uses for EVM chains - pump.fun/LaunchLab only
-    # ever see a mint at launch, so this is the only source for a token
-    # regaining momentum well after its first hours/days. 30s, slower than
-    # multichain_poll_seconds, since this adds its own DexScreener call volume
-    # on top of the existing feeds sharing that same rate limit.
-    solana_momentum_poll_seconds: float = 30.0
+    # no upper bound) via GeckoTerminal's trending_pools - pump.fun/LaunchLab
+    # only ever see a mint at launch, so this is the only source for a token
+    # regaining momentum well after its first hours/days. 120s, not 30s: a
+    # 30s cadence hit GeckoTerminal's free-tier rate limit within minutes
+    # (confirmed live 2026-09-23, "HTTP 429: You've exceeded the Rate
+    # Limit"), the same lesson as launchlab_poll_seconds below.
+    solana_momentum_poll_seconds: float = 120.0
     solana_momentum_min_age_days: float = 3.0
     bitquery_client_id: str | None = None
     bitquery_client_secret: str | None = None
@@ -622,7 +622,7 @@ class Settings:
                 _float("ROBINHOOD_POLL_SECONDS", 15.0),
             ),
             solana_momentum_poll_seconds=_float(
-                "SOLANA_MOMENTUM_POLL_SECONDS", 30.0
+                "SOLANA_MOMENTUM_POLL_SECONDS", 120.0
             ),
             solana_momentum_min_age_days=_float(
                 "SOLANA_MOMENTUM_MIN_AGE_DAYS", 3.0
