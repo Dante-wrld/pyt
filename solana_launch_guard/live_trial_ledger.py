@@ -64,6 +64,11 @@ class LiveTrialLedger:
                 second_stage_taken INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY(agent,mint)
             );
+            CREATE TABLE IF NOT EXISTS closed_positions (
+                agent TEXT NOT NULL, mint TEXT NOT NULL,
+                exit_price REAL NOT NULL, closed_at REAL NOT NULL,
+                PRIMARY KEY(agent,mint)
+            );
         """)
         if "realized_cents" not in {row[1] for row in self.db.execute("PRAGMA table_info(orders)")}:
             self.db.execute("ALTER TABLE orders ADD COLUMN realized_cents INTEGER")
@@ -71,6 +76,8 @@ class LiveTrialLedger:
         for column in ("principal_recovered", "second_stage_taken"):
             if column not in position_columns:
                 self.db.execute(f"ALTER TABLE positions ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0")
+        if "origin" not in position_columns:
+            self.db.execute("ALTER TABLE positions ADD COLUMN origin TEXT NOT NULL DEFAULT 'fresh'")
 
     def close(self) -> None:
         self.db.close()
@@ -267,8 +274,19 @@ class LiveTrialLedger:
 
     def confirm_buy(self, *, intent: str, signature: str, executed_cents: int,
                     quantity_raw: int, decimals: int, entry_price: float,
-                    entry_liquidity_usd: float, verified_on_chain: bool) -> None:
-        """Atomically confirm a buy and establish its persistent post-entry peak."""
+                    entry_liquidity_usd: float, verified_on_chain: bool,
+                    origin: str = "fresh") -> None:
+        """Atomically confirm a buy and establish its persistent post-entry peak.
+
+        origin distinguishes a position hunter-v1 sourced itself from the
+        live recommendation feed ("fresh") from one portfolio-v1 flagged as
+        a previously-closed mint growing again ("regrowth") - kept separate
+        so the two have independent open-position caps and a fresh
+        discovery is never crowded out by (or crowds out) a regrowth
+        re-entry, and vice versa.
+        """
+        if origin not in {"fresh", "regrowth"}:
+            raise ValueError("origin must be 'fresh' or 'regrowth'")
         self._begin()
         try:
             row = self.db.execute("SELECT agent,mint,side,state,signature,reserved_cents FROM orders WHERE intent=?", (intent,)).fetchone()
@@ -281,13 +299,14 @@ class LiveTrialLedger:
                 or not math.isfinite(entry_liquidity_usd) or entry_liquidity_usd <= 0):
                 raise ValueError("buy fill has not been independently verified or exceeds reservation")
             self.db.execute("INSERT INTO positions(agent,mint,quantity_raw,decimals,cost_cents,entry_price,"
-                            "entry_liquidity_usd,peak_price,current_price,opened_at,updated_at) "
-                            "VALUES(?,?,?,?,?,?,?,?,?,?,?)", (
+                            "entry_liquidity_usd,peak_price,current_price,opened_at,updated_at,origin) "
+                            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", (
                 row[0], row[1], quantity_raw, decimals, executed_cents,
                 entry_price, entry_liquidity_usd, entry_price, entry_price,
-                time.time(), time.time(),
+                time.time(), time.time(), origin,
             ))
             self.db.execute("UPDATE orders SET state='CONFIRMED',executed_cents=? WHERE intent=?", (executed_cents,intent))
+            self.db.execute("DELETE FROM closed_positions WHERE agent=? AND mint=?", (row[0], row[1]))
             self.db.commit()
         except BaseException:
             self.db.rollback()
@@ -296,12 +315,25 @@ class LiveTrialLedger:
     def positions(self, agent: str | None = None) -> list[dict]:
         names = ("agent", "mint", "quantity_raw", "decimals", "cost_cents", "entry_price",
                  "entry_liquidity_usd", "peak_price", "current_price", "opened_at", "updated_at",
-                 "principal_recovered", "second_stage_taken")
+                 "principal_recovered", "second_stage_taken", "origin")
         if agent is None:
             rows = self.db.execute("SELECT * FROM positions").fetchall()
         else:
             rows = self.db.execute("SELECT * FROM positions WHERE agent=?", (agent,)).fetchall()
         return [dict(zip(names, row)) for row in rows]
+
+    def closed_positions_for_regrowth(self, agent: str, *, max_age_seconds: float,
+                                      now: float | None = None) -> list[dict]:
+        """Mints this agent has fully exited recently enough to still be
+        worth watching for renewed growth, newest exit first. Bounded by
+        age so a mint that never recovers isn't polled forever."""
+        at = time.time() if now is None else now
+        rows = self.db.execute(
+            "SELECT mint,exit_price,closed_at FROM closed_positions "
+            "WHERE agent=? AND closed_at >= ? ORDER BY closed_at DESC",
+            (agent, at - max_age_seconds),
+        ).fetchall()
+        return [dict(zip(("mint", "exit_price", "closed_at"), row)) for row in rows]
 
     def mark_position(self, *, agent: str, mint: str, price: float) -> dict:
         if not math.isfinite(price) or price <= 0:
@@ -357,7 +389,7 @@ class LiveTrialLedger:
                 or type(quantity_raw) is not int or quantity_raw <= 0
                 or type(proceeds_cents) is not int or proceeds_cents <= 0):
                 raise ValueError("sell fill is not independently verified")
-            pos = self.db.execute("SELECT quantity_raw,cost_cents FROM positions WHERE agent=? AND mint=?", order[:2]).fetchone()
+            pos = self.db.execute("SELECT quantity_raw,cost_cents,decimals FROM positions WHERE agent=? AND mint=?", order[:2]).fetchone()
             realized = None
             if pos:
                 if quantity_raw > pos[0]:
@@ -377,6 +409,17 @@ class LiveTrialLedger:
                                     ))
                 else:
                     self.db.execute("DELETE FROM positions WHERE agent=? AND mint=?", order[:2])
+                    # A full exit's own fill price, watched afterward for
+                    # renewed growth (see closed_positions_for_regrowth) -
+                    # a mint hunter-v1 fully exits doesn't just vanish, in
+                    # case it's still climbing.
+                    exit_price = (proceeds_cents / 100) / (quantity_raw / 10 ** pos[2])
+                    self.db.execute(
+                        "INSERT INTO closed_positions(agent,mint,exit_price,closed_at) VALUES(?,?,?,?) "
+                        "ON CONFLICT(agent,mint) DO UPDATE SET exit_price=excluded.exit_price,"
+                        "closed_at=excluded.closed_at",
+                        (order[0], order[1], exit_price, time.time()),
+                    )
             self.db.execute("UPDATE orders SET state='CONFIRMED',proceeds_cents=?,realized_cents=? WHERE intent=?", (proceeds_cents,realized,intent))
             self.db.commit()
         except BaseException:

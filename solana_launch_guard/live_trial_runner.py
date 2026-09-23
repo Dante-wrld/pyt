@@ -10,7 +10,7 @@ import math
 import re
 import time
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 
 from .agents import (
     AgentCoordinator, AgentRecord, AgentRole, RiskArbiter, RiskPolicy,
@@ -44,6 +44,26 @@ MINT_LOSS_STREAK_BLOCK = 2
 # the model and to pre-check the daily loss limit deterministically before
 # ever calling the model - kept as one constant so the two can't drift apart.
 HUNTER_EQUITY_USD = 30
+
+# A mint hunter-v1 fully exits doesn't just get forgotten - the shared
+# recommendation engine evicts a crashed, low-scoring candidate from its own
+# tracking pool quickly (see RecommendationBook._trim), so nothing else is
+# watching a previously-owned mint for renewed growth. These parameters
+# define that separate watch: how far above the exit price counts as
+# genuine regrowth, how long to keep watching before giving up on a mint
+# that never recovers, and the minimum liquidity to even consider it (same
+# floor as a fresh entry). Kept deliberately simple and deterministic -
+# no confirmation-count state machine, since that machinery lives in the
+# recommendation engine and can't be reconstructed here from a single
+# oracle quote.
+REGROWTH_MIN_GROWTH_PCT = 15.0
+REGROWTH_MAX_AGE_SECONDS = 4 * 3600
+REGROWTH_MIN_LIQUIDITY_USD = 50_000.0
+# Its own cap, separate from hunter-v1's 2-position fresh-discovery cap
+# (see decide_hunter_entry) - a regrowth re-entry never crowds out, or gets
+# crowded out by, a fresh discovery. Smaller than the fresh cap since this
+# is a newer, more deterministic (and so far unproven live) mechanism.
+REGROWTH_MAX_OPEN_POSITIONS = 1
 
 
 def _mint_round_trip_history(ledger: LiveTrialLedger, mint: str) -> dict[str, Any]:
@@ -115,7 +135,7 @@ def _fresh_candidates(
 
 
 def _live_arbiter(max_quote_age_seconds: int = 15, min_liquidity_usd: float = 50_000.0,
-                  max_order_usd: float = 5) -> RiskArbiter:
+                  max_order_usd: float = 5, max_open_positions: int = 2) -> RiskArbiter:
     # Live is enabled only for this explicitly constructed trial arbiter; the
     # ordinary shadow arbiter remains paper/shadow-only.
     #
@@ -133,7 +153,7 @@ def _live_arbiter(max_quote_age_seconds: int = 15, min_liquidity_usd: float = 50
     # genuine staleness bound.
     return RiskArbiter(RiskPolicy(
         allowed_modes=("live",), max_order_usd=max_order_usd, max_position_pct=100,
-        max_open_positions=2, min_liquidity_usd=min_liquidity_usd,
+        max_open_positions=max_open_positions, min_liquidity_usd=min_liquidity_usd,
         max_price_impact_pct=9, max_quote_age_seconds=max_quote_age_seconds,
         # Default (3% of $30 equity = $0.90) was smaller than a single
         # normal stop-loss on a $5 position - tonight's real losses were
@@ -190,7 +210,12 @@ def decide_hunter_entry(
                            state="BUY_ZONE_SKIPPED", reason=reason)
         return None
     status = ledger.status(now=at)["agents"]["hunter-v1"]
-    if status["remaining_buy_cap_cents"] <= 0 or status["open_positions"] >= 2:
+    # A regrowth re-entry (see decide_regrowth_rebuy) has its own separate
+    # open-position cap, so it can never crowd out - or be crowded out by -
+    # hunter-v1's own fresh discoveries; each pool's cap only ever counts
+    # its own origin.
+    fresh_open_positions = sum(1 for p in ledger.positions("hunter-v1") if p["origin"] == "fresh")
+    if status["remaining_buy_cap_cents"] <= 0 or fresh_open_positions >= 2:
         return None
     candidate = ready[0]
     mint = str(candidate.get("mint") or "")
@@ -248,7 +273,7 @@ def decide_hunter_entry(
          "remaining_gross_budget_usd": status["remaining_buy_cap_cents"] / 100,
          "mint_trade_history": mint_history},
         RiskSnapshot(mode="live", equity_usd=HUNTER_EQUITY_USD,
-                     open_positions=status["open_positions"],
+                     open_positions=fresh_open_positions,
                      daily_realized_pnl_usd=daily_pnl_usd,
                      liquidity_usd=liquidity,
                      quote_age_seconds=at - float(candidate["quoted_at"])),
@@ -327,11 +352,22 @@ async def execute_hunter_entry(
     decision: LiveEntryDecision, *, ledger: LiveTrialLedger,
     rpc, buyer, store, wallet: str,
     current_snapshot: Callable[[], dict],
+    final_eligibility_check: Callable[[], Awaitable[bool]] | None = None,
+    origin: str = "fresh",
 ) -> dict:
     """One reserved $5-or-less buy with a guarded reverse quote and chain proof.
 
     Any error after the durable order claim halts the session for manual
     reconciliation, even if the request failed before a transaction was sent.
+
+    final_eligibility_check overrides the default "still BUY_READY in the
+    live recommendation snapshot" gate - a regrowth re-entry (see
+    decide_regrowth_rebuy) sources its candidate from a mint the shared
+    recommendation engine no longer tracks at all, so it supplies its own
+    fresh-oracle-quote check instead. Everything else here (preflight,
+    honeypot reverse-quote check, wallet balance verification, intent-key
+    claim, on-chain confirmation) is identical and shared regardless of
+    where the candidate came from.
     """
     from .agent_live_test import CanaryPolicy, validate_exit_quote
     from .portfolio import OwnedHolding
@@ -339,6 +375,11 @@ async def execute_hunter_entry(
     if decision.agent != "hunter-v1" or not SOLANA_ADDRESS.fullmatch(decision.mint):
         raise ValueError("only a validated hunter Solana mint is eligible")
     ledger.assert_active()
+
+    async def _default_eligible() -> bool:
+        return can_submit(ledger, mint=decision.mint, snapshot=current_snapshot())
+
+    eligible = final_eligibility_check or _default_eligible
     # A MOMENTUM BUY-sourced entry already cleared a stricter confirmation
     # bar than a calmer pullback-zone entry, so it's allowed a wider (but
     # still bounded) guard ceiling - a fast-moving token can blow past the
@@ -405,8 +446,8 @@ async def execute_hunter_entry(
                         amount_raw=preflight.prepared.minimum_output_raw,
                         usdc_mint=USDC_MINT,
                         policy=reverse_policy)
-    if not can_submit(ledger, mint=decision.mint, snapshot=current_snapshot()):
-        raise TrialHalted("BUY_READY recovery expired before reservation")
+    if not await eligible():
+        raise TrialHalted("buy signal expired before reservation")
     ledger.reserve_buy(intent=intent_key, agent="hunter-v1", mint=decision.mint,
                        requested_cents=decision.requested_cents,
                        approved_cents=decision.approved_cents)
@@ -437,16 +478,14 @@ async def execute_hunter_entry(
             # accounting and on-chain reality, not routine market movement,
             # so it stays a full-trial halt for manual reconciliation.
             raise TrialHalted("USDC balance dropped below the reserved buy before broadcast")
-        if refreshed_token.raw_amount > 0 or not can_submit(
-            ledger, mint=decision.mint, snapshot=current_snapshot()
-        ):
+        if refreshed_token.raw_amount > 0 or not await eligible():
             # Either condition just means this one candidate is no longer
             # buyable right now (someone/something else already holds it, or
             # the market moved past the entry in the last second) - the same
             # outcome the pre-reservation checks above treat as routine. Release
             # the reservation so the trial keeps running instead of halting.
             reason = ("token already held" if refreshed_token.raw_amount > 0
-                     else "BUY_READY signal expired")
+                     else "buy signal expired")
             ledger.transition(intent_key, "FAILED")
             raise ValueError(f"{reason} before broadcast; reservation released")
         receipt = await buyer.execute(preflight.prepared)
@@ -478,7 +517,7 @@ async def execute_hunter_entry(
                            executed_cents=spent_cents, quantity_raw=token_delta,
                            decimals=decimals, entry_price=entry_price,
                            entry_liquidity_usd=float(decision.candidate["liquidity_usd"]),
-                           verified_on_chain=True)
+                           verified_on_chain=True, origin=origin)
         ledger.log(agent="hunter-v1", mint=decision.mint, state="CONFIRMED",
                    reason=f"chain verified buy: {spent_cents} cents, {token_delta} raw tokens")
         return {"status": "CONFIRMED", "mint": decision.mint,
@@ -492,6 +531,118 @@ async def execute_hunter_entry(
         ledger.log(agent="hunter-v1", mint=decision.mint, state="HALTED",
                    reason=str(exc)[:500])
         raise
+
+
+def _regrowth_bar_clears(quote, exit_price: float) -> bool:
+    """The deterministic 'still worth a look' bar for a mint hunter-v1
+    already fully exited: genuine price growth from the exit fill, real
+    liquidity, and buy-side pressure - simple and re-checkable from a
+    single fresh oracle quote, unlike the recommendation engine's own
+    confirmation-count state machine (see REGROWTH_MIN_GROWTH_PCT above).
+    Used both for the initial screen and the pre-broadcast re-check."""
+    if not quote or not quote.price_usd or not quote.liquidity_usd or exit_price <= 0:
+        return False
+    growth_pct = (quote.price_usd / exit_price - 1) * 100
+    return (
+        growth_pct >= REGROWTH_MIN_GROWTH_PCT
+        and quote.liquidity_usd >= REGROWTH_MIN_LIQUIDITY_USD
+        and quote.price_change_m5_pct is not None and quote.price_change_m5_pct > 0
+        and quote.buys_m5 > quote.sells_m5
+    )
+
+
+async def decide_regrowth_rebuy(
+    *, model, ledger: LiveTrialLedger, oracle, now: float | None = None,
+) -> LiveEntryDecision | None:
+    """A mint hunter-v1 has already fully exited this session, watched for
+    genuine renewed growth instead of left permanently forgotten once it
+    falls out of the shared recommendation engine's own tracking pool (a
+    crashed, low-scoring mint gets evicted quickly - see
+    RecommendationBook._trim - so nothing else is watching it). Reuses
+    every downstream risk gate a fresh buy gets: daily loss limit, mint
+    loss-streak block, agent budget cap, and a real model confirmation.
+    Only the entry SIGNAL differs (see _regrowth_bar_clears), and
+    open-position capacity is tracked separately from hunter-v1's own
+    fresh discoveries (see REGROWTH_MAX_OPEN_POSITIONS) so neither pool
+    can crowd out the other.
+    """
+    at = time.time() if now is None else now
+    ledger.assert_active(now=at)
+    if ledger.unresolved():
+        raise TrialHalted("unresolved order requires on-chain reconciliation")
+    status = ledger.status(now=at)["agents"]["hunter-v1"]
+    positions = ledger.positions("hunter-v1")
+    regrowth_open_positions = sum(1 for p in positions if p["origin"] == "regrowth")
+    if status["remaining_buy_cap_cents"] <= 0 or regrowth_open_positions >= REGROWTH_MAX_OPEN_POSITIONS:
+        return None
+    live_arbiter = _live_arbiter(min_liquidity_usd=REGROWTH_MIN_LIQUIDITY_USD, max_order_usd=5,
+                                 max_open_positions=REGROWTH_MAX_OPEN_POSITIONS)
+    daily_pnl_usd = ledger.daily_realized_cents("hunter-v1", now=at) / 100
+    max_daily_loss_usd = HUNTER_EQUITY_USD * live_arbiter.policy.max_daily_loss_pct / 100
+    if max_daily_loss_usd > 0 and daily_pnl_usd <= -max_daily_loss_usd:
+        return None
+    open_mints = {p["mint"] for p in positions}
+    for closed in ledger.closed_positions_for_regrowth(
+        "hunter-v1", max_age_seconds=REGROWTH_MAX_AGE_SECONDS, now=at
+    ):
+        mint = closed["mint"]
+        if mint in open_mints:
+            continue
+        quote = await oracle.quote(mint)
+        if not _regrowth_bar_clears(quote, closed["exit_price"]):
+            continue
+        mint_history = _mint_round_trip_history(ledger, mint)
+        if mint_history["consecutive_losses"] >= MINT_LOSS_STREAK_BLOCK:
+            ledger.log(agent="hunter-v1", mint=mint, state="BLOCKED",
+                       reason=f"{mint_history['consecutive_losses']} consecutive losing round trips "
+                              f"on this mint this session (total {mint_history['total_realized_usd']:+.2f} "
+                              "USD); declining a regrowth re-entry into the same pattern")
+            continue
+        growth_pct = (quote.price_usd / closed["exit_price"] - 1) * 100
+        candidate = {
+            "chain": "solana", "mint": mint, "symbol": quote.symbol,
+            "price": quote.price_usd, "quoted_at": at,
+            "liquidity_usd": quote.liquidity_usd,
+            "decision": "REGROWTH REBUY",
+            # Carried through to execute_hunter_entry's own pre-broadcast
+            # re-check (see live_trial.cycle's regrowth branch) - it has no
+            # live recommendation snapshot to re-verify against, so it
+            # re-quotes the oracle and re-applies this same exit price.
+            "regrowth_exit_price": closed["exit_price"],
+        }
+        coordinator = AgentCoordinator(model, live_arbiter)
+        proposal, arbitration = coordinator.ask(
+            AgentRecord("hunter-v1", AgentRole.OPPORTUNITY_HUNTER),
+            {"mode": "live_trial", "candidate": candidate,
+             "closed_position": {"exit_price_usd": closed["exit_price"],
+                                  "closed_at": closed["closed_at"],
+                                  "growth_since_exit_pct": round(growth_pct, 1)},
+             "maximum_order_usd": 5,
+             "remaining_gross_budget_usd": status["remaining_buy_cap_cents"] / 100,
+             "mint_trade_history": mint_history},
+            RiskSnapshot(mode="live", equity_usd=HUNTER_EQUITY_USD,
+                         open_positions=regrowth_open_positions,
+                         daily_realized_pnl_usd=daily_pnl_usd,
+                         liquidity_usd=quote.liquidity_usd,
+                         quote_age_seconds=0),
+        )
+        ledger.log(agent="hunter-v1", mint=proposal.mint, state="PROPOSAL", reason=proposal.thesis)
+        if proposal.action is not TradeAction.BUY:
+            continue
+        if not arbitration.approved or proposal.mint != mint:
+            ledger.log(agent="hunter-v1", mint=proposal.mint, state="BLOCKED",
+                       reason="; ".join(arbitration.reasons) if proposal.mint == mint
+                       else "proposal mint is not the freshly verified candidate")
+            continue
+        approved_cents = min(round(arbitration.approved_usd * 100), round(proposal.requested_usd * 100),
+                             status["remaining_buy_cap_cents"], 500)
+        requested_cents = round(proposal.requested_usd * 100)
+        if not 0 < approved_cents <= requested_cents:
+            continue
+        ledger.log(agent="hunter-v1", mint=mint, state="APPROVED",
+                   reason=f"regrowth re-entry approved ({growth_pct:.1f}% above exit); {approved_cents} cents")
+        return LiveEntryDecision("hunter-v1", mint, requested_cents, approved_cents, proposal.thesis, candidate)
+    return None
 
 
 async def execute_live_exit(

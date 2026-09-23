@@ -23,7 +23,8 @@ from .execution import (
 from .hunter_shadow_strategy import ShadowRecoveryPolicy, assess_exit
 from .live_trial_ledger import LiveTrialLedger, TrialHalted
 from .live_trial_runner import (
-    LiveEntryDecision, decide_hunter_entry, execute_hunter_entry, execute_live_exit,
+    LiveEntryDecision, _regrowth_bar_clears, decide_hunter_entry, decide_regrowth_rebuy,
+    execute_hunter_entry, execute_live_exit,
 )
 from .market import DexScreenerOracle
 from .wallet import SolanaRpc
@@ -538,6 +539,30 @@ async def cycle(*, ledger: LiveTrialLedger, settings: Settings, rpc: SolanaRpc,
             return
         await _notify(settings, title="Launch Guard CONFIRMED BUY",
                       message=f"hunter-v1: {result['mint']} spent {result['spent_cents']/100:.2f} USD; {decision.reason[:100]}; {result['signature']}")
+        return
+    # A mint hunter-v1 already fully exited doesn't get forgotten just
+    # because it fell off the shared recommendation engine's tracking pool -
+    # this is a completely separate signal and budget from the fresh-
+    # candidate path above (see decide_regrowth_rebuy), so it's checked
+    # every cycle the normal path didn't already act, not only when it's
+    # empty.
+    regrowth_decision = await decide_regrowth_rebuy(model=model, ledger=ledger, oracle=oracle)
+    if regrowth_decision is not None:
+        exit_price = regrowth_decision.candidate["regrowth_exit_price"]
+
+        async def _still_growing(mint=regrowth_decision.mint, exit_price=exit_price) -> bool:
+            return _regrowth_bar_clears(await oracle.quote(mint), exit_price)
+
+        result = await _guarded_entry(regrowth_decision, ledger=ledger, rpc=rpc,
+                                      buyer=buyer, store=store, wallet=wallet,
+                                      current_snapshot=_read_recommendations,
+                                      final_eligibility_check=_still_growing,
+                                      origin="regrowth")
+        if result is None:
+            return
+        await _notify(settings, title="Launch Guard CONFIRMED BUY",
+                      message=f"hunter-v1: {result['mint']} spent {result['spent_cents']/100:.2f} USD "
+                              f"(regrowth re-entry); {regrowth_decision.reason[:100]}; {result['signature']}")
 
 
 async def supervise(*, interval_seconds: int = 30) -> dict:

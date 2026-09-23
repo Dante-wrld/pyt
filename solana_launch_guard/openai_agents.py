@@ -87,7 +87,14 @@ ROLE_BOUNDARIES: dict[AgentRole, str] = {
         "thesis rather than evaluating the candidate as if it had no "
         "history. A single prior loss does not by itself require WATCH, "
         "but should raise the bar for how convincing the current setup "
-        "needs to be."
+        "needs to be. A REGROWTH REBUY candidate is a mint you already "
+        "fully exited this session that has since grown back above a "
+        "deterministic bar (see closed_position for its exit price and "
+        "growth since exit) - it has no recovery_review or "
+        "entry_confirmation fields, since that comes from a different, "
+        "simpler check; weigh closed_position and mint_trade_history "
+        "together to judge whether this looks like genuine continuation "
+        "or the same pattern that already cost money once."
     ),
     AgentRole.PORTFOLIO_MANAGER: (
         "You may return HOLD, TAKE_PARTIAL, or SELL for an owned position. "

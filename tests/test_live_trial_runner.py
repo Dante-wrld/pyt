@@ -5,8 +5,13 @@ from types import SimpleNamespace
 import pytest
 
 from solana_launch_guard.live_trial_ledger import LiveTrialLedger, TrialHalted
-from solana_launch_guard.live_trial_runner import LiveEntryDecision, _live_arbiter, _mint_round_trip_history, can_submit, decide_hunter_entry, execute_hunter_entry, execute_live_exit
+from solana_launch_guard.live_trial_runner import (
+    REGROWTH_MIN_GROWTH_PCT, REGROWTH_MIN_LIQUIDITY_USD, LiveEntryDecision,
+    _live_arbiter, _mint_round_trip_history, _regrowth_bar_clears, can_submit,
+    decide_hunter_entry, decide_regrowth_rebuy, execute_hunter_entry, execute_live_exit,
+)
 from solana_launch_guard.execution import USDC_MINT
+from solana_launch_guard.market import MarketQuote
 
 
 MINT = "A" * 44  # synthetic Base58-looking test mint
@@ -420,6 +425,122 @@ def test_a_second_buy_of_the_same_mint_after_a_full_round_trip_does_not_collide(
     keys = [row[0] for row in book.db.execute(
         "SELECT intent FROM orders WHERE mint=? AND side='BUY'", (MINT,)).fetchall()]
     assert len(keys) == 2 and len(set(keys)) == 2
+    book.close()
+
+
+def test_a_regrowth_entry_uses_its_own_eligibility_check_and_is_tagged_by_origin(tmp_path, monkeypatch):
+    """A regrowth candidate has no live recommendation snapshot entry to
+    verify against (see decide_regrowth_rebuy) - final_eligibility_check
+    must be used instead of the default can_submit/current_snapshot path,
+    and the confirmed position must carry origin='regrowth' so it's
+    tracked against its own open-position cap, not hunter-v1's fresh one."""
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    book = LiveTrialLedger(tmp_path / "trial.sqlite")
+    book.start()
+    wallet = "synthetic-owner"
+
+    class Rpc:
+        async def token_balance(self, owner, mint):
+            return SimpleNamespace(raw_amount=20_000_000 if mint == USDC_MINT else 0)
+        async def mint_decimals(self, mint):
+            return 6
+        async def get_transaction(self, signature):
+            def row(index, mint, amount):
+                return {"accountIndex": index, "mint": mint, "owner": wallet,
+                        "uiTokenAmount": {"amount": str(amount)}}
+            return {"meta": {"err": None,
+                    "preTokenBalances": [row(0, USDC_MINT, 20_000_000)],
+                    "postTokenBalances": [row(0, USDC_MINT, 15_000_000), row(1, MINT, 100_000_000)]}}
+
+    class Client:
+        async def order(self, **kwargs):
+            return {"inputMint": MINT, "outputMint": USDC_MINT,
+                    "inAmount": str(kwargs["amount_raw"]), "outAmount": "4100000",
+                    "otherAmountThreshold": "4000000", "priceImpact": "-1",
+                    "slippageBps": 250}
+
+    class Buyer:
+        client = Client()
+        max_price_impact_pct = 3
+        max_slippage_bps = 300
+        async def preflight(self, intent, rpc):
+            return SimpleNamespace(prepared=SimpleNamespace(input_amount_raw=intent.amount_usdc_raw,
+                minimum_output_raw=100_000_000, expected_output_raw=100_000_000))
+        async def execute(self, prepared):
+            return SimpleNamespace(signature="public-signature", input_amount_raw=5_000_000,
+                                   output_amount_raw=100_000_000)
+
+    class Store:
+        connection = _no_legacy_claim()
+        def begin_auto_buy_execution(self, **kwargs):
+            return True
+        def complete_auto_buy_execution(self, **kwargs):
+            pass
+        def save_owned_holding(self, holding):
+            pass
+        def arm_auto_sell(self, mint, **kwargs):
+            pass
+
+    decision = decide_hunter_entry(snapshot(), model=Model(), ledger=book)
+    eligibility_calls = []
+
+    async def _eligible() -> bool:
+        eligibility_calls.append(True)
+        return True
+
+    def _unused_snapshot():
+        pytest.fail("a regrowth entry must not fall back to the recommendation snapshot")
+
+    receipt = asyncio.run(execute_hunter_entry(
+        decision, ledger=book, rpc=Rpc(), buyer=Buyer(), store=Store(), wallet=wallet,
+        current_snapshot=_unused_snapshot, final_eligibility_check=_eligible, origin="regrowth",
+    ))
+    assert receipt["spent_cents"] == 500
+    assert len(eligibility_calls) == 2  # pre-reservation and pre-broadcast
+    assert book.positions("hunter-v1")[0]["origin"] == "regrowth"
+    book.close()
+
+
+def test_a_regrowth_entry_is_blocked_routinely_when_its_eligibility_check_fails(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    book = LiveTrialLedger(tmp_path / "trial.sqlite")
+    book.start()
+    wallet = "synthetic-owner"
+
+    class Rpc:
+        async def token_balance(self, owner, mint):
+            return SimpleNamespace(raw_amount=20_000_000 if mint == USDC_MINT else 0)
+        async def mint_decimals(self, mint):
+            return 6
+
+    class Client:
+        async def order(self, **kwargs):
+            return {"inputMint": MINT, "outputMint": USDC_MINT,
+                    "inAmount": str(kwargs["amount_raw"]), "outAmount": "4100000",
+                    "otherAmountThreshold": "4000000", "priceImpact": "-1",
+                    "slippageBps": 250}
+
+    class Buyer:
+        client = Client()
+        max_price_impact_pct = 3
+        max_slippage_bps = 300
+        async def preflight(self, intent, rpc):
+            return SimpleNamespace(prepared=SimpleNamespace(input_amount_raw=intent.amount_usdc_raw,
+                minimum_output_raw=100_000_000, expected_output_raw=100_000_000))
+        async def execute(self, prepared):
+            pytest.fail("a failed eligibility re-check must not broadcast")
+
+    decision = decide_hunter_entry(snapshot(), model=Model(), ledger=book)
+
+    async def _never_eligible() -> bool:
+        return False
+
+    with pytest.raises(TrialHalted, match="buy signal expired"):
+        asyncio.run(execute_hunter_entry(
+            decision, ledger=book, rpc=Rpc(), buyer=Buyer(), store=None, wallet=wallet,
+            current_snapshot=lambda: {}, final_eligibility_check=_never_eligible, origin="regrowth",
+        ))
+    assert not book.unresolved()
     book.close()
 
 
@@ -1290,4 +1411,156 @@ def test_signal_expiring_during_simulation_never_reserves_or_broadcasts(tmp_path
         ))
     assert not book.unresolved()
     assert book.status()["status"] == "ACTIVE"
+    book.close()
+
+
+def _quote(price=1.0, **overrides):
+    data = dict(mint=MINT, symbol="TEST", price_sol=price, price_usd=price,
+               liquidity_usd=REGROWTH_MIN_LIQUIDITY_USD, market_cap_usd=100_000,
+               pair_address="pair", pair_created_at_ms=1, buys_m5=20, sells_m5=5,
+               volume_m5_usd=3_000, price_change_m5_pct=2)
+    data.update(overrides)
+    return MarketQuote(**data)
+
+
+class FakeOracle:
+    def __init__(self, quote):
+        self.quote_returned = quote
+        self.calls = 0
+
+    async def quote(self, mint):
+        self.calls += 1
+        return self.quote_returned
+
+
+def _seed_closed_position(book, *, mint, exit_price, agent="hunter-v1", now=None, label=None,
+                          cost_cents=50):
+    """A full buy+sell round trip through the public ledger API, producing
+    a real closed_positions row the way a genuine round trip would.
+
+    cost_cents defaults low relative to a typical exit_price around $1 (a
+    proceeds_cents of ~100) so seeding a closed position for regrowth
+    doesn't itself accidentally realize a loss and trip the (unrelated)
+    daily-loss-limit or mint-loss-streak gates the tests aren't exercising -
+    pass a higher cost_cents to deliberately seed a losing round trip.
+    """
+    at = time.time() if now is None else now
+    tag = f"{mint}:{label if label is not None else at}"
+    book.reserve_buy(intent=f"seed-buy:{tag}", agent=agent, mint=mint, requested_cents=500,
+                     approved_cents=500, now=at)
+    book.transition(f"seed-buy:{tag}", "SUBMITTED", signature=f"seed-buy-sig:{tag}")
+    book.confirm_buy(intent=f"seed-buy:{tag}", signature=f"seed-buy-sig:{tag}", executed_cents=cost_cents,
+                     quantity_raw=1, decimals=0, entry_price=1.0,
+                     entry_liquidity_usd=60000, verified_on_chain=True)
+    book.reserve_sell(intent=f"seed-sell:{tag}", agent=agent, mint=mint, now=at)
+    book.transition(f"seed-sell:{tag}", "SUBMITTED", signature=f"seed-sell-sig:{tag}")
+    book.confirm_sell(intent=f"seed-sell:{tag}", signature=f"seed-sell-sig:{tag}", quantity_raw=1,
+                      proceeds_cents=round(exit_price * 100), verified_on_chain=True)
+
+
+def test_regrowth_bar_clears_on_genuine_growth_and_rejects_a_weak_signal():
+    assert _regrowth_bar_clears(_quote(price=1 + REGROWTH_MIN_GROWTH_PCT / 100 * 1.5), exit_price=1.0)
+    # Below the growth threshold.
+    assert not _regrowth_bar_clears(_quote(price=1.05), exit_price=1.0)
+    # Growth is there, but momentum/liquidity/pressure are not.
+    assert not _regrowth_bar_clears(_quote(price=2, liquidity_usd=1_000), exit_price=1.0)
+    assert not _regrowth_bar_clears(_quote(price=2, price_change_m5_pct=-1), exit_price=1.0)
+    assert not _regrowth_bar_clears(_quote(price=2, buys_m5=2, sells_m5=10), exit_price=1.0)
+    assert not _regrowth_bar_clears(None, exit_price=1.0)
+
+
+def test_decide_regrowth_rebuy_returns_none_with_no_closed_positions(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    book = LiveTrialLedger(tmp_path / "trial.sqlite")
+    book.start()
+    model = Model()
+    oracle = FakeOracle(_quote(price=2.0))
+    assert asyncio.run(decide_regrowth_rebuy(model=model, ledger=book, oracle=oracle)) is None
+    assert oracle.calls == 0
+    assert model.calls == 0
+    book.close()
+
+
+def test_decide_regrowth_rebuy_skips_the_model_when_the_bar_is_not_cleared(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    book = LiveTrialLedger(tmp_path / "trial.sqlite")
+    book.start()
+    _seed_closed_position(book, mint=MINT, exit_price=1.0)
+    model = Model()
+    oracle = FakeOracle(_quote(price=1.05))  # below REGROWTH_MIN_GROWTH_PCT
+    assert asyncio.run(decide_regrowth_rebuy(model=model, ledger=book, oracle=oracle)) is None
+    assert oracle.calls == 1
+    assert model.calls == 0
+    book.close()
+
+
+def test_decide_regrowth_rebuy_buys_a_mint_that_cleared_the_bar(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    book = LiveTrialLedger(tmp_path / "trial.sqlite")
+    book.start()
+    _seed_closed_position(book, mint=MINT, exit_price=1.0)
+    model = Model(requested=5)
+    oracle = FakeOracle(_quote(price=1 + REGROWTH_MIN_GROWTH_PCT / 100 * 1.5))
+    decision = asyncio.run(decide_regrowth_rebuy(model=model, ledger=book, oracle=oracle))
+    assert decision is not None
+    assert decision.mint == MINT
+    assert decision.approved_cents == 500
+    assert model.calls == 1
+    book.close()
+
+
+def test_decide_regrowth_rebuy_has_its_own_open_position_cap_separate_from_fresh(tmp_path, monkeypatch):
+    """A regrowth re-entry never competes with hunter-v1's own fresh-
+    discovery slots (see decide_hunter_entry's fresh-only count) - it's
+    blocked by its own, separate cap instead."""
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    book = LiveTrialLedger(tmp_path / "trial.sqlite")
+    book.start()
+    other_mint = "B" * 44
+    _seed_closed_position(book, mint=other_mint, exit_price=1.0)
+    # A regrowth position already open occupies the one regrowth slot.
+    book.reserve_buy(intent="already-open", agent="hunter-v1", mint="C" * 44,
+                     requested_cents=500, approved_cents=500)
+    book.transition("already-open", "SUBMITTED", signature="already-open-sig")
+    book.confirm_buy(intent="already-open", signature="already-open-sig", executed_cents=500,
+                     quantity_raw=1, decimals=0, entry_price=1.0,
+                     entry_liquidity_usd=60000, verified_on_chain=True, origin="regrowth")
+    model = Model()
+    oracle = FakeOracle(_quote(price=1 + REGROWTH_MIN_GROWTH_PCT / 100 * 1.5))
+    assert asyncio.run(decide_regrowth_rebuy(model=model, ledger=book, oracle=oracle)) is None
+    assert model.calls == 0
+    book.close()
+
+
+def test_decide_regrowth_rebuy_blocks_a_mint_after_two_consecutive_losses(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    book = LiveTrialLedger(tmp_path / "trial.sqlite")
+    book.start()
+    # cost_cents=200 against a $1 (100-cent) exit realizes a loss each time -
+    # small enough (total -$2) to stay under the $3 daily-loss cap, so the
+    # loss-streak block is what's actually being exercised here, not that.
+    _seed_closed_position(book, mint=MINT, exit_price=1.0, label="first", cost_cents=200)
+    _seed_closed_position(book, mint=MINT, exit_price=1.0, label="second", cost_cents=200)
+    model = Model()
+    oracle = FakeOracle(_quote(price=1 + REGROWTH_MIN_GROWTH_PCT / 100 * 1.5))
+    assert asyncio.run(decide_regrowth_rebuy(model=model, ledger=book, oracle=oracle)) is None
+    assert model.calls == 0
+    book.close()
+
+
+def test_decide_regrowth_rebuy_skips_the_model_once_the_daily_loss_limit_is_breached(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    book = LiveTrialLedger(tmp_path / "trial.sqlite")
+    book.start()
+    _seed_closed_position(book, mint=MINT, exit_price=1.0)
+    book.db.execute(
+        "INSERT INTO orders(intent,agent,side,mint,state,realized_cents,created_at) "
+        "VALUES(?,?,'SELL',?,'CONFIRMED',?,?)",
+        ("daily-loss-seed", "hunter-v1", "B" * 44, -350, time.time()),
+    )
+    book.db.commit()
+    model = Model()
+    oracle = FakeOracle(_quote(price=1 + REGROWTH_MIN_GROWTH_PCT / 100 * 1.5))
+    assert asyncio.run(decide_regrowth_rebuy(model=model, ledger=book, oracle=oracle)) is None
+    assert model.calls == 0
     book.close()
