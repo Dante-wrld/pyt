@@ -196,8 +196,16 @@ class BitqueryClient:
             },
             method="POST",
         )
-        with urllib.request.urlopen(request, timeout=30, context=self._ssl) as response:
-            payload = json.load(response)
+        try:
+            with urllib.request.urlopen(request, timeout=30, context=self._ssl) as response:
+                payload = json.load(response)
+        except urllib.error.HTTPError as exc:
+            # A non-2xx status (e.g. 402 "points limit: usage quota reached")
+            # carries the actual reason in the response body, not in the
+            # generic HTTPError message - without reading it, a quota
+            # exhaustion looks identical to any other outage in the logs.
+            body = exc.read().decode("utf-8", "replace")
+            raise RuntimeError(f"Bitquery GraphQL HTTP {exc.code}: {body}") from exc
         errors = payload.get("errors")
         if errors:
             raise RuntimeError(f"Bitquery GraphQL error: {errors}")

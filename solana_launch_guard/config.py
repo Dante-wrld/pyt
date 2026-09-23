@@ -266,7 +266,13 @@ class Settings:
     multichain_poll_seconds: float = 15.0
     bitquery_client_id: str | None = None
     bitquery_client_secret: str | None = None
-    launchlab_poll_seconds: float = 20.0
+    # 60s, not the 15-20s the other feeds use: each poll spends 3 Bitquery
+    # queries (creations/trades/pools) against a metered points quota, and a
+    # continuous 20s cadence exhausted a real quota in ~25 minutes on
+    # 2026-09-23 ("access restricted by points limit: usage quota reached").
+    # LaunchLab's launch volume is high enough that 60s still catches
+    # meaningful activity without burning through the quota this fast.
+    launchlab_poll_seconds: float = 60.0
     evm_wallet_address: str | None = None
     hyperliquid_address: str | None = None
     evm_wallet_poll_seconds: float = 10.0
@@ -599,7 +605,7 @@ class Settings:
             ),
             bitquery_client_id=(os.getenv("BITQUERY_CLIENT_ID") or None),
             bitquery_client_secret=(os.getenv("BITQUERY_CLIENT_SECRET") or None),
-            launchlab_poll_seconds=_float("LAUNCHLAB_POLL_SECONDS", 20.0),
+            launchlab_poll_seconds=_float("LAUNCHLAB_POLL_SECONDS", 60.0),
             evm_wallet_address=(os.getenv("EVM_WALLET_ADDRESS") or None),
             hyperliquid_address=(
                 os.getenv("HYPERLIQUID_ADDRESS")
