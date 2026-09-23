@@ -33,8 +33,11 @@ def test_budgets_and_idempotency_survive_reopen(tmp_path, monkeypatch):
     book = LiveTrialLedger(path)
     assert book.status(now=110)["agents"]["hunter-v1"]["remaining_buy_cap_cents"] == 0
     assert book.status(now=110)["total_remaining_buy_cap_cents"] == 3000
-    with pytest.raises(TrialHalted, match="already exists"):
-        book.start(now=110)
+    # Still within the original deadline and never halted, so this is a
+    # resume (e.g. after an unplanned process restart), not a new session -
+    # see test_start_resumes_an_open_position_after_an_unplanned_process_restart.
+    book.start(now=110)
+    assert book.status(now=110)["agents"]["hunter-v1"]["remaining_buy_cap_cents"] == 0
     book.close()
 
 
@@ -330,3 +333,63 @@ def test_partial_profit_stages_and_remaining_cost_survive_restart(tmp_path, monk
     with pytest.raises(sqlite3.IntegrityError):
         book.reserve_sell(intent=second, agent="hunter-v1", mint="token", now=103)
     book.close()
+
+
+def test_start_resumes_an_open_position_after_an_unplanned_process_restart(tmp_path, monkeypatch):
+    """An operator's deliberate --live-trial-stop is not the only way this
+    process ever ends - a crash, an OOM kill, or a hardware failure kills
+    it too, leaving no chance to archive the ledger first. Calling start()
+    again against the SAME file (the only thing an operator can do to
+    resume) must not be treated as opening a second, brand-new session -
+    the open position it left behind must still be there afterward,
+    exactly as this same live process would have kept seeing it."""
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    path = tmp_path / "trial.sqlite"
+    book = LiveTrialLedger(path)
+    book.start(now=100)
+    book.reserve_buy(intent="first", agent="hunter-v1", mint="token", requested_cents=500,
+                     approved_cents=500, now=101)
+    book.transition("first", "SUBMITTED", signature="signature")
+    book.confirm_buy(intent="first", signature="signature", executed_cents=500,
+                     quantity_raw=100, decimals=6, entry_price=0.05,
+                     entry_liquidity_usd=60000, verified_on_chain=True)
+    book.close()  # simulates the process dying without a deliberate stop
+
+    book = LiveTrialLedger(path)
+    book.start(now=105)  # the only recovery action available: start again
+    assert book.positions("hunter-v1")[0]["mint"] == "token"
+    assert book.started_at() == 100  # unchanged - this is a resume, not a new session
+    book.assert_active(now=106)  # still governed by the original deadline/budget
+    book.close()
+
+
+def test_start_still_refuses_a_new_session_after_a_deliberate_stop(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    path = tmp_path / "trial.sqlite"
+    book = LiveTrialLedger(path)
+    book.start(now=100)
+    book.stop()
+    with pytest.raises(TrialHalted, match="operator stop file exists"):
+        book.start(now=101)
+
+
+def test_start_still_refuses_a_new_session_after_the_deadline_passed(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    path = tmp_path / "trial.sqlite"
+    book = LiveTrialLedger(path)
+    book.start(now=100)
+    with pytest.raises(TrialHalted, match="trial already exists"):
+        book.start(now=100 + 8 * 3600 + 1)
+
+
+def test_start_still_refuses_a_new_session_after_an_internal_halt(tmp_path, monkeypatch):
+    """halt() (e.g. a risk-engine breach) can mark the trial halted without
+    ever going through stop()'s .stop marker file - start()'s own halted
+    check, not just the marker-file check, must catch this case too."""
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    path = tmp_path / "trial.sqlite"
+    book = LiveTrialLedger(path)
+    book.start(now=100)
+    book.halt("daily loss limit reached")
+    with pytest.raises(TrialHalted, match="trial already exists"):
+        book.start(now=101)

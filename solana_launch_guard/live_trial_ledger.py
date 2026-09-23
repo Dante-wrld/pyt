@@ -24,7 +24,11 @@ class TrialHalted(ValueError):
 
 
 class LiveTrialLedger:
-    """One persistent eight-hour session; no automatic restart or reset."""
+    """One persistent eight-hour session. A brand new session is never
+    automatic - it always needs a fresh ledger file - but resuming the
+    SAME still-valid session after an unplanned process restart is, so an
+    operator's only recovery action (running --start again) never has to
+    come at the cost of forgetting an open position - see start()."""
 
     def __init__(self, path: str | Path):
         self.path = Path(path)
@@ -142,7 +146,23 @@ class LiveTrialLedger:
         ).fetchone()[0])
 
     def start(self, *, now: float | None = None) -> None:
-        """Initialize once; caller must independently pass all live preflights."""
+        """Initialize once, or resume the same still-valid session after an
+        unplanned process restart (crash, OOM kill, hardware failure) -
+        caller must independently pass all live preflights either way.
+
+        A trial row that is already halted (an operator's deliberate
+        --live-trial-stop, or an internal halt() such as an expired
+        deadline or the model-request cap) still refuses, exactly as
+        before: a genuinely NEW session remains an explicit, non-automatic
+        decision, made against a fresh ledger file. But one that is
+        neither halted nor past its own deadline is, by definition, the
+        SAME session continuing after an interruption, not a new one - and
+        refusing that forced the only available recovery path to be
+        archiving the whole file and starting over, which silently wiped
+        every open position's entry price, peak price, and profit-ladder
+        stage. positions/orders/decisions are never touched here, so
+        resuming preserves them exactly as an in-place reconnect would.
+        """
         at = time.time() if now is None else now
         if not math.isfinite(at) or at <= 0:
             raise ValueError("invalid trial start time")
@@ -151,8 +171,13 @@ class LiveTrialLedger:
             raise TrialHalted("operator stop file exists")
         self._begin()
         try:
-            if self.db.execute("SELECT 1 FROM trial WHERE id=1").fetchone():
-                raise TrialHalted("trial already exists; a new session is not automatic")
+            existing = self.db.execute("SELECT deadline, halted FROM trial WHERE id=1").fetchone()
+            if existing is not None:
+                deadline, halted = existing
+                if halted or at >= deadline:
+                    raise TrialHalted("trial already exists; a new session is not automatic")
+                self.db.commit()
+                return
             self.db.execute("INSERT INTO trial(id,started_at,deadline) VALUES(1,?,?)", (at, at + TRIAL_SECONDS))
             self.db.commit()
         except BaseException:
