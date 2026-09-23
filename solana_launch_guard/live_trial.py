@@ -573,8 +573,21 @@ async def cycle(*, ledger: LiveTrialLedger, settings: Settings, rpc: SolanaRpc,
             active_max_impact = settings.emergency_sell_max_price_impact_pct
             active_max_slippage = settings.emergency_sell_max_slippage_bps
         else:
+            # marked (unlike portfolio-v1's wallet-scan "owned_position",
+            # which carries current_value_usd directly from the portfolio
+            # snapshot) has no ready-made dollar figure - only
+            # quantity_raw/decimals/current_price, requiring the model to
+            # multiply them itself. Confirmed live 2026-09-23: without an
+            # explicit value, the model reliably returned requested_usd=0
+            # for an otherwise correct, high-confidence SELL (thesis and
+            # evidence were sound), which _sell_choice then silently
+            # rejected as not matching current_value - every cycle, on a
+            # real losing position, with nothing in the logs to explain
+            # why. current_value_usd here closes that gap the same way
+            # the other call site already avoids it.
             raw = model.propose(role=AgentRole.PORTFOLIO_MANAGER,
-                context={"mode": "live_trial", "owned_position": marked,
+                context={"mode": "live_trial",
+                         "owned_position": {**marked, "current_value_usd": current_value},
                          "fresh_quote": market, "reversal_review": review,
                          "constraint": "Choose SELL for EXIT/EMERGENCY_EXIT or TAKE_PARTIAL for TAKE_PARTIAL, or HOLD. No buys."})
             sell_choice = _sell_choice(raw, position["mint"], current_value, review["state"], partial_limit)

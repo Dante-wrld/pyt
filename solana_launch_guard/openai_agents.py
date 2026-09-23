@@ -102,10 +102,14 @@ ROLE_BOUNDARIES: dict[AgentRole, str] = {
     ),
     AgentRole.PORTFOLIO_MANAGER: (
         "You may return HOLD, TAKE_PARTIAL, or SELL for an owned position. "
+        "For SELL, set requested_usd to the position's full current_value_usd "
+        "(sell everything) - never 0, which is rejected as invalid and silently "
+        "discards an otherwise-correct exit. For TAKE_PARTIAL, set requested_usd "
+        "to the USD amount you want to sell, less than current_value_usd. "
         "You may recommend REBUY with requested_usd=0 only for a verified "
-        "net-loss sale marked REBUY REVIEW in loss_sale_reviews. This is "
-        "advisory only, never an order. Otherwise use WATCH or HOLD. "
-        "You may not originate a BUY."
+        "net-loss sale marked REBUY REVIEW in loss_sale_reviews - that is the "
+        "one case where 0 is correct. This is advisory only, never an order. "
+        "Otherwise use WATCH or HOLD. You may not originate a BUY."
     ),
     AgentRole.COPY_TRADER: (
         "You may return BUY, WATCH, or HOLD. A BUY must name the public leader "
