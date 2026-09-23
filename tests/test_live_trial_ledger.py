@@ -153,6 +153,49 @@ def test_confirmed_buy_position_and_peak_survive_restart(tmp_path, monkeypatch):
     book.close()
 
 
+def test_model_performance_by_decision_attributes_realized_pnl_to_the_sourcing_decision(tmp_path, monkeypatch):
+    """The point of tracking this at all: is the model's approval actually
+    associated with profit, broken down by which decision type it
+    approved - not just an aggregate win rate that can hide one bad
+    decision type dragging down an otherwise-fine strategy (this is
+    exactly how the MOMENTUM BUY pause was discovered, by hand - this
+    makes it a queryable, ongoing report instead)."""
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    book = LiveTrialLedger(tmp_path / "trial.sqlite")
+    book.start(now=100)
+    # A MOMENTUM BUY round trip that lost money.
+    book.reserve_buy(intent="m-buy", agent="hunter-v1", mint="momentum-mint", requested_cents=500,
+                     approved_cents=500, now=101)
+    book.transition("m-buy", "SUBMITTED", signature="m-buy-sig")
+    book.confirm_buy(intent="m-buy", signature="m-buy-sig", executed_cents=500,
+                     quantity_raw=100, decimals=6, entry_price=0.05,
+                     entry_liquidity_usd=60000, verified_on_chain=True, decision="MOMENTUM BUY")
+    book.reserve_sell(intent="m-sell", agent="hunter-v1", mint="momentum-mint", now=102)
+    book.transition("m-sell", "SUBMITTED", signature="m-sell-sig")
+    book.confirm_sell(intent="m-sell", signature="m-sell-sig", quantity_raw=100,
+                      proceeds_cents=400, verified_on_chain=True)
+    # A BUY NOW (pullback) round trip that won.
+    book.reserve_buy(intent="p-buy", agent="hunter-v1", mint="pullback-mint", requested_cents=500,
+                     approved_cents=500, now=103)
+    book.transition("p-buy", "SUBMITTED", signature="p-buy-sig")
+    book.confirm_buy(intent="p-buy", signature="p-buy-sig", executed_cents=500,
+                     quantity_raw=100, decimals=6, entry_price=0.05,
+                     entry_liquidity_usd=60000, verified_on_chain=True, decision="BUY NOW")
+    book.reserve_sell(intent="p-sell", agent="hunter-v1", mint="pullback-mint", now=104)
+    book.transition("p-sell", "SUBMITTED", signature="p-sell-sig")
+    book.confirm_sell(intent="p-sell", signature="p-sell-sig", quantity_raw=100,
+                      proceeds_cents=650, verified_on_chain=True)
+    by_decision = book.model_performance_by_decision()
+    assert by_decision["MOMENTUM BUY"] == {
+        "round_trips": 1, "wins": 0, "losses": 1, "realized_cents": -100,
+    }
+    assert by_decision["BUY NOW"] == {
+        "round_trips": 1, "wins": 1, "losses": 0, "realized_cents": 150,
+    }
+    assert "model_performance_by_decision" in book.report(now=104)
+    book.close()
+
+
 def test_a_full_exit_is_watched_afterward_for_renewed_growth(tmp_path, monkeypatch):
     """A mint hunter-v1 fully exits doesn't just vanish - its fill price is
     recorded so a later regrowth-rebuy check can compare against it."""

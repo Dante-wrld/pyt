@@ -551,7 +551,8 @@ async def execute_hunter_entry(
                            executed_cents=spent_cents, quantity_raw=token_delta,
                            decimals=decimals, entry_price=entry_price,
                            entry_liquidity_usd=float(decision.candidate["liquidity_usd"]),
-                           verified_on_chain=True, origin=origin)
+                           verified_on_chain=True, origin=origin,
+                           decision=decision.candidate.get("decision"))
         ledger.log(agent="hunter-v1", mint=decision.mint, state="CONFIRMED",
                    reason=f"chain verified buy: {spent_cents} cents, {token_delta} raw tokens")
         return {"status": "CONFIRMED", "mint": decision.mint,

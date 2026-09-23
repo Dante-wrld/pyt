@@ -10,6 +10,7 @@ import os
 import sqlite3
 import time
 from pathlib import Path
+from typing import Any
 
 
 BUY_AGENTS = ("hunter-v1", "copy-v1")
@@ -78,6 +79,8 @@ class LiveTrialLedger:
                 self.db.execute(f"ALTER TABLE positions ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0")
         if "origin" not in position_columns:
             self.db.execute("ALTER TABLE positions ADD COLUMN origin TEXT NOT NULL DEFAULT 'fresh'")
+        if "decision" not in {row[1] for row in self.db.execute("PRAGMA table_info(orders)")}:
+            self.db.execute("ALTER TABLE orders ADD COLUMN decision TEXT")
 
     def close(self) -> None:
         self.db.close()
@@ -275,7 +278,7 @@ class LiveTrialLedger:
     def confirm_buy(self, *, intent: str, signature: str, executed_cents: int,
                     quantity_raw: int, decimals: int, entry_price: float,
                     entry_liquidity_usd: float, verified_on_chain: bool,
-                    origin: str = "fresh") -> None:
+                    origin: str = "fresh", decision: str | None = None) -> None:
         """Atomically confirm a buy and establish its persistent post-entry peak.
 
         origin distinguishes a position hunter-v1 sourced itself from the
@@ -284,6 +287,13 @@ class LiveTrialLedger:
         so the two have independent open-position caps and a fresh
         discovery is never crowded out by (or crowds out) a regrowth
         re-entry, and vice versa.
+
+        decision is the recommendation-engine label (MOMENTUM BUY, BUY
+        NOW, BUY ZONE, EARLY BUY, REGROWTH REBUY) that sourced this buy,
+        persisted on the orders row (never deleted, unlike positions) so
+        model_performance can later attribute realized P&L back to it -
+        the whole point being to see whether the model's approval is
+        actually associated with profit, not just added latency.
         """
         if origin not in {"fresh", "regrowth"}:
             raise ValueError("origin must be 'fresh' or 'regrowth'")
@@ -305,7 +315,8 @@ class LiveTrialLedger:
                 entry_price, entry_liquidity_usd, entry_price, entry_price,
                 time.time(), time.time(), origin,
             ))
-            self.db.execute("UPDATE orders SET state='CONFIRMED',executed_cents=? WHERE intent=?", (executed_cents,intent))
+            self.db.execute("UPDATE orders SET state='CONFIRMED',executed_cents=?,decision=? WHERE intent=?",
+                           (executed_cents, decision, intent))
             self.db.execute("DELETE FROM closed_positions WHERE agent=? AND mint=?", (row[0], row[1]))
             self.db.commit()
         except BaseException:
@@ -536,9 +547,45 @@ class LiveTrialLedger:
             "deadline": status["deadline"], "generated_at": time.time(),
             "max_new_capital_cents": 6000,
             "agents": agents,
+            "model_performance_by_decision": self.model_performance_by_decision(),
             "blocked_decisions": self.db.execute(
                 "SELECT COUNT(*) FROM decisions WHERE state IN ('BLOCKED','EXIT_BLOCKED','CYCLE_BLOCKED')"
             ).fetchone()[0],
             "unresolved_orders": status["unresolved_orders"],
             "note": "Open values use last observed marks and can be stale; unknown fees, slippage and portfolio cost basis are not estimated.",
         }
+
+    def model_performance_by_decision(self, agent: str = "hunter-v1") -> dict[str, dict[str, Any]]:
+        """Realized P&L grouped by the recommendation-engine decision label
+        (MOMENTUM BUY, BUY NOW, BUY ZONE, EARLY BUY, REGROWTH REBUY) that
+        sourced each buy - the model must approve every one of these before
+        a buy executes, so this answers "is the model's approval actually
+        associated with profit, or just adding latency" per decision type,
+        not just in aggregate. Walks orders chronologically per mint,
+        attributing each sell's realized P&L to the most recent preceding
+        buy's decision label for that mint - handles a mint being bought,
+        sold, and rebought under a different decision type within one
+        session.
+        """
+        rows = self.db.execute(
+            "SELECT mint, side, decision, realized_cents FROM orders "
+            "WHERE agent=? AND state='CONFIRMED' ORDER BY created_at",
+            (agent,),
+        ).fetchall()
+        current_decision: dict[str, str] = {}
+        by_decision: dict[str, dict[str, Any]] = {}
+        for mint, side, decision, realized_cents in rows:
+            if side == "BUY":
+                current_decision[mint] = decision or "UNKNOWN"
+            elif side == "SELL" and realized_cents is not None:
+                label = current_decision.get(mint, "UNKNOWN")
+                bucket = by_decision.setdefault(
+                    label, {"round_trips": 0, "wins": 0, "losses": 0, "realized_cents": 0}
+                )
+                bucket["round_trips"] += 1
+                bucket["realized_cents"] += realized_cents
+                if realized_cents > 0:
+                    bucket["wins"] += 1
+                elif realized_cents < 0:
+                    bucket["losses"] += 1
+        return by_decision
