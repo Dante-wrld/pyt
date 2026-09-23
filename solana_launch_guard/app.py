@@ -32,11 +32,13 @@ from .execution import (
     USDC_MINT,
     store_fomo_solana_key,
 )
+from .bitquery import BitqueryClient
 from .intelligence import CoinIntelligence
 from .launch_guard_auto_buy import AutoBuyMixin
 from .launch_guard_auto_rebuy import AutoRebuyMixin
 from .launch_guard_auto_sell import AutoSellMixin
 from .launch_guard_ingestion import LaunchIngestionMixin
+from .launch_guard_launchlab import LaunchLabFeedMixin
 from .launch_guard_multichain import MultichainMixin
 from .launch_guard_portfolio_monitor import PortfolioMonitorMixin
 from .launch_guard_recommendations import RecommendationMonitorMixin
@@ -92,6 +94,7 @@ class LaunchGuard(
     AutoBuyMixin,
     RecommendationMonitorMixin,
     MultichainMixin,
+    LaunchLabFeedMixin,
 ):
     """Owns shared state (settings, store, broker, risk, oracle, ...) and
     composes the trading behaviors implemented by the mixins above; see
@@ -124,6 +127,13 @@ class LaunchGuard(
         self.candidate_tasks: set[asyncio.Task[Any]] = set()
         self.multichain_pending_count = 0
         self.multichain_last_result: dict[str, tuple[str, int]] = {}
+        self.bitquery_client: BitqueryClient | None = None
+        if settings.bitquery_client_id and settings.bitquery_client_secret:
+            self.bitquery_client = BitqueryClient(
+                client_id=settings.bitquery_client_id,
+                client_secret=settings.bitquery_client_secret,
+            )
+        self.launchlab_last_result: dict[str, tuple[str, int]] = {}
         self.recommendation_console_output = True
         self.portfolio_monitor_enabled = False
         self.portfolio_last_decisions: dict[str, str] = {}
@@ -343,6 +353,8 @@ class LaunchGuard(
                         self.run_auto_buy_discovery_monitor()
                     )
                 )
+            if self.bitquery_client is not None:
+                tasks.append(asyncio.create_task(self.run_launchlab_feed()))
 
         if mode == "robinhood":
             tasks.append(

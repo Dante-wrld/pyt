@@ -264,6 +264,9 @@ class Settings:
     hyperevm_token_addresses: tuple[str, ...] = ()
     robinhood_poll_seconds: float = 15.0
     multichain_poll_seconds: float = 15.0
+    bitquery_client_id: str | None = None
+    bitquery_client_secret: str | None = None
+    launchlab_poll_seconds: float = 20.0
     evm_wallet_address: str | None = None
     hyperliquid_address: str | None = None
     evm_wallet_poll_seconds: float = 10.0
@@ -594,6 +597,9 @@ class Settings:
                 "MULTICHAIN_POLL_SECONDS",
                 _float("ROBINHOOD_POLL_SECONDS", 15.0),
             ),
+            bitquery_client_id=(os.getenv("BITQUERY_CLIENT_ID") or None),
+            bitquery_client_secret=(os.getenv("BITQUERY_CLIENT_SECRET") or None),
+            launchlab_poll_seconds=_float("LAUNCHLAB_POLL_SECONDS", 20.0),
             evm_wallet_address=(os.getenv("EVM_WALLET_ADDRESS") or None),
             hyperliquid_address=(
                 os.getenv("HYPERLIQUID_ADDRESS")

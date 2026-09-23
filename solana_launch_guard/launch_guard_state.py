@@ -19,6 +19,7 @@ import asyncio
 from collections.abc import Mapping
 from typing import Any, Protocol
 
+from .bitquery import BitqueryClient
 from .config import Settings
 from .core import PaperBroker, RiskEngine, SQLiteStore
 from .execution import (
@@ -48,6 +49,8 @@ class LaunchGuardState(Protocol):
     candidate_tasks: set[asyncio.Task[Any]]
     multichain_pending_count: int
     multichain_last_result: dict[str, tuple[str, int]]
+    bitquery_client: BitqueryClient | None
+    launchlab_last_result: dict[str, tuple[str, int]]
     recommendation_console_output: bool
     portfolio_monitor_enabled: bool
     portfolio_last_decisions: dict[str, str]

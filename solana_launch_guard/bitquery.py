@@ -10,18 +10,30 @@ HTmQz7My6MehV7bjhJ6jde8nDND1yvsz68d24LP7YgUQ (symbol GP) - a real
 dust position already sitting in the wallet, unsellable and undiscoverable
 by the existing pump.fun-only pipeline - does too.
 
-Not yet wired into launch_guard_ingestion.py's discovery pipeline or
-core.py's risk-scoring gate: LaunchLab's pool-creation event doesn't
-carry pump.fun-equivalent fields (no live virtual reserves, no
-creator-buy-at-launch signal - see decide whether/how to adapt Launch's
-hard-required fields, or build a parallel eligibility path, before this
-is live-trading-connected). This module only covers the confirmed,
-tested surface: OAuth token refresh, recent pool creations, and recent
-trades (for live price/volume tracking once a mint is known).
+Wired into the live discovery pipeline via launch_guard_launchlab.py's
+LaunchLabFeedMixin, NOT core.py's pump.fun-specific Launch/risk-gate at
+all - launch_guard_multichain.py's run_multichain_feed already proves a
+non-pump.fun MarketQuote can reach the shared RecommendationBook
+(self.recommendations.add(quote, result), scored generically by
+CoinIntelligence.score) without ever touching Launch, so this reuses
+that exact, already-running pattern instead of adapting the pump.fun
+gate. This module covers the confirmed, tested surface: OAuth token
+refresh, recent pool creations, recent trades (live price/volume), and
+recent pool reserves (live liquidity, in USD on both sides of the pool -
+some LaunchLab pools are quoted against a tokenized-stock token rather
+than SOL, confirmed live via stonk.fun's "stock-paired" pools, so only
+the USD-denominated reserve is used, never assumed to be SOL).
+
+Creator-buy-at-launch (the one pump.fun signal with no LaunchLab
+equivalent built here) is not part of MarketQuote/CoinIntelligence's
+scoring at all, so this gap doesn't block using the same pipeline -
+it's simply not a check this path performs, same as every non-Solana
+chain already flowing through run_multichain_feed.
 """
 from __future__ import annotations
 
 import asyncio
+import datetime
 import json
 import ssl
 import time
@@ -31,6 +43,8 @@ from dataclasses import dataclass
 from typing import Any
 
 import certifi
+
+from .market import MarketQuote
 
 OAUTH_TOKEN_URL = "https://oauth2.bitquery.io/oauth2/token"
 GRAPHQL_URL = "https://streaming.bitquery.io/graphql"
@@ -44,6 +58,14 @@ LAUNCHLAB_PROTOCOL_NAME = "raydium_launchpad"
 # A fresh token is requested this many seconds before its reported
 # expiry, so a request never starts against a token that expires mid-flight.
 _TOKEN_REFRESH_MARGIN_SECONDS = 60
+
+# Every pool-creation sample observed live 2026-09-23 used this exact
+# supply (1e15 raw at 6 decimals = 1B tokens) - used as a fallback for
+# market-cap estimation when a mint's own creation event isn't in the
+# current recent-creations window (it only covers the newest ~N launches,
+# not full history), preferring the mint's own recorded value when available.
+LAUNCHLAB_STANDARD_SUPPLY = 1_000_000_000.0
+_FIVE_MINUTES_SECONDS = 300
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,6 +108,23 @@ class LaunchLabTrade:
     block_time: str
 
 
+@dataclass(frozen=True, slots=True)
+class LaunchLabPool:
+    """A LaunchLab pool's current reserve state, from Bitquery's DEXPools -
+    liquidity_usd is both sides of the pool combined, the same convention
+    MarketQuote.liquidity_usd already uses. quote_mint/quote_symbol are
+    whatever the pool is actually quoted against - not always SOL (stonk.fun
+    pairs some launches against a tokenized-stock token instead, confirmed
+    live), so callers must never assume SOL."""
+
+    mint: str
+    symbol: str
+    liquidity_usd: float
+    quote_mint: str
+    quote_symbol: str
+    block_time: str
+
+
 class BitqueryAuthError(RuntimeError):
     """The OAuth2 client-credentials exchange failed - bad/expired
     credentials, not a query-level problem."""
@@ -110,6 +149,9 @@ class BitqueryClient:
 
     async def recent_trades(self, *, limit: int = 50) -> list[LaunchLabTrade]:
         return await asyncio.to_thread(self._recent_trades, limit)
+
+    async def recent_pools(self, *, limit: int = 50) -> list[LaunchLabPool]:
+        return await asyncio.to_thread(self._recent_pools, limit)
 
     def _access_token(self) -> str:
         now = time.monotonic()
@@ -232,6 +274,38 @@ class BitqueryClient:
                 results.append(parsed)
         return results
 
+    def _recent_pools(self, limit: int) -> list[LaunchLabPool]:
+        query = f"""
+        query {{
+          Solana {{
+            DEXPools(
+              limit: {{count: {int(limit)}}}
+              orderBy: {{descending: Block_Time}}
+              where: {{
+                Pool: {{Dex: {{ProtocolName: {{is: "{LAUNCHLAB_PROTOCOL_NAME}"}}}}}}
+              }}
+            ) {{
+              Block {{ Time }}
+              Pool {{
+                Base {{ PostAmountInUSD }}
+                Quote {{ PostAmountInUSD }}
+                Market {{
+                  BaseCurrency {{ MintAddress Symbol }}
+                  QuoteCurrency {{ MintAddress Symbol }}
+                }}
+              }}
+            }}
+          }}
+        }}
+        """
+        data = self._graphql(query)
+        results: list[LaunchLabPool] = []
+        for row in data.get("Solana", {}).get("DEXPools", []) or []:
+            parsed = _parse_pool(row)
+            if parsed is not None:
+                results.append(parsed)
+        return results
+
 
 def _parse_pool_creation(row: dict[str, Any]) -> LaunchLabPoolCreation | None:
     try:
@@ -304,3 +378,95 @@ def _parse_trade(row: dict[str, Any]) -> LaunchLabTrade | None:
         )
     except (KeyError, TypeError, ValueError):
         return None
+
+
+def _parse_pool(row: dict[str, Any]) -> LaunchLabPool | None:
+    try:
+        pool = row["Pool"]
+        base_currency = pool["Market"]["BaseCurrency"]
+        quote_currency = pool["Market"]["QuoteCurrency"]
+        mint = str(base_currency["MintAddress"])
+        base_usd = float(pool["Base"]["PostAmountInUSD"])
+        quote_usd = float(pool["Quote"]["PostAmountInUSD"])
+        if not mint:
+            return None
+        return LaunchLabPool(
+            mint=mint,
+            symbol=str(base_currency.get("Symbol") or "UNKNOWN"),
+            liquidity_usd=base_usd + quote_usd,
+            quote_mint=str(quote_currency.get("MintAddress") or ""),
+            quote_symbol=str(quote_currency.get("Symbol") or "UNKNOWN"),
+            block_time=str(row["Block"]["Time"]),
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _parse_bitquery_time(value: str) -> float | None:
+    try:
+        return (
+            datetime.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
+            .replace(tzinfo=datetime.timezone.utc)
+            .timestamp()
+        )
+    except (ValueError, TypeError):
+        return None
+
+
+def build_launchlab_quotes(
+    *, trades: list[LaunchLabTrade], pools: list[LaunchLabPool],
+    creations: tuple[LaunchLabPoolCreation, ...] = (), now: float | None = None,
+) -> dict[str, MarketQuote]:
+    """Combine a batch of trades and pool reserves into MarketQuote objects,
+    the same shape CoinIntelligence.score and RecommendationBook.add
+    already consume for every other chain (see run_multichain_feed) - no
+    Launch/pump.fun-specific adaptation needed. A mint only gets a quote if
+    it has BOTH recent trade activity and known pool liquidity; either
+    missing means it can't be scored honestly, so it's skipped rather than
+    guessed at.
+    """
+    at = time.time() if now is None else now
+    liquidity_by_mint = {p.mint: p.liquidity_usd for p in pools}
+    supply_by_mint = {
+        c.mint: c.supply_raw / 10**c.token_decimals
+        for c in creations if c.token_decimals >= 0 and c.supply_raw > 0
+    }
+    trades_by_mint: dict[str, list[LaunchLabTrade]] = {}
+    for trade in trades:
+        trades_by_mint.setdefault(trade.mint, []).append(trade)
+
+    quotes: dict[str, MarketQuote] = {}
+    for mint, mint_trades in trades_by_mint.items():
+        liquidity_usd = liquidity_by_mint.get(mint)
+        if liquidity_usd is None:
+            continue
+        with_ts = [(t, _parse_bitquery_time(t.block_time)) for t in mint_trades]
+        timed = [(t, ts) for t, ts in with_ts if ts is not None]
+        if not timed:
+            continue
+        timed.sort(key=lambda pair: pair[1])
+        latest_trade, _latest_ts = timed[-1]
+        window = [(t, ts) for t, ts in timed if at - ts <= _FIVE_MINUTES_SECONDS] or timed[-1:]
+        oldest_in_window, _ = window[0]
+        price_usd = latest_trade.price_usd
+        price_change_m5_pct = (
+            (price_usd / oldest_in_window.price_usd - 1) * 100
+            if oldest_in_window.price_usd > 0 else None
+        )
+        supply = supply_by_mint.get(mint, LAUNCHLAB_STANDARD_SUPPLY)
+        quotes[mint] = MarketQuote(
+            mint=mint,
+            symbol=latest_trade.symbol,
+            price_sol=0.0,
+            liquidity_usd=liquidity_usd,
+            market_cap_usd=price_usd * supply,
+            pair_address="",
+            pair_created_at_ms=None,
+            buys_m5=sum(1 for t, _ in window if t.side == "buy"),
+            sells_m5=sum(1 for t, _ in window if t.side == "sell"),
+            volume_m5_usd=sum(t.amount_usd for t, _ in window),
+            price_change_m5_pct=price_change_m5_pct,
+            chain="solana",
+            price_usd=price_usd,
+        )
+    return quotes

@@ -1,15 +1,19 @@
 """BitqueryClient: OAuth2 token refresh and LaunchLab discovery/trade
 parsing, against real response shapes captured live 2026-09-23."""
+import datetime
 import io
 import json
 
 import pytest
 
 from solana_launch_guard.bitquery import (
+    LAUNCHLAB_STANDARD_SUPPLY,
     BitqueryAuthError,
     BitqueryClient,
+    LaunchLabPool,
     LaunchLabPoolCreation,
     LaunchLabTrade,
+    build_launchlab_quotes,
 )
 
 TOKEN_URL = "https://oauth2.bitquery.io/oauth2/token"
@@ -65,6 +69,23 @@ TRADE_BODY = json.dumps({
             "Currency": {"MintAddress": "HTmQz7My6MehV7bjhJ6jde8nDND1yvsz68d24LP7YgUQ", "Symbol": "GP"},
             "PriceInUSD": 0.015908367667455122,
             "Side": {"Type": "sell", "AmountInUSD": "33.83653"},
+        },
+    }]}}
+}).encode()
+
+# A real pool response, trimmed to one row - note the quote currency is
+# NOT SOL here (confirmed live: some LaunchLab pools, e.g. stonk.fun's
+# stock-paired launches, are quoted against another token entirely).
+POOL_BODY = json.dumps({
+    "data": {"Solana": {"DEXPools": [{
+        "Block": {"Time": "2026-09-23T13:32:17Z"},
+        "Pool": {
+            "Base": {"PostAmountInUSD": "5240.602"},
+            "Quote": {"PostAmountInUSD": "2471.9941"},
+            "Market": {
+                "BaseCurrency": {"MintAddress": "GePzjSdq6z1o8sgCYEGQo9kApBYdXUosTqXQuBJsap8p", "Symbol": "FORWARD"},
+                "QuoteCurrency": {"MintAddress": "FWDtiB5fXHdVAewPqvHPL2dh4aBC1C6GacQbePoQXKjz", "Symbol": "FWDI"},
+            },
         },
     }]}}
 }).encode()
@@ -158,6 +179,20 @@ def test_recent_trades_parses_a_real_shaped_response(monkeypatch):
     )]
 
 
+def test_recent_pools_parses_a_real_shaped_response(monkeypatch):
+    monkeypatch.setattr("urllib.request.urlopen", _routed_urlopen({
+        TOKEN_URL: TOKEN_BODY, GRAPHQL_URL: POOL_BODY,
+    }))
+    client = BitqueryClient("id", "secret")
+    results = client._recent_pools(50)
+    assert results == [LaunchLabPool(
+        mint="GePzjSdq6z1o8sgCYEGQo9kApBYdXUosTqXQuBJsap8p", symbol="FORWARD",
+        liquidity_usd=5240.602 + 2471.9941,
+        quote_mint="FWDtiB5fXHdVAewPqvHPL2dh4aBC1C6GacQbePoQXKjz",
+        quote_symbol="FWDI", block_time="2026-09-23T13:32:17Z",
+    )]
+
+
 def test_graphql_errors_raise_instead_of_silently_returning_empty(monkeypatch):
     error_body = json.dumps({"errors": [{"message": "bad query"}]}).encode()
     monkeypatch.setattr("urllib.request.urlopen", _routed_urlopen({
@@ -194,3 +229,80 @@ def test_recent_pool_creations_skips_a_row_missing_the_mint_account(monkeypatch)
     }))
     client = BitqueryClient("id", "secret")
     assert client._recent_pool_creations(20) == []
+
+
+MINT = "A" * 44
+
+
+def _trade(*, side, price_usd, amount_usd, block_time, mint=MINT, symbol="TEST"):
+    return LaunchLabTrade(mint=mint, symbol=symbol, side=side, price_usd=price_usd,
+                          amount_usd=amount_usd, block_time=block_time)
+
+
+def _pool(*, liquidity_usd, mint=MINT, symbol="TEST"):
+    return LaunchLabPool(mint=mint, symbol=symbol, liquidity_usd=liquidity_usd,
+                         quote_mint="Q" * 44, quote_symbol="SOL", block_time="2026-09-23T00:00:00Z")
+
+
+def test_build_launchlab_quotes_aggregates_a_5_minute_window():
+    now = 1790000000.0
+    def iso(offset_seconds):
+        return datetime.datetime.fromtimestamp(
+            now - offset_seconds, tz=datetime.timezone.utc
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    trades = [
+        _trade(side="buy", price_usd=1.0, amount_usd=10, block_time=iso(600)),  # outside window
+        _trade(side="buy", price_usd=1.1, amount_usd=20, block_time=iso(200)),
+        _trade(side="sell", price_usd=1.2, amount_usd=15, block_time=iso(100)),
+        _trade(side="buy", price_usd=1.3, amount_usd=25, block_time=iso(10)),
+    ]
+    pools = [_pool(liquidity_usd=60_000)]
+    quotes = build_launchlab_quotes(trades=trades, pools=pools, now=now)
+    assert set(quotes) == {MINT}
+    quote = quotes[MINT]
+    assert quote.price_usd == 1.3  # latest trade
+    assert quote.liquidity_usd == 60_000
+    assert quote.buys_m5 == 2  # the two within 5 minutes
+    assert quote.sells_m5 == 1
+    assert quote.volume_m5_usd == 20 + 15 + 25
+    # price_change_m5_pct compares latest (1.3) to the oldest IN the window (1.1, at 200s)
+    assert quote.price_change_m5_pct == pytest.approx((1.3 / 1.1 - 1) * 100)
+    assert quote.market_cap_usd == 1.3 * LAUNCHLAB_STANDARD_SUPPLY
+    assert quote.chain == "solana"
+
+
+def test_build_launchlab_quotes_skips_a_mint_with_no_pool_liquidity():
+    """Scoring requires real liquidity data (CoinIntelligence.score hard-
+    rejects a None ratio) - a mint with trades but no matching pool must
+    be skipped, never guessed at."""
+    trades = [_trade(side="buy", price_usd=1.0, amount_usd=10, block_time="2026-09-23T00:00:00Z")]
+    assert build_launchlab_quotes(trades=trades, pools=[], now=1790000000.0) == {}
+
+
+def test_build_launchlab_quotes_prefers_the_mints_own_recorded_supply():
+    creation = LaunchLabPoolCreation(
+        mint=MINT, name="Test", symbol="TEST", creator="c", signature="s",
+        block_time="2026-09-23T00:00:00Z", token_decimals=6,
+        supply_raw=500_000_000_000_000, total_base_sell_raw=1, total_quote_fund_raising_lamports=1,
+        migrate_type=1,
+    )
+    trades = [_trade(side="buy", price_usd=2.0, amount_usd=10, block_time="2026-09-23T00:00:00Z")]
+    pools = [_pool(liquidity_usd=60_000)]
+    quotes = build_launchlab_quotes(
+        trades=trades, pools=pools, creations=(creation,), now=1790000000.0,
+    )
+    assert quotes[MINT].market_cap_usd == 2.0 * 500_000_000.0  # 500,000,000,000,000 / 1e6 decimals
+
+
+def test_build_launchlab_quotes_falls_back_to_a_single_trade_outside_any_window():
+    """A mint with only stale trade data (nothing within 5 minutes) still
+    gets a best-effort quote from its single most recent trade, rather
+    than an empty/undefined window - matches how a quiet position still
+    reports its last known state elsewhere in the system."""
+    trades = [_trade(side="sell", price_usd=3.0, amount_usd=5, block_time="2020-01-01T00:00:00Z")]
+    pools = [_pool(liquidity_usd=10_000)]
+    quotes = build_launchlab_quotes(trades=trades, pools=pools, now=1790000000.0)
+    assert quotes[MINT].price_usd == 3.0
+    assert quotes[MINT].sells_m5 == 1
+    assert quotes[MINT].price_change_m5_pct == 0.0
