@@ -40,6 +40,11 @@ EMERGENCY_MIN_PROCEEDS_FRACTION = 0.25
 # mint is a real pattern worth refusing to repeat a third time.
 MINT_LOSS_STREAK_BLOCK = 2
 
+# hunter-v1's starting budget, used both to size the RiskSnapshot passed to
+# the model and to pre-check the daily loss limit deterministically before
+# ever calling the model - kept as one constant so the two can't drift apart.
+HUNTER_EQUITY_USD = 30
+
 
 def _mint_round_trip_history(ledger: LiveTrialLedger, mint: str) -> dict[str, Any]:
     """Realized P&L (cents) for every completed sell of this mint this
@@ -189,6 +194,23 @@ def decide_hunter_entry(
         return None
     candidate = ready[0]
     mint = str(candidate.get("mint") or "")
+    # An early-buy entry has no proven move behind it yet (that's the whole
+    # trade-off: a better price in exchange for less evidence), so it gets
+    # half the normal order size until it's earned a full-size position the
+    # way a confirmed pullback or momentum entry already has.
+    order_cap_usd = 2.5 if candidate.get("decision") == "EARLY BUY" else 5
+    live_arbiter = _live_arbiter(min_liquidity_usd=policy.min_liquidity_usd, max_order_usd=order_cap_usd)
+    # The daily loss limit is a hard, deterministic gate that doesn't depend
+    # on anything the model would say - checking it here (before the model
+    # call) rather than only inside coordinator.ask()'s arbitration saves a
+    # real OpenAI request every single cycle once the limit is breached
+    # (observed live: repeated BUY proposals for the same candidate, each
+    # one blocked only after the round trip completed).
+    daily_pnl_usd = ledger.daily_realized_cents("hunter-v1", now=at) / 100
+    max_daily_loss_usd = HUNTER_EQUITY_USD * live_arbiter.policy.max_daily_loss_pct / 100
+    if max_daily_loss_usd > 0 and daily_pnl_usd <= -max_daily_loss_usd:
+        ledger.log(agent="hunter-v1", mint=mint, state="BLOCKED", reason="daily loss limit reached")
+        return None
     mint_history = _mint_round_trip_history(ledger, mint)
     if mint_history["consecutive_losses"] >= MINT_LOSS_STREAK_BLOCK:
         ledger.log(agent="hunter-v1", mint=mint, state="BLOCKED",
@@ -217,13 +239,7 @@ def decide_hunter_entry(
         return None
     liquidity = float(candidate["liquidity_usd"])
     review = assess_entry(candidate, policy)
-    # An early-buy entry has no proven move behind it yet (that's the whole
-    # trade-off: a better price in exchange for less evidence), so it gets
-    # half the normal order size until it's earned a full-size position the
-    # way a confirmed pullback or momentum entry already has.
-    order_cap_usd = 2.5 if candidate.get("decision") == "EARLY BUY" else 5
-    coordinator = AgentCoordinator(
-        model, _live_arbiter(min_liquidity_usd=policy.min_liquidity_usd, max_order_usd=order_cap_usd))
+    coordinator = AgentCoordinator(model, live_arbiter)
     proposal, arbitration = coordinator.ask(
         AgentRecord("hunter-v1", AgentRole.OPPORTUNITY_HUNTER),
         {"mode": "live_trial", "candidate": candidate,
@@ -231,9 +247,9 @@ def decide_hunter_entry(
          "maximum_order_usd": order_cap_usd,
          "remaining_gross_budget_usd": status["remaining_buy_cap_cents"] / 100,
          "mint_trade_history": mint_history},
-        RiskSnapshot(mode="live", equity_usd=30,
+        RiskSnapshot(mode="live", equity_usd=HUNTER_EQUITY_USD,
                      open_positions=status["open_positions"],
-                     daily_realized_pnl_usd=ledger.daily_realized_cents("hunter-v1", now=at) / 100,
+                     daily_realized_pnl_usd=daily_pnl_usd,
                      liquidity_usd=liquidity,
                      quote_age_seconds=at - float(candidate["quoted_at"])),
     )

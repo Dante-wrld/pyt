@@ -317,6 +317,25 @@ def test_decide_hunter_entry_still_allows_a_buy_after_one_loss(tmp_path, monkeyp
     book.close()
 
 
+def test_decide_hunter_entry_skips_the_model_once_the_daily_loss_limit_is_breached(tmp_path, monkeypatch):
+    """The daily loss limit (10% of the $30 equity used for live trading,
+    i.e. -$3.00) is a hard deterministic gate that doesn't depend on
+    anything the model would say. Checking it before the model call - not
+    only inside the arbitration that follows it - saves a real OpenAI
+    request every cycle once the limit is breached, instead of paying for
+    a proposal that was always going to be blocked (observed live: the
+    same BUY_READY candidate kept proposing and getting blocked every
+    ~30s cycle after the daily loss cap was already exceeded)."""
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    book = LiveTrialLedger(tmp_path / "trial.sqlite")
+    book.start()
+    _seed_sell(book, mint="B" * 44, realized_cents=-350, at=time.time())
+    model = Model()
+    assert decide_hunter_entry(snapshot(), model=model, ledger=book) is None
+    assert model.calls == 0
+    book.close()
+
+
 def test_early_buy_entry_is_capped_at_half_the_normal_order_size(tmp_path, monkeypatch):
     """An early-buy entry has no proven move behind it yet, so it earns
     only half the normal $5 order size, even if the model requests more."""
