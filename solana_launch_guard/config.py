@@ -139,7 +139,7 @@ class Settings:
     pullback_zone_max_pct: float = 6.0
     pullback_started_pct: float = 2.0
     pullback_reclaim_pct: float = 2.0
-    entry_confirmation_polls: int = 3
+    entry_confirmation_polls: int = 2
     entry_min_signal_score: int = 65
     entry_min_liquidity_retention_pct: float = 80.0
     entry_require_nonfalling_volume: bool = True
@@ -376,7 +376,7 @@ class Settings:
             pullback_zone_max_pct=_float("PULLBACK_ZONE_MAX_PCT", 6.0),
             pullback_started_pct=_float("PULLBACK_STARTED_PCT", 2.0),
             pullback_reclaim_pct=_float("PULLBACK_RECLAIM_PCT", 2.0),
-            entry_confirmation_polls=_int("ENTRY_CONFIRMATION_POLLS", 3),
+            entry_confirmation_polls=_int("ENTRY_CONFIRMATION_POLLS", 2),
             entry_min_signal_score=_int("ENTRY_MIN_SIGNAL_SCORE", 65),
             entry_min_liquidity_retention_pct=_float(
                 "ENTRY_MIN_LIQUIDITY_RETENTION_PCT", 80.0
