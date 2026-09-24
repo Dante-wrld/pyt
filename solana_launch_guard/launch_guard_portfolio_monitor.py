@@ -270,6 +270,17 @@ class PortfolioMonitorMixin(LaunchGuardState):
                 else:
                     holdings = list(saved.values())
 
+                if wallet:
+                    reconciled = self.store.reconcile_stale_auto_buy_positions(
+                        chain="solana", held_mints=frozenset(balances_by_mint)
+                    )
+                    for row in reconciled:
+                        LOGGER.info(
+                            "AUTO-BUY RECONCILED %s mint=%s (wallet no longer holds "
+                            "this token; sold outside auto-buy's own tracked paths)",
+                            row["symbol"], row["token_address"],
+                        )
+
                 if self.settings.auto_rebuy_enabled:
                     await self._monitor_auto_rebuys(balances_by_mint, rpc)
                 await self._monitor_loss_sales(balances_by_mint)

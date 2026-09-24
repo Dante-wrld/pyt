@@ -1585,6 +1585,54 @@ def test_auto_buy_store_blocks_third_open_position(tmp_path: Path) -> None:
     store.close()
 
 
+def test_reconcile_stale_auto_buy_positions_closes_only_unheld_mints(
+    tmp_path: Path,
+) -> None:
+    """Confirmed live 2026-09-24: 36 of 38 "OPEN" auto_buy_positions rows
+    were already fully sold on-chain - some sold manually via a mobile
+    trading app, never routed through record_auto_buy_sale - permanently
+    pinning preview_auto_buy_budget's open-position cap at capacity on
+    phantom inventory. A wallet-balance sweep is the only thing that can
+    catch a sale this app never itself observed."""
+    store = SQLiteStore(str(tmp_path / "auto-buy-reconcile.db"))
+    for number in (1, 2):
+        mint = f"MintBuy{number}"
+        store.arm_auto_buy(mint, f"BUY{number}")
+        amount, source = store.preview_auto_buy_budget(
+            seed_size_usdc_raw=5_000_000, max_seed_buys=2, max_open_positions=5,
+        )
+        store.begin_auto_buy_execution(
+            event_key=f"buy-{number}", token_address=mint, symbol=f"BUY{number}",
+            funding_source=source, input_usdc_raw=amount, expected_output_raw=100,
+        )
+        store.complete_auto_buy_execution(
+            event_key=f"buy-{number}", signature=f"signature-{number}",
+            actual_output_raw=100, output_decimals=0,
+        )
+
+    # MintBuy1 was sold outside anything this app tracks (wallet no longer
+    # holds it); MintBuy2 is still genuinely held.
+    reconciled = store.reconcile_stale_auto_buy_positions(
+        chain="solana", held_mints=frozenset({"MintBuy2"}),
+    )
+
+    assert [row["token_address"] for row in reconciled] == ["MintBuy1"]
+    positions = {row["token_address"]: row for row in store.auto_buy_status()["positions"]}
+    assert positions["MintBuy1"]["status"] == "RECONCILED_EXTERNAL"
+    assert positions["MintBuy1"]["remaining_raw"] == 0
+    # No fabricated P&L - the real proceeds are unknown.
+    assert positions["MintBuy1"]["realized_profit_usdc_raw"] == 0
+    assert positions["MintBuy2"]["status"] == "OPEN"
+    assert positions["MintBuy2"]["remaining_raw"] == 100
+
+    # A second sweep with the same held set is a no-op, not a re-reconcile.
+    again = store.reconcile_stale_auto_buy_positions(
+        chain="solana", held_mints=frozenset({"MintBuy2"}),
+    )
+    assert again == []
+    store.close()
+
+
 def test_key_store_refuses_mismatched_wallet_before_write(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

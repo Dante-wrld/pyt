@@ -2206,6 +2206,48 @@ class SQLiteStore:
             "remaining_raw": remaining,
         }
 
+    def reconcile_stale_auto_buy_positions(
+        self, *, chain: str, held_mints: frozenset[str]
+    ) -> list[dict[str, Any]]:
+        """Close out any OPEN auto_buy_positions row for a mint the wallet
+        no longer holds at all.
+
+        record_auto_buy_sale only updates this bookkeeping when a sale
+        executes through a path this app itself tracks (auto-buy's own
+        seller, or the live trial's execute_live_exit bridging into it) -
+        a sale executed anywhere else (a manual sell in a mobile trading
+        app, an external transfer) leaves the row believing the full
+        original amount is still held indefinitely. Since it never sees
+        that sale, its remaining_raw/status never update, and its open
+        count - checked by preview_auto_buy_budget's max_open_positions
+        gate - keeps counting phantom inventory forever. Confirmed live
+        2026-09-24: 36 of 38 "OPEN" rows were already fully sold on-chain,
+        some going back two days, permanently pinning auto-buy at capacity.
+
+        The real sale happened entirely outside anything this app
+        tracked, so its actual proceeds/profit are unknown - this marks
+        the row reconciled without fabricating a P&L, the same way the
+        live trial's own ledger reconciles a position it finds sold out
+        from under it ("treating as a sell outside the trial") rather
+        than inventing a number.
+        """
+        rows = self.connection.execute(
+            "SELECT id, token_address, symbol FROM auto_buy_positions "
+            "WHERE chain = ? AND status = 'OPEN'",
+            (chain,),
+        ).fetchall()
+        stale = [row for row in rows if row["token_address"] not in held_mints]
+        if not stale:
+            return []
+        now = utc_now()
+        with self.connection:
+            self.connection.executemany(
+                "UPDATE auto_buy_positions SET status = 'RECONCILED_EXTERNAL', "
+                "remaining_raw = 0, updated_at = ? WHERE id = ?",
+                [(now, row["id"]) for row in stale],
+            )
+        return [dict(row) for row in stale]
+
     def start_auto_rebuy_watch(
         self,
         *,
