@@ -23,6 +23,9 @@ to two $5 USDC seed purchases and two active bot-managed positions.
 Direct on-chain swaps use Jupiter; Launch Guard does not log in to or control
 Fomo's app or website.
 
+Before changing strategy settings, measure them: see
+`docs/evaluation.md` (`launch-guard-eval track` / `report`).
+
 ## What it does
 
 - Receives real-time new-token events from PumpPortal.
