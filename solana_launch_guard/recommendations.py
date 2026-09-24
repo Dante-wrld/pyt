@@ -44,6 +44,7 @@ class RecommendationCandidate:
     buy_sell_ratio: float
     observed_at: float
     updated_at: float
+    pair_address: str | None = None
     decision: str = "WATCH"
     decision_reason: str = "waiting for confirmation"
     entry_zone_low: float | None = None
@@ -332,6 +333,7 @@ class RecommendationBook:
             buy_sell_ratio=quote.buy_sell_ratio,
             observed_at=timestamp,
             updated_at=timestamp,
+            pair_address=quote.pair_address or None,
             peak_price=price,
             entry_confirmation_required=self.entry_confirmation_polls,
             planned_stop_pct=stop_pct,
@@ -355,6 +357,7 @@ class RecommendationBook:
         candidate.symbol = quote.symbol
         candidate.current_price = price
         candidate.peak_price = max(candidate.peak_price, price)
+        candidate.pair_address = quote.pair_address or None
         candidate.liquidity_usd = quote.liquidity_usd
         candidate.volume_m5_usd = quote.volume_m5_usd
         candidate.buys_m5 = quote.buys_m5

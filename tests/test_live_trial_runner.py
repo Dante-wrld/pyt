@@ -56,11 +56,11 @@ def test_recovery_model_and_arbiter_gate_before_reservation(tmp_path, monkeypatc
     book = LiveTrialLedger(tmp_path / "trial.sqlite")
     book.start()
     model = Model(requested=5)
-    assert decide_hunter_entry(snapshot(confirmations=0), model=model, ledger=book) is None
-    assert decide_hunter_entry(snapshot(momentum="FALLING"), model=model, ledger=book) is None
-    assert decide_hunter_entry(snapshot(liquidity=4000), model=model, ledger=book) is None
+    assert asyncio.run(decide_hunter_entry(snapshot(confirmations=0), model=model, ledger=book)) is None
+    assert asyncio.run(decide_hunter_entry(snapshot(momentum="FALLING"), model=model, ledger=book)) is None
+    assert asyncio.run(decide_hunter_entry(snapshot(liquidity=4000), model=model, ledger=book)) is None
     assert model.calls == 0
-    decision = decide_hunter_entry(snapshot(), model=model, ledger=book)
+    decision = asyncio.run(decide_hunter_entry(snapshot(), model=model, ledger=book))
     assert decision.approved_cents == 500
     assert model.calls == 1
     book.reserve_buy(intent="buy", agent="hunter-v1", mint=MINT,
@@ -69,7 +69,7 @@ def test_recovery_model_and_arbiter_gate_before_reservation(tmp_path, monkeypatc
     assert can_submit(book, mint=MINT, snapshot=snapshot())
     assert not can_submit(book, mint=MINT, snapshot=snapshot(confirmations=0))
     with pytest.raises(TrialHalted, match="unresolved"):
-        decide_hunter_entry(snapshot(), model=model, ledger=book)
+        asyncio.run(decide_hunter_entry(snapshot(), model=model, ledger=book))
     book.close()
 
 
@@ -98,10 +98,10 @@ def test_post_model_recheck_uses_a_fresh_read_not_the_aging_original(tmp_path, m
     book = LiveTrialLedger(tmp_path / "trial.sqlite")
     book.start()
     model = Model()
-    decision = decide_hunter_entry(
+    decision = asyncio.run(decide_hunter_entry(
         stale_snapshot, model=model, ledger=book, now=base,
         current_snapshot=lambda: fresh_snapshot,
-    )
+    ))
     assert decision is not None
     assert decision.approved_cents == 500
     book.close()
@@ -125,10 +125,10 @@ def test_post_model_recheck_still_blocks_when_the_fresh_read_no_longer_qualifies
     book = LiveTrialLedger(tmp_path / "trial.sqlite")
     book.start()
     model = Model()
-    decision = decide_hunter_entry(
+    decision = asyncio.run(decide_hunter_entry(
         stale_snapshot, model=model, ledger=book, now=base,
         current_snapshot=lambda: fresh_snapshot,
-    )
+    ))
     assert decision is None
     skipped = [d for d in book.status()["recent_decisions"] if d["state"] == "BLOCKED"]
     assert skipped and "stale" in skipped[0]["reason"]
@@ -155,17 +155,17 @@ def test_chase_abandons_once_price_reaches_the_frozen_original_target(tmp_path, 
     chase_first_target: dict[str, float] = {}
 
     below_target = snapshot(price=0.005, planned_target_price=0.007)
-    decision = decide_hunter_entry(
+    decision = asyncio.run(decide_hunter_entry(
         below_target, model=model, ledger=book, chase_first_target=chase_first_target,
-    )
+    ))
     assert decision is not None
     assert chase_first_target[MINT] == 0.007
     assert model.calls == 1
 
     past_target = snapshot(price=0.008, planned_target_price=0.009)
-    decision2 = decide_hunter_entry(
+    decision2 = asyncio.run(decide_hunter_entry(
         past_target, model=model, ledger=book, chase_first_target=chase_first_target,
-    )
+    ))
     assert decision2 is None
     # The model must not even be called once price has already passed the
     # frozen target - there's no proposal worth asking for.
@@ -188,15 +188,15 @@ def test_chase_keeps_retrying_against_the_frozen_target_even_if_it_reanchors_hig
     chase_first_target: dict[str, float] = {}
 
     first = snapshot(price=0.005, planned_target_price=0.007)
-    decide_hunter_entry(first, model=model, ledger=book, chase_first_target=chase_first_target)
+    asyncio.run(decide_hunter_entry(first, model=model, ledger=book, chase_first_target=chase_first_target))
     assert chase_first_target[MINT] == 0.007
 
     # Price and the live target both rose, but price (0.0065) is still
     # below the *frozen* original target (0.007) - must keep retrying.
     still_climbing = snapshot(price=0.0065, planned_target_price=0.012)
-    decision = decide_hunter_entry(
+    decision = asyncio.run(decide_hunter_entry(
         still_climbing, model=model, ledger=book, chase_first_target=chase_first_target,
-    )
+    ))
     assert decision is not None
     assert chase_first_target[MINT] == 0.007  # unchanged, still frozen
     book.close()
@@ -214,7 +214,7 @@ def test_liquidity_floor_follows_policy_not_a_hardcoded_fifty_thousand(tmp_path,
     book = LiveTrialLedger(tmp_path / "trial.sqlite")
     book.start()
     model = Model(requested=5)
-    decision = decide_hunter_entry(snapshot(liquidity=32_900), model=model, ledger=book)
+    decision = asyncio.run(decide_hunter_entry(snapshot(liquidity=32_900), model=model, ledger=book))
     assert model.calls == 1
     assert decision is not None
     assert decision.approved_cents == 500
@@ -231,7 +231,7 @@ def test_buy_zone_candidate_that_fails_the_stricter_entry_policy_is_logged(tmp_p
     monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
     book = LiveTrialLedger(tmp_path / "trial.sqlite")
     book.start()
-    assert decide_hunter_entry(snapshot(confirmations=0), model=Model(), ledger=book) is None
+    assert asyncio.run(decide_hunter_entry(snapshot(confirmations=0), model=Model(), ledger=book)) is None
     skipped = [d for d in book.status()["recent_decisions"] if d["state"] == "BUY_ZONE_SKIPPED"]
     assert len(skipped) == 1
     assert skipped[0]["mint"] == MINT
@@ -243,13 +243,13 @@ def test_model_cannot_increase_capital_or_buy_other_mint(tmp_path, monkeypatch):
     monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
     book = LiveTrialLedger(tmp_path / "trial.sqlite")
     book.start()
-    assert decide_hunter_entry(snapshot(), model=Model(requested=8), ledger=book).approved_cents == 500
+    assert asyncio.run(decide_hunter_entry(snapshot(), model=Model(requested=8), ledger=book)).approved_cents == 500
     class Other(Model):
         def propose(self, **kwargs):
             raw = super().propose(**kwargs)
             raw["mint"] = "B" * 44
             return raw
-    assert decide_hunter_entry(snapshot(), model=Other(), ledger=book) is None
+    assert asyncio.run(decide_hunter_entry(snapshot(), model=Other(), ledger=book)) is None
     book.close()
 
 
@@ -296,7 +296,7 @@ def test_decide_hunter_entry_blocks_a_mint_after_two_consecutive_losses(tmp_path
     _seed_sell(book, realized_cents=-40, at=1)
     _seed_sell(book, realized_cents=-60, at=2)
     model = Model()
-    assert decide_hunter_entry(snapshot(), model=model, ledger=book) is None
+    assert asyncio.run(decide_hunter_entry(snapshot(), model=model, ledger=book)) is None
     assert model.calls == 0
     book.close()
 
@@ -314,7 +314,7 @@ def test_decide_hunter_entry_still_allows_a_buy_after_one_loss(tmp_path, monkeyp
         def propose(self, *, role, context):
             captured.update(context)
             return super().propose(role=role, context=context)
-    decision = decide_hunter_entry(snapshot(), model=Capturing(), ledger=book)
+    decision = asyncio.run(decide_hunter_entry(snapshot(), model=Capturing(), ledger=book))
     assert decision is not None
     assert captured["mint_trade_history"] == {
         "round_trips": 1, "total_realized_usd": -0.4, "consecutive_losses": 1,
@@ -336,7 +336,7 @@ def test_decide_hunter_entry_skips_the_model_once_the_daily_loss_limit_is_breach
     book.start()
     _seed_sell(book, mint="B" * 44, realized_cents=-350, at=time.time())
     model = Model()
-    assert decide_hunter_entry(snapshot(), model=model, ledger=book) is None
+    assert asyncio.run(decide_hunter_entry(snapshot(), model=model, ledger=book)) is None
     assert model.calls == 0
     book.close()
 
@@ -353,7 +353,7 @@ def test_momentum_buy_pause_blocks_it_before_the_model_when_engaged(tmp_path, mo
     book = LiveTrialLedger(tmp_path / "trial.sqlite")
     book.start()
     model = Model()
-    assert decide_hunter_entry(snapshot(decision="MOMENTUM BUY"), model=model, ledger=book) is None
+    assert asyncio.run(decide_hunter_entry(snapshot(decision="MOMENTUM BUY"), model=model, ledger=book)) is None
     assert model.calls == 0
     assert book.status()["recent_decisions"][0]["state"] == "BUY_ZONE_SKIPPED"
     assert "paused" in book.status()["recent_decisions"][0]["reason"].lower()
@@ -366,7 +366,7 @@ def test_pullback_entries_still_run_while_momentum_buy_is_paused(tmp_path, monke
     book = LiveTrialLedger(tmp_path / "trial.sqlite")
     book.start()
     model = Model()
-    decision = decide_hunter_entry(snapshot(decision="BUY NOW"), model=model, ledger=book)
+    decision = asyncio.run(decide_hunter_entry(snapshot(decision="BUY NOW"), model=model, ledger=book))
     assert decision is not None
     assert model.calls == 1
     book.close()
@@ -387,7 +387,7 @@ def test_momentum_buy_would_otherwise_qualify_confirming_the_pause_is_what_block
     # buys_m5/sells_m5 (20/10) clears every other decision's bar but not
     # this one, so bump it to isolate the pause as what's actually tested.
     momentum_snapshot["candidates"][0].update(buys_m5=40, sells_m5=20)
-    decision = decide_hunter_entry(momentum_snapshot, model=model, ledger=book)
+    decision = asyncio.run(decide_hunter_entry(momentum_snapshot, model=model, ledger=book))
     assert decision is not None
     assert model.calls == 1
     # $2 fixed size for this decision type (see order_cap_usd), not the
@@ -409,11 +409,75 @@ def test_momentum_buy_is_skipped_rather_than_taken_undersized(tmp_path, monkeypa
     model = Model(requested=1)
     momentum_snapshot = snapshot(decision="MOMENTUM BUY")
     momentum_snapshot["candidates"][0].update(buys_m5=40, sells_m5=20)
-    decision = decide_hunter_entry(momentum_snapshot, model=model, ledger=book)
+    decision = asyncio.run(decide_hunter_entry(momentum_snapshot, model=model, ledger=book))
     assert decision is None
     assert model.calls == 1
     assert book.status()["recent_decisions"][0]["state"] == "BLOCKED"
     assert "exactly $2.00" in book.status()["recent_decisions"][0]["reason"]
+    book.close()
+
+
+class _FakeCandleScanner:
+    def __init__(self, *, confirmed: bool):
+        self.confirmed = confirmed
+        self.calls: list[tuple[str, str]] = []
+
+    async def entry_candle_confirmation(self, *, pool: str, mint: str) -> dict | None:
+        self.calls.append((pool, mint))
+        return {"status": "RESEARCH_ONLY"} if self.confirmed else None
+
+
+def test_momentum_buy_blocked_when_candle_scanner_finds_no_confirmation(tmp_path, monkeypatch):
+    """A candle-shape gate sits between MOMENTUM BUY's evidence checks and
+    the model call - a missing/unconfirmed candle should decline the trade
+    without ever spending an LLM request on it."""
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    monkeypatch.setattr("solana_launch_guard.live_trial_runner.MOMENTUM_BUY_PAUSED", False)
+    book = LiveTrialLedger(tmp_path / "trial.sqlite")
+    book.start()
+    model = Model()
+    momentum_snapshot = snapshot(decision="MOMENTUM BUY")
+    momentum_snapshot["candidates"][0].update(buys_m5=40, sells_m5=20, pair_address="POOL123")
+    scanner = _FakeCandleScanner(confirmed=False)
+    decision = asyncio.run(decide_hunter_entry(momentum_snapshot, model=model, ledger=book,
+                                               candle_scanner=scanner))
+    assert decision is None
+    assert model.calls == 0
+    assert scanner.calls == [("POOL123", MINT)]
+    latest = book.status()["recent_decisions"][0]
+    assert latest["state"] == "BLOCKED"
+    assert "bullish candle" in latest["reason"]
+    book.close()
+
+
+def test_momentum_buy_proceeds_when_candle_scanner_confirms(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    monkeypatch.setattr("solana_launch_guard.live_trial_runner.MOMENTUM_BUY_PAUSED", False)
+    book = LiveTrialLedger(tmp_path / "trial.sqlite")
+    book.start()
+    model = Model()
+    momentum_snapshot = snapshot(decision="MOMENTUM BUY")
+    momentum_snapshot["candidates"][0].update(buys_m5=40, sells_m5=20, pair_address="POOL123")
+    scanner = _FakeCandleScanner(confirmed=True)
+    decision = asyncio.run(decide_hunter_entry(momentum_snapshot, model=model, ledger=book,
+                                               candle_scanner=scanner))
+    assert decision is not None
+    assert decision.approved_cents == 200
+    assert scanner.calls == [("POOL123", MINT)]
+    book.close()
+
+
+def test_candle_scanner_is_not_consulted_for_non_momentum_decisions(tmp_path, monkeypatch):
+    """The candle-shape gate is MOMENTUM BUY-specific; other decision types
+    must not pay for a GeckoTerminal round trip they never asked for."""
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    book = LiveTrialLedger(tmp_path / "trial.sqlite")
+    book.start()
+    scanner = _FakeCandleScanner(confirmed=False)
+    decision = asyncio.run(decide_hunter_entry(snapshot(decision="BUY NOW"), model=Model(), ledger=book,
+                                               candle_scanner=scanner))
+    assert decision is not None
+    assert scanner.calls == []
     book.close()
 
 
@@ -423,7 +487,7 @@ def test_early_buy_entry_is_capped_at_half_the_normal_order_size(tmp_path, monke
     monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
     book = LiveTrialLedger(tmp_path / "trial.sqlite")
     book.start()
-    decision = decide_hunter_entry(snapshot(decision="EARLY BUY"), model=Model(requested=5), ledger=book)
+    decision = asyncio.run(decide_hunter_entry(snapshot(decision="EARLY BUY"), model=Model(requested=5), ledger=book))
     assert decision is not None
     assert decision.approved_cents == 250
     book.close()
@@ -482,7 +546,7 @@ def test_a_second_buy_of_the_same_mint_after_a_full_round_trip_does_not_collide(
         def arm_auto_sell(self, mint, **kwargs):
             pass
 
-    decision = decide_hunter_entry(snapshot(), model=Model(), ledger=book)
+    decision = asyncio.run(decide_hunter_entry(snapshot(), model=Model(), ledger=book))
     receipt = asyncio.run(execute_hunter_entry(decision, ledger=book, rpc=Rpc(),
                           buyer=Buyer(), store=Store(), wallet=wallet,
                           current_snapshot=snapshot))
@@ -493,7 +557,7 @@ def test_a_second_buy_of_the_same_mint_after_a_full_round_trip_does_not_collide(
     book.db.execute("DELETE FROM positions WHERE mint=?", (MINT,))
     book.db.commit()
 
-    second = decide_hunter_entry(snapshot(), model=Model(), ledger=book)
+    second = asyncio.run(decide_hunter_entry(snapshot(), model=Model(), ledger=book))
     second_receipt = asyncio.run(execute_hunter_entry(second, ledger=book, rpc=Rpc(),
                           buyer=Buyer(), store=Store(), wallet=wallet,
                           current_snapshot=snapshot))
@@ -557,7 +621,7 @@ def test_a_regrowth_entry_uses_its_own_eligibility_check_and_is_tagged_by_origin
         def arm_auto_sell(self, mint, **kwargs):
             pass
 
-    decision = decide_hunter_entry(snapshot(), model=Model(), ledger=book)
+    decision = asyncio.run(decide_hunter_entry(snapshot(), model=Model(), ledger=book))
     eligibility_calls = []
 
     async def _eligible() -> bool:
@@ -606,7 +670,7 @@ def test_a_regrowth_entry_is_blocked_routinely_when_its_eligibility_check_fails(
         async def execute(self, prepared):
             pytest.fail("a failed eligibility re-check must not broadcast")
 
-    decision = decide_hunter_entry(snapshot(), model=Model(), ledger=book)
+    decision = asyncio.run(decide_hunter_entry(snapshot(), model=Model(), ledger=book))
 
     async def _never_eligible() -> bool:
         return False
@@ -624,7 +688,7 @@ def test_execution_reserves_before_broadcast_and_requires_chain_deltas(tmp_path,
     monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
     book = LiveTrialLedger(tmp_path / "trial.sqlite")
     book.start()
-    decision = decide_hunter_entry(snapshot(), model=Model(), ledger=book)
+    decision = asyncio.run(decide_hunter_entry(snapshot(), model=Model(), ledger=book))
     sequence = []
     wallet = "synthetic-owner"
 
@@ -802,7 +866,7 @@ def test_stale_signal_after_reservation_releases_the_order_instead_of_halting(tm
     monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
     book = LiveTrialLedger(tmp_path / "trial.sqlite")
     book.start()
-    decision = decide_hunter_entry(snapshot(), model=Model(), ledger=book)
+    decision = asyncio.run(decide_hunter_entry(snapshot(), model=Model(), ledger=book))
     wallet = "synthetic-owner"
 
     class Rpc:
@@ -839,7 +903,7 @@ def test_already_held_after_reservation_releases_the_order_instead_of_halting(tm
     monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
     book = LiveTrialLedger(tmp_path / "trial.sqlite")
     book.start()
-    decision = decide_hunter_entry(snapshot(), model=Model(), ledger=book)
+    decision = asyncio.run(decide_hunter_entry(snapshot(), model=Model(), ledger=book))
     wallet = "synthetic-owner"
 
     class Rpc:
@@ -871,7 +935,7 @@ def test_insufficient_usdc_after_reservation_still_halts_the_trial(tmp_path, mon
     monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
     book = LiveTrialLedger(tmp_path / "trial.sqlite")
     book.start()
-    decision = decide_hunter_entry(snapshot(), model=Model(), ledger=book)
+    decision = asyncio.run(decide_hunter_entry(snapshot(), model=Model(), ledger=book))
     wallet = "synthetic-owner"
 
     class Rpc:
@@ -936,7 +1000,7 @@ def test_a_restart_at_the_same_ledger_path_can_still_buy_a_mint_the_last_session
 
     first = LiveTrialLedger(path)
     first.start()
-    decision = decide_hunter_entry(snapshot(), model=Model(), ledger=first)
+    decision = asyncio.run(decide_hunter_entry(snapshot(), model=Model(), ledger=first))
     snapshot_calls = []
     def flaky_snapshot():
         snapshot_calls.append(1)
@@ -951,7 +1015,7 @@ def test_a_restart_at_the_same_ledger_path_can_still_buy_a_mint_the_last_session
 
     second = LiveTrialLedger(path)
     second.start()
-    decision2 = decide_hunter_entry(snapshot(), model=Model(), ledger=second)
+    decision2 = asyncio.run(decide_hunter_entry(snapshot(), model=Model(), ledger=second))
 
     class BroadcastRpc(Rpc):
         async def get_transaction(self, signature):

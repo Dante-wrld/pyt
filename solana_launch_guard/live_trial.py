@@ -27,6 +27,7 @@ from .live_trial_runner import (
     execute_hunter_entry, execute_live_exit,
 )
 from .market import DexScreenerOracle
+from .market_structure import MarketStructureScanner
 from .wallet import SolanaRpc, TransactionSimulationFailed
 
 MAX_MODEL_REQUESTS = 200
@@ -382,6 +383,7 @@ async def _track_exit_block_streak(
 async def cycle(*, ledger: LiveTrialLedger, settings: Settings, rpc: SolanaRpc,
                 model, store: SQLiteStore,
                 oracle: DexScreenerOracle,
+                candle_scanner: MarketStructureScanner,
                 exit_block_streaks: dict[str, int],
                 buy_zone_skip_reasons: dict[str, str],
                 chase_first_target: dict[str, float],
@@ -640,10 +642,11 @@ async def cycle(*, ledger: LiveTrialLedger, settings: Settings, rpc: SolanaRpc,
         ledger.log(agent="hunter-v1", mint="", state="BUY_BLOCKED", reason=reason)
         return
     recommendations = _read_recommendations()
-    decision = decide_hunter_entry(recommendations, model=model, ledger=ledger,
-                                   buy_zone_skip_reasons=buy_zone_skip_reasons,
-                                   chase_first_target=chase_first_target,
-                                   current_snapshot=_read_recommendations)
+    decision = await decide_hunter_entry(recommendations, model=model, ledger=ledger,
+                                         buy_zone_skip_reasons=buy_zone_skip_reasons,
+                                         chase_first_target=chase_first_target,
+                                         current_snapshot=_read_recommendations,
+                                         candle_scanner=candle_scanner)
     if decision is not None:
         active_buyer = (momentum_buyer if decision.candidate.get("decision") == "MOMENTUM BUY"
                        else buyer)
@@ -716,6 +719,7 @@ async def supervise(*, interval_seconds: int = 30) -> dict:
                                     "--mode", "launches", "--portfolio-window"], env=monitor_env)
         rpc = SolanaRpc(settings.solana_rpc_http_url)
         oracle = DexScreenerOracle()
+        candle_scanner = MarketStructureScanner()
         consecutive_cycle_failures = 0
         exit_block_streaks: dict[str, int] = {}
         buy_zone_skip_reasons: dict[str, str] = {}
@@ -729,6 +733,7 @@ async def supervise(*, interval_seconds: int = 30) -> dict:
             try:
                 await cycle(ledger=ledger, settings=settings, rpc=rpc,
                             model=model, store=store, oracle=oracle,
+                            candle_scanner=candle_scanner,
                             exit_block_streaks=exit_block_streaks,
                             buy_zone_skip_reasons=buy_zone_skip_reasons,
                             chase_first_target=chase_first_target,

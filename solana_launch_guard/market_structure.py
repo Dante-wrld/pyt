@@ -145,22 +145,30 @@ class MarketStructureScanner:
 
     async def scan_exit(self, *, pool: str, mint: str) -> dict | None:
         """Closed one-minute candles; research evidence, never an execution order."""
+        candles = await self._closed_minute_candles(pool=pool, mint=mint)
+        return assess_dynamic_exit(candles or [], now=time.time())
+
+    async def entry_candle_confirmation(self, *, pool: str, mint: str) -> dict | None:
+        """Closed one-minute candles; research evidence for an entry, never an order."""
+        candles = await self._closed_minute_candles(pool=pool, mint=mint)
+        return assess_bullish_continuation_candle(candles or [], now=time.time())
+
+    async def _closed_minute_candles(self, *, pool: str, mint: str) -> list[Candle] | None:
         key = (pool, mint, "minute:1")
         now = time.monotonic()
         cached = self._cache.get(key)
         if cached and now - cached[0] < 60:
-            candles = cached[1]
-        else:
-            self._request_times = [t for t in self._request_times if now - t < 60]
-            if not pool or not mint or len(self._request_times) >= 8:
-                return None
-            self._request_times.append(now)
-            try:
-                candles = await asyncio.to_thread(self._fetch, pool, mint, ("minute", 1, 60))
-            except (OSError, ValueError, KeyError, TypeError, TimeoutError):
-                candles = None
-            self._cache[key] = (now, candles)
-        return assess_dynamic_exit(candles or [], now=time.time())
+            return cached[1]
+        self._request_times = [t for t in self._request_times if now - t < 60]
+        if not pool or not mint or len(self._request_times) >= 8:
+            return None
+        self._request_times.append(now)
+        try:
+            candles = await asyncio.to_thread(self._fetch, pool, mint, ("minute", 1, 60))
+        except (OSError, ValueError, KeyError, TypeError, TimeoutError):
+            candles = None
+        self._cache[key] = (now, candles)
+        return candles
 
     def _fetch(self, pool: str, mint: str, frame: tuple[str, int, int]) -> list[Candle] | None:
         timeframe, aggregate, period = frame
@@ -213,6 +221,41 @@ class MarketStructureScanner:
                 return None
             readings.append(candles)
         return assess_structure(readings[0], readings[1], pair=pair, now=time.time())
+
+
+def assess_bullish_continuation_candle(
+    candles: list[Candle], *, now: float, period: int = 60,
+    min_body_ratio: float = 0.5,
+) -> dict | None:
+    """Latest closed 1m candle: a long bullish body whose lower wick is no
+    bigger than its upper wick - a live-chart pattern a user flagged (CUMINU,
+    2026-09-24) as evidence a momentum move still has room to continue,
+    versus a candle already being rejected from above."""
+    if not candles or period <= 0 or not math.isfinite(now):
+        return None
+    latest = candles[-1]
+    if not 0 <= now - (latest.start + period) <= 2 * period:
+        return None
+    if (not all(math.isfinite(v) for v in
+                (latest.open, latest.high, latest.low, latest.close, latest.volume))
+        or latest.low <= 0 or latest.volume < 0
+        or latest.low > min(latest.open, latest.close)
+        or latest.high < max(latest.open, latest.close)):
+        return None
+    candle_range = latest.high - latest.low
+    body = latest.close - latest.open
+    if candle_range <= 0 or body <= 0 or body / candle_range < min_body_ratio:
+        return None
+    upper_wick = latest.high - latest.close
+    lower_wick = latest.open - latest.low
+    if lower_wick > upper_wick:
+        return None
+    return {
+        "status": "RESEARCH_ONLY", "pattern": "bullish_continuation",
+        "as_of": latest.start + period, "body_ratio": body / candle_range,
+        "upper_wick": upper_wick, "lower_wick": lower_wick,
+        "note": "Unvalidated evidence; one candlestick shape, not a standalone trade signal.",
+    }
 
 
 def assess_dynamic_exit(

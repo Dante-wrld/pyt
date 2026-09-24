@@ -1,7 +1,7 @@
 import pytest
 
 from solana_launch_guard.market_structure import (
-    Candle, PAIRS, assess_structure, parse_closed_candles,
+    Candle, PAIRS, assess_bullish_continuation_candle, assess_structure, parse_closed_candles,
 )
 
 
@@ -54,3 +54,45 @@ def test_parser_discards_open_bar_and_rejects_corrupted_candle():
 
 def test_required_timeframe_pairs_are_explicit():
     assert {key for key in PAIRS} == {"D/H1", "H4/M15", "H1/M5", "M15/M1"}
+
+
+def test_bullish_continuation_confirms_a_long_body_with_a_small_lower_wick():
+    # open 10 -> close 11.8 (body 1.8 of a 2.1 range); upper wick 0.2,
+    # lower wick 0.1 - the CUMINU-chart shape: mostly body, and what little
+    # wick there is sits above the close, not below it.
+    candle = Candle(0, 10, 12, 9.9, 11.8, 500)
+    evidence = assess_bullish_continuation_candle([candle], now=90)
+    assert evidence is not None
+    assert evidence["pattern"] == "bullish_continuation"
+    assert evidence["upper_wick"] == pytest.approx(0.2)
+    assert evidence["lower_wick"] == pytest.approx(0.1)
+
+
+def test_bullish_continuation_rejects_a_lower_wick_bigger_than_the_upper_wick():
+    candle = Candle(0, 10, 12, 9.5, 11.8, 500)
+    assert assess_bullish_continuation_candle([candle], now=90) is None
+
+
+def test_bullish_continuation_rejects_a_short_body_relative_to_the_range():
+    candle = Candle(0, 10, 12, 9, 10.2, 500)
+    assert assess_bullish_continuation_candle([candle], now=90) is None
+
+
+def test_bullish_continuation_rejects_a_bearish_or_flat_candle():
+    candle = Candle(0, 11.8, 12, 9.9, 10, 500)
+    assert assess_bullish_continuation_candle([candle], now=90) is None
+
+
+def test_bullish_continuation_rejects_a_stale_candle():
+    candle = Candle(0, 10, 12, 9.9, 11.8, 500)
+    assert assess_bullish_continuation_candle([candle], now=1000) is None
+
+
+def test_bullish_continuation_rejects_corrupted_candle_values():
+    # high below the close it's supposed to bound.
+    candle = Candle(0, 10, 11, 9.9, 11.8, 500)
+    assert assess_bullish_continuation_candle([candle], now=90) is None
+
+
+def test_bullish_continuation_rejects_no_candles():
+    assert assess_bullish_continuation_candle([], now=90) is None

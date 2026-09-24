@@ -19,6 +19,7 @@ from .agents import (
 from .hunter_shadow_strategy import ShadowRecoveryPolicy, assess_entry
 from .live_trial_ledger import LiveTrialLedger, TrialHalted
 from .execution import BuyIntent, USDC_MINT, PortfolioSignalExitPlanner
+from .market_structure import MarketStructureScanner
 from dataclasses import replace
 
 
@@ -199,12 +200,13 @@ def _live_arbiter(max_quote_age_seconds: int = 15, min_liquidity_usd: float = 50
     ))
 
 
-def decide_hunter_entry(
+async def decide_hunter_entry(
     snapshot: dict, *, model, ledger: LiveTrialLedger,
     now: float | None = None,
     buy_zone_skip_reasons: dict[str, str] | None = None,
     chase_first_target: dict[str, float] | None = None,
     current_snapshot: Callable[[], dict] | None = None,
+    candle_scanner: MarketStructureScanner | None = None,
 ) -> LiveEntryDecision | None:
     """Require a BUY_READY recovery, model proposal, then live arbitration."""
     at = time.time() if now is None else now
@@ -325,6 +327,21 @@ def decide_hunter_entry(
                           f"target {float(frozen_target):.12g} before a fill; abandoning the "
                           "chase rather than buying at what would have been our own exit level")
         return None
+    # MOMENTUM BUY's own price/volume checks confirm a move already
+    # happened; this adds a candle-shape check that the move still has room
+    # (long bullish body, lower wick no bigger than upper wick on the latest
+    # closed 1m bar) before spending the model call. Only enforced when a
+    # scanner is actually wired in (live_trial.py's real run); tests that
+    # pass candle_scanner=None get the pre-existing behavior unchanged.
+    if decision_kind == "MOMENTUM BUY" and candle_scanner is not None:
+        pool = str(candidate.get("pair_address") or "")
+        confirmation = await candle_scanner.entry_candle_confirmation(pool=pool, mint=mint)
+        if confirmation is None:
+            ledger.log(agent="hunter-v1", mint=mint, state="BLOCKED",
+                       reason="MOMENTUM BUY requires a confirming bullish candle (long body, "
+                              "lower wick no bigger than upper wick) on the latest closed "
+                              "1-minute bar; none available or shape not confirmed")
+            return None
     liquidity = float(candidate["liquidity_usd"])
     review = assess_entry(candidate, policy)
     coordinator = AgentCoordinator(model, live_arbiter)
