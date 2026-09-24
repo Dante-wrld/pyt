@@ -646,7 +646,8 @@ async def cycle(*, ledger: LiveTrialLedger, settings: Settings, rpc: SolanaRpc,
                                          buy_zone_skip_reasons=buy_zone_skip_reasons,
                                          chase_first_target=chase_first_target,
                                          current_snapshot=_read_recommendations,
-                                         candle_scanner=candle_scanner)
+                                         candle_scanner=candle_scanner,
+                                         rpc=rpc, wallet=wallet)
     if decision is not None:
         active_buyer = (momentum_buyer if decision.candidate.get("decision") == "MOMENTUM BUY"
                        else buyer)

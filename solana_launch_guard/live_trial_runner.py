@@ -20,6 +20,7 @@ from .hunter_shadow_strategy import ShadowRecoveryPolicy, assess_entry
 from .live_trial_ledger import LiveTrialLedger, TrialHalted
 from .execution import BuyIntent, USDC_MINT, PortfolioSignalExitPlanner
 from .market_structure import MarketStructureScanner
+from .wallet import SolanaRpc
 from dataclasses import replace
 
 
@@ -207,6 +208,8 @@ async def decide_hunter_entry(
     chase_first_target: dict[str, float] | None = None,
     current_snapshot: Callable[[], dict] | None = None,
     candle_scanner: MarketStructureScanner | None = None,
+    rpc: SolanaRpc | None = None,
+    wallet: str | None = None,
 ) -> LiveEntryDecision | None:
     """Require a BUY_READY recovery, model proposal, then live arbitration."""
     at = time.time() if now is None else now
@@ -327,6 +330,22 @@ async def decide_hunter_entry(
                           f"target {float(frozen_target):.12g} before a fill; abandoning the "
                           "chase rather than buying at what would have been our own exit level")
         return None
+    # execute_hunter_entry has its own on-chain check for this (already
+    # holding the mint blocks the buy outright, to avoid mixing cost
+    # bases) - checking it here too, before the model call, isn't
+    # duplicating that guard, it's just moving the SAME guard earlier so a
+    # mint that's guaranteed to fail it doesn't keep spending a real model
+    # request every cycle it re-confirms. Observed live: a pre-existing
+    # position (from a prior session, still held on-chain) re-confirmed as
+    # MOMENTUM BUY-ready 4 separate times, each spending a model call that
+    # was always going to be rejected downstream the exact same way.
+    if rpc is not None and wallet is not None:
+        existing = await rpc.token_balance(wallet, mint)
+        if existing.raw_amount > 0:
+            ledger.log(agent="hunter-v1", mint=mint, state="BLOCKED",
+                       reason="wallet already holds this mint; cost-basis mixing blocked "
+                              "(checked before the model call)")
+            return None
     # MOMENTUM BUY's own price/volume checks confirm a move already
     # happened; this adds a candle-shape check that the move still has room
     # (long bullish body, lower wick no bigger than upper wick on the latest

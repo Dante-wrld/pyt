@@ -481,6 +481,63 @@ def test_candle_scanner_is_not_consulted_for_non_momentum_decisions(tmp_path, mo
     book.close()
 
 
+def test_already_held_mint_is_blocked_before_the_model_call(tmp_path, monkeypatch):
+    """execute_hunter_entry already refuses a mint the wallet holds (cost-
+    basis mixing) - checking it here too, before the model call, isn't a
+    new rule, just the same guard moved earlier so a mint that's
+    guaranteed to fail it doesn't keep spending a real model request every
+    cycle it re-confirms (observed live: a pre-existing position
+    re-confirmed as MOMENTUM BUY-ready 4 times, 4 wasted model calls)."""
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    book = LiveTrialLedger(tmp_path / "trial.sqlite")
+    book.start()
+    model = Model()
+
+    class Rpc:
+        async def token_balance(self, owner, mint):
+            return SimpleNamespace(raw_amount=500)
+
+    decision = asyncio.run(decide_hunter_entry(snapshot(), model=model, ledger=book,
+                                               rpc=Rpc(), wallet="synthetic-owner"))
+    assert decision is None
+    assert model.calls == 0
+    latest = book.status()["recent_decisions"][0]
+    assert latest["state"] == "BLOCKED"
+    assert "already holds" in latest["reason"]
+    book.close()
+
+
+def test_zero_balance_mint_still_reaches_the_model_call(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    book = LiveTrialLedger(tmp_path / "trial.sqlite")
+    book.start()
+    model = Model()
+
+    class Rpc:
+        async def token_balance(self, owner, mint):
+            return SimpleNamespace(raw_amount=0)
+
+    decision = asyncio.run(decide_hunter_entry(snapshot(), model=model, ledger=book,
+                                               rpc=Rpc(), wallet="synthetic-owner"))
+    assert decision is not None
+    assert model.calls == 1
+    book.close()
+
+
+def test_already_held_check_is_skipped_without_rpc_or_wallet(tmp_path, monkeypatch):
+    """Backward-compat: callers that don't wire rpc/wallet (every other
+    test in this file, and any caller predating this check) keep the
+    pre-existing behavior unchanged."""
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    book = LiveTrialLedger(tmp_path / "trial.sqlite")
+    book.start()
+    model = Model()
+    decision = asyncio.run(decide_hunter_entry(snapshot(), model=model, ledger=book))
+    assert decision is not None
+    assert model.calls == 1
+    book.close()
+
+
 def test_early_buy_entry_is_capped_at_half_the_normal_order_size(tmp_path, monkeypatch):
     """An early-buy entry has no proven move behind it yet, so it earns
     only half the normal $5 order size, even if the model requests more."""
