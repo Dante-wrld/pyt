@@ -30,6 +30,19 @@ def auto_buy_discovery_rejection(
     ):
         return "liquidity is below the automatic-discovery minimum"
     if (
+        candidate.initial_price > 0
+        and candidate.current_price
+        < candidate.initial_price
+        * settings.auto_buy_discovery_min_price_vs_initial_pct
+        / 100
+    ):
+        # Observed live: "growth" was bought at ~1.4% of its own recorded
+        # launch price - already a near-total washout under our own
+        # observation, not a dip worth buying. Every other gate here (score,
+        # liquidity, confirmations) can still look fine on a dead token's way
+        # down, so this needs its own explicit floor.
+        return "price has collapsed too far below its starting price"
+    if (
         candidate.entry_confirmation_count
         < candidate.entry_confirmation_required
     ):

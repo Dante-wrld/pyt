@@ -3196,6 +3196,49 @@ def test_auto_buy_discovery_requires_confirmed_fresh_liquid_signal(
     ) == "liquidity is below the automatic-discovery minimum"
 
 
+def test_auto_buy_discovery_rejects_a_candidate_collapsed_from_its_starting_price(
+    tmp_path: Path,
+) -> None:
+    """Observed live: "growth" passed every other discovery gate (score 90,
+    liquidity above the floor, confirmed) and was bought anyway at roughly
+    1.4% of its own recorded launch price - already a dead token by the time
+    of entry, not a real dip. None of score/liquidity/confirmation/staleness
+    catch that shape, so this needs its own explicit floor."""
+    quote = market_quote(
+        liquidity=60_000,
+        market_cap=100_000,
+        buys=60,
+        sells=20,
+        volume=15_000,
+        change=5,
+    )
+    book = RecommendationBook(pool_size=10, ttl_seconds=60)
+    candidate = book.add(quote, CoinIntelligence().score(quote), now=0)
+    assert candidate is not None
+    book.update(quote, now=5)
+    book.update(quote, now=10)
+    assert candidate.decision == "EARLY BUY"
+
+    config = settings(
+        tmp_path / "discovery.db",
+        auto_buy_enabled=True,
+        auto_buy_discovery=True,
+        auto_buy_discovery_min_score=70,
+        auto_buy_discovery_min_liquidity_usd=50_000,
+        auto_buy_signal_max_age_seconds=30,
+    )
+    assert auto_buy_discovery_rejection(candidate, config, now=20) is None
+
+    candidate.current_price = candidate.initial_price * 0.014
+    assert auto_buy_discovery_rejection(
+        candidate, config, now=20
+    ) == "price has collapsed too far below its starting price"
+
+    # A real, more modest pullback from launch still clears the gate.
+    candidate.current_price = candidate.initial_price * 0.5
+    assert auto_buy_discovery_rejection(candidate, config, now=20) is None
+
+
 def test_auto_buy_discovery_arms_a_new_qualified_mint(
     tmp_path: Path,
 ) -> None:
