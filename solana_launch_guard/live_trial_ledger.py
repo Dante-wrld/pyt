@@ -349,13 +349,30 @@ class LiveTrialLedger:
             raise
 
     def positions(self, agent: str | None = None) -> list[dict]:
+        # decision (MOMENTUM BUY, EARLY BUY, ...) is read via the orders
+        # row it was confirmed on - the same source confirm_buy's own
+        # decision param persists to, and for the same reason (see its
+        # docstring): orders is append-only, positions is deleted on
+        # close, so orders is the only place that can still answer "what
+        # kind of buy opened this" without duplicating storage. The most
+        # recent CONFIRMED BUY for this (agent, mint) is always the one
+        # that opened the position still open now - an earlier round trip
+        # on the same mint would have been sold and closed first.
         names = ("agent", "mint", "quantity_raw", "decimals", "cost_cents", "entry_price",
                  "entry_liquidity_usd", "peak_price", "current_price", "opened_at", "updated_at",
-                 "principal_recovered", "second_stage_taken", "origin")
+                 "principal_recovered", "second_stage_taken", "origin", "decision")
+        query = (
+            "SELECT p.*, ("
+            "  SELECT o.decision FROM orders o"
+            "  WHERE o.agent = p.agent AND o.mint = p.mint"
+            "    AND o.side = 'BUY' AND o.state = 'CONFIRMED'"
+            "  ORDER BY o.created_at DESC LIMIT 1"
+            ") FROM positions p"
+        )
         if agent is None:
-            rows = self.db.execute("SELECT * FROM positions").fetchall()
+            rows = self.db.execute(query).fetchall()
         else:
-            rows = self.db.execute("SELECT * FROM positions WHERE agent=?", (agent,)).fetchall()
+            rows = self.db.execute(query + " WHERE p.agent=?", (agent,)).fetchall()
         return [dict(zip(names, row)) for row in rows]
 
     def closed_positions_for_regrowth(self, agent: str, *, max_age_seconds: float,

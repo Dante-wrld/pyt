@@ -94,11 +94,19 @@ REGROWTH_MIN_LIQUIDITY_USD = 50_000.0
 # it's the same "sustained, not a blip" philosophy, just built from
 # repeated simple checks instead of rich per-poll classification.
 REGROWTH_CONFIRMATION_POLLS = 3
-# Its own cap, separate from hunter-v1's 2-position fresh-discovery cap
-# (see decide_hunter_entry) - a regrowth re-entry never crowds out, or gets
-# crowded out by, a fresh discovery. Smaller than the fresh cap since this
+# Its own cap, separate from hunter-v1's fresh-discovery caps below (see
+# decide_hunter_entry) - a regrowth re-entry never crowds out, or gets
+# crowded out by, a fresh discovery. Smaller than the fresh caps since this
 # is a newer, more deterministic (and so far unproven live) mechanism.
 REGROWTH_MAX_OPEN_POSITIONS = 1
+
+# Separate caps per decision kind rather than one shared pool, so a run of
+# MOMENTUM BUY candidates (the higher-variance, $2-capped kind) can never
+# crowd out capacity a BUY NOW/BUY ZONE/EARLY BUY candidate would otherwise
+# get, and vice versa - each kind's own fresh-discovery slots are only ever
+# counted against candidates of that same kind.
+HUNTER_MOMENTUM_MAX_OPEN_POSITIONS = 2
+HUNTER_NORMAL_MAX_OPEN_POSITIONS = 2
 
 
 def _mint_round_trip_history(ledger: LiveTrialLedger, mint: str) -> dict[str, Any]:
@@ -259,16 +267,25 @@ async def decide_hunter_entry(
                            state="BUY_ZONE_SKIPPED", reason=reason)
         return None
     status = ledger.status(now=at)["agents"]["hunter-v1"]
-    # A regrowth re-entry (see decide_regrowth_rebuy) has its own separate
-    # open-position cap, so it can never crowd out - or be crowded out by -
-    # hunter-v1's own fresh discoveries; each pool's cap only ever counts
-    # its own origin.
-    fresh_open_positions = sum(1 for p in ledger.positions("hunter-v1") if p["origin"] == "fresh")
-    if status["remaining_buy_cap_cents"] <= 0 or fresh_open_positions >= 2:
-        return None
     candidate = ready[0]
     mint = str(candidate.get("mint") or "")
     decision_kind = candidate.get("decision")
+    # A regrowth re-entry (see decide_regrowth_rebuy) has its own separate
+    # open-position cap, so it can never crowd out - or be crowded out by -
+    # hunter-v1's own fresh discoveries; each pool's cap only ever counts
+    # its own origin. Within fresh discoveries, MOMENTUM BUY and every other
+    # kind (EARLY BUY, BUY NOW, BUY ZONE) each get their own cap instead of
+    # sharing one pool - see HUNTER_MOMENTUM_MAX_OPEN_POSITIONS above.
+    fresh_positions = [p for p in ledger.positions("hunter-v1") if p["origin"] == "fresh"]
+    fresh_open_positions = len(fresh_positions)
+    is_momentum = decision_kind == "MOMENTUM BUY"
+    same_kind_open = sum(
+        1 for p in fresh_positions if (p.get("decision") == "MOMENTUM BUY") == is_momentum
+    )
+    same_kind_cap = (HUNTER_MOMENTUM_MAX_OPEN_POSITIONS if is_momentum
+                     else HUNTER_NORMAL_MAX_OPEN_POSITIONS)
+    if status["remaining_buy_cap_cents"] <= 0 or same_kind_open >= same_kind_cap:
+        return None
     # An early-buy entry has no proven move behind it yet (that's the whole
     # trade-off: a better price in exchange for less evidence), so it gets
     # half the normal order size until it's earned a full-size position the
@@ -287,7 +304,14 @@ async def decide_hunter_entry(
         else 2.0 if decision_kind == "MOMENTUM BUY"
         else 5
     )
-    live_arbiter = _live_arbiter(min_liquidity_usd=policy.min_liquidity_usd, max_order_usd=order_cap_usd)
+    # The arbiter's own open_positions sanity check (see RiskSnapshot below)
+    # counts fresh positions of *either* kind combined, so it needs the
+    # combined ceiling here - the kind-specific split is already enforced
+    # above (same_kind_open/same_kind_cap), before the model is ever called.
+    live_arbiter = _live_arbiter(
+        min_liquidity_usd=policy.min_liquidity_usd, max_order_usd=order_cap_usd,
+        max_open_positions=HUNTER_MOMENTUM_MAX_OPEN_POSITIONS + HUNTER_NORMAL_MAX_OPEN_POSITIONS,
+    )
     # The daily loss limit is a hard, deterministic gate that doesn't depend
     # on anything the model would say - checking it here (before the model
     # call) rather than only inside coordinator.ask()'s arbitration saves a

@@ -23,6 +23,7 @@ from .execution import (
 from .hunter_shadow_strategy import ShadowRecoveryPolicy, assess_exit
 from .live_trial_ledger import LiveTrialLedger, TrialHalted
 from .live_trial_runner import (
+    HUNTER_MOMENTUM_MAX_OPEN_POSITIONS, HUNTER_NORMAL_MAX_OPEN_POSITIONS,
     LiveEntryDecision, _regrowth_bar_clears, decide_hunter_entry, decide_regrowth_rebuy,
     execute_hunter_entry, execute_live_exit,
 )
@@ -228,14 +229,24 @@ def _write_hunter_capacity_snapshot(ledger: LiveTrialLedger) -> None:
     pattern as _write_report/_read_portfolio/_read_recommendations below,
     not a new kind of process coupling - and if this file goes missing or
     stale (e.g. no live trial running), readers default to "not at
-    capacity" and poll normally, so this can never silently starve them."""
-    fresh_open_positions = sum(1 for p in ledger.positions("hunter-v1") if p["origin"] == "fresh")
+    capacity" and poll normally, so this can never silently starve them.
+
+    MOMENTUM BUY and every other kind each have their own open-position
+    cap (see HUNTER_MOMENTUM_MAX_OPEN_POSITIONS in live_trial_runner.py),
+    so "at capacity" only means neither pool has room left - polling stays
+    worthwhile as long as at least one kind could still act on a fresh
+    candidate."""
+    fresh_positions = [p for p in ledger.positions("hunter-v1") if p["origin"] == "fresh"]
+    momentum_open = sum(1 for p in fresh_positions if p.get("decision") == "MOMENTUM BUY")
+    normal_open = len(fresh_positions) - momentum_open
+    at_capacity = (momentum_open >= HUNTER_MOMENTUM_MAX_OPEN_POSITIONS
+                  and normal_open >= HUNTER_NORMAL_MAX_OPEN_POSITIONS)
     path = Path(os.getenv("HUNTER_CAPACITY_SNAPSHOT_PATH", "launch_guard_hunter_capacity.json"))
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
     descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-        json.dump({"hunter_v1_at_capacity": fresh_open_positions >= 2, "generated_at": time.time()}, handle)
+        json.dump({"hunter_v1_at_capacity": at_capacity, "generated_at": time.time()}, handle)
         handle.write("\n")
     os.replace(temporary, path)
 

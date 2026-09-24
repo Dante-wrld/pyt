@@ -23,7 +23,8 @@ def _no_legacy_claim() -> SimpleNamespace:
 
 
 def snapshot(*, confirmations=3, momentum="RISING", liquidity=60000,
-             price=.005, planned_target_price=None, decision="BUY NOW"):
+             price=.005, planned_target_price=None, decision="BUY NOW",
+             buys_m5=20, sells_m5=10):
     now = time.time()
     return {"generated_at": now, "candidates": [{
         "chain": "solana", "mint": MINT, "symbol": "TEST",
@@ -33,7 +34,7 @@ def snapshot(*, confirmations=3, momentum="RISING", liquidity=60000,
         "initial_liquidity_usd": liquidity,
         "entry_confirmation_count": confirmations, "entry_confirmation_required": 3,
         "momentum_label": momentum, "price_change_m5_pct": 2,
-        "volume_label": "RISING", "buys_m5": 20, "sells_m5": 10,
+        "volume_label": "RISING", "buys_m5": buys_m5, "sells_m5": sells_m5,
         "buy_sell_ratio": 2, "risk_label": "MEDIUM", "signal_score": 90,
         "decision": decision,
     }]}
@@ -319,6 +320,75 @@ def test_decide_hunter_entry_still_allows_a_buy_after_one_loss(tmp_path, monkeyp
     assert captured["mint_trade_history"] == {
         "round_trips": 1, "total_realized_usd": -0.4, "consecutive_losses": 1,
     }
+    book.close()
+
+
+def _open_fresh_position(book, *, mint, decision):
+    """A confirmed fresh-origin hunter-v1 position, as if a prior cycle
+    already bought this mint under the given decision kind - only what
+    decide_hunter_entry's per-kind capacity check reads."""
+    book.reserve_buy(intent=f"open-{mint}", agent="hunter-v1", mint=mint,
+                     requested_cents=200, approved_cents=200)
+    book.transition(f"open-{mint}", "SUBMITTED", signature=f"sig-{mint}")
+    book.confirm_buy(intent=f"open-{mint}", signature=f"sig-{mint}", executed_cents=200,
+                     quantity_raw=1, decimals=0, entry_price=1.0,
+                     entry_liquidity_usd=60000, verified_on_chain=True,
+                     origin="fresh", decision=decision)
+
+
+def test_decide_hunter_entry_momentum_and_normal_buys_have_separate_open_position_caps(
+    tmp_path, monkeypatch,
+):
+    """Confirmed live 2026-09-24: MOMENTUM BUY and every other decision kind
+    used to share one 2-position fresh-discovery cap, so two open MOMENTUM
+    BUY positions could block a completely unrelated BUY NOW/BUY ZONE/EARLY
+    BUY candidate (and vice versa) even though the two kinds are sized and
+    risk-managed independently (MOMENTUM BUY capped at $2, the rest at $5).
+    Each kind now gets its own separate cap."""
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    book = LiveTrialLedger(tmp_path / "trial.sqlite")
+    book.start()
+    _open_fresh_position(book, mint="B" * 44, decision="MOMENTUM BUY")
+    _open_fresh_position(book, mint="C" * 44, decision="MOMENTUM BUY")
+    monkeypatch.setattr("solana_launch_guard.live_trial_runner.MOMENTUM_BUY_PAUSED", False)
+    model = Model()
+    # Both MOMENTUM BUY slots are already taken - a third is blocked...
+    assert asyncio.run(decide_hunter_entry(
+        # buys_m5/sells_m5 bumped above snapshot()'s default so this
+        # candidate genuinely clears MOMENTUM BUY's own evidence bar and
+        # the block below is proven to be the capacity cap, not an
+        # unrelated readiness gate (see test_momentum_buy_confirmed...).
+        snapshot(decision="MOMENTUM BUY", buys_m5=40, sells_m5=20), model=model, ledger=book,
+    )) is None
+    assert model.calls == 0
+    # ...but a BUY NOW candidate draws from its own, still-empty pool.
+    decision = asyncio.run(decide_hunter_entry(
+        snapshot(decision="BUY NOW"), model=model, ledger=book,
+    ))
+    assert decision is not None
+    assert model.calls == 1
+    book.close()
+
+
+def test_decide_hunter_entry_normal_buy_cap_does_not_block_momentum_buys(tmp_path, monkeypatch):
+    """The reverse of the above: two open BUY NOW/BUY ZONE positions filling
+    the normal-buy cap must not block a MOMENTUM BUY candidate."""
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    monkeypatch.setattr("solana_launch_guard.live_trial_runner.MOMENTUM_BUY_PAUSED", False)
+    book = LiveTrialLedger(tmp_path / "trial.sqlite")
+    book.start()
+    _open_fresh_position(book, mint="B" * 44, decision="BUY NOW")
+    _open_fresh_position(book, mint="C" * 44, decision="BUY ZONE")
+    model = Model()
+    assert asyncio.run(decide_hunter_entry(
+        snapshot(decision="BUY NOW"), model=model, ledger=book,
+    )) is None
+    assert model.calls == 0
+    decision = asyncio.run(decide_hunter_entry(
+        snapshot(decision="MOMENTUM BUY", buys_m5=40, sells_m5=20), model=model, ledger=book,
+    ))
+    assert decision is not None
+    assert model.calls == 1
     book.close()
 
 
