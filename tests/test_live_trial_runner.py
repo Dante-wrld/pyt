@@ -869,6 +869,102 @@ def test_momentum_buy_entry_allows_a_wider_guard_ceiling(tmp_path, monkeypatch):
     book.close()
 
 
+def _honeypot_check_harness(*, approved_cents, other_amount_threshold_raw, wallet="synthetic-owner"):
+    """Shared Rpc/Client/Buyer/Store fakes for the reverse-quote honeypot
+    check, parameterized only by what the test actually varies: the
+    approved size and the reverse quote's otherAmountThreshold."""
+    decision = LiveEntryDecision(
+        agent="hunter-v1", mint=MINT, requested_cents=approved_cents,
+        approved_cents=approved_cents, reason="test",
+        candidate={"decision": "MOMENTUM BUY", "symbol": "TEST", "liquidity_usd": 60_000},
+    )
+
+    class Rpc:
+        async def token_balance(self, owner, mint):
+            return SimpleNamespace(raw_amount=20_000_000 if mint == USDC_MINT else 0)
+        async def mint_decimals(self, mint):
+            return 6
+        async def get_transaction(self, signature):
+            def row(index, mint, amount):
+                return {"accountIndex": index, "mint": mint, "owner": wallet,
+                        "uiTokenAmount": {"amount": str(amount)}}
+            return {"meta": {"err": None,
+                    "preTokenBalances": [row(0, USDC_MINT, 20_000_000)],
+                    "postTokenBalances": [row(0, USDC_MINT, 18_000_000), row(1, MINT, 100_000_000)]}}
+
+    class Client:
+        async def order(self, **kwargs):
+            return {"inputMint": MINT, "outputMint": USDC_MINT,
+                    "inAmount": str(kwargs["amount_raw"]),
+                    "outAmount": str(other_amount_threshold_raw + 50_000),
+                    "otherAmountThreshold": str(other_amount_threshold_raw),
+                    "priceImpact": "-1", "slippageBps": 250}
+
+    class Buyer:
+        client = Client()
+        max_price_impact_pct = 50
+        max_slippage_bps = 5_000
+        async def preflight(self, intent, rpc):
+            return SimpleNamespace(prepared=SimpleNamespace(input_amount_raw=intent.amount_usdc_raw,
+                minimum_output_raw=100_000_000, expected_output_raw=100_000_000))
+        async def execute(self, prepared):
+            return SimpleNamespace(signature="public-signature",
+                                   input_amount_raw=approved_cents * 10_000,
+                                   output_amount_raw=100_000_000)
+
+    class Store:
+        connection = _no_legacy_claim()
+        def begin_auto_buy_execution(self, **kwargs):
+            return True
+        def complete_auto_buy_execution(self, **kwargs):
+            pass
+        def save_owned_holding(self, holding):
+            pass
+        def arm_auto_sell(self, mint, **kwargs):
+            pass
+
+    return decision, Rpc(), Buyer(), Store(), wallet
+
+
+def test_reverse_quote_floor_is_relative_to_spend_not_a_flat_two_dollars(tmp_path, monkeypatch):
+    """validate_exit_quote's own default floor is a flat $2 "not worth the
+    gas to sell" business threshold - for a $2 MOMENTUM BUY that exactly
+    equals the position size, reusing it unmodified as the honeypot
+    round-trip floor demands 100% recovery with zero tolerance for any
+    slippage or fee on either leg. Confirmed live 2026-09-24: two separate
+    real MOMENTUM BUY candidates each cleared model approval and were
+    blocked here every time. Recovering 92.5% of what was spent ($1.85 of
+    $2.00) is normal round-trip cost, not a honeypot, and must now clear."""
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    book = LiveTrialLedger(tmp_path / "trial.sqlite")
+    book.start()
+    decision, rpc, buyer, store, wallet = _honeypot_check_harness(
+        approved_cents=200, other_amount_threshold_raw=1_850_000,
+    )
+    receipt = asyncio.run(execute_hunter_entry(decision, ledger=book, rpc=rpc,
+                          buyer=buyer, store=store, wallet=wallet,
+                          current_snapshot=snapshot))
+    assert receipt["spent_cents"] == 200
+    book.close()
+
+
+def test_reverse_quote_still_blocks_a_genuinely_bad_round_trip(tmp_path, monkeypatch):
+    """The relative floor is a real backstop, not a rubber stamp - a
+    reverse quote recovering only 45% of what was spent ($0.90 of $2.00)
+    is still well below the 50% floor and must still block."""
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    book = LiveTrialLedger(tmp_path / "trial.sqlite")
+    book.start()
+    decision, rpc, buyer, store, wallet = _honeypot_check_harness(
+        approved_cents=200, other_amount_threshold_raw=900_000,
+    )
+    with pytest.raises(ValueError, match="sell minimum"):
+        asyncio.run(execute_hunter_entry(decision, ledger=book, rpc=rpc,
+                    buyer=buyer, store=store, wallet=wallet,
+                    current_snapshot=snapshot))
+    book.close()
+
+
 def test_non_momentum_buy_entry_rejects_a_wide_guard_ceiling(tmp_path, monkeypatch):
     """The wider ceiling is earned by the MOMENTUM BUY label specifically -
     a buyer configured that wide for any other entry source must still

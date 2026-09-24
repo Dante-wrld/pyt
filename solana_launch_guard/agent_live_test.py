@@ -139,15 +139,24 @@ def canary_exit_allowed(mint: str) -> bool:
 
 
 def validate_exit_quote(order: dict[str, Any], *, mint: str, amount_raw: int,
-                        usdc_mint: str, policy: CanaryPolicy) -> float:
+                        usdc_mint: str, policy: CanaryPolicy,
+                        min_proceeds_usd: float | None = None) -> float:
     if order.get("inputMint") != mint or order.get("outputMint") != usdc_mint:
         raise ValueError("exit quote mint mismatch")
     if int(order.get("inAmount") or 0) != amount_raw or amount_raw <= 0:
         raise ValueError("exit quote amount mismatch")
     expected = int(order.get("outAmount") or 0)
     minimum = int(order.get("otherAmountThreshold") or 0)
-    floor = max(2.0, float(os.getenv("PORTFOLIO_MIN_SELL_VALUE_USD", "2")),
-                float(os.getenv("AUTO_SELL_MIN_VALUE_USD", "2")))
+    # min_proceeds_usd lets a caller override the floor below with one
+    # relative to what it actually cares about recovering (see
+    # live_trial_runner.py's honeypot pre-buy check) instead of this
+    # module's own "not worth the gas to sell" business floor, which is
+    # about real portfolio exits, not a pre-purchase round-trip check.
+    floor = (
+        min_proceeds_usd if min_proceeds_usd is not None
+        else max(2.0, float(os.getenv("PORTFOLIO_MIN_SELL_VALUE_USD", "2")),
+                 float(os.getenv("AUTO_SELL_MIN_VALUE_USD", "2")))
+    )
     if not math.isfinite(floor) or minimum < math.ceil(floor * 1_000_000) or minimum > expected:
         raise ValueError("exit quote is below the configured sell minimum or invalid")
     impact = float(order["priceImpact"]) if order.get("priceImpact") is not None else float(order.get("priceImpactPct", "nan")) * 100

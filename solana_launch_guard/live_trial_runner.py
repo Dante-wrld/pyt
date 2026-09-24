@@ -551,10 +551,23 @@ async def execute_hunter_entry(
     reverse_policy = (CanaryPolicy(maximum_price_impact_pct=buyer.max_price_impact_pct,
                                    maximum_slippage_bps=buyer.max_slippage_bps)
                       if is_momentum_entry else CanaryPolicy())
+    # validate_exit_quote's own default floor is a flat $2 "not worth the
+    # gas to sell" business threshold - for a $2 MOMENTUM BUY that exactly
+    # equals the amount just spent, demanding the reverse quote clear it
+    # requires 100% round-trip recovery with zero tolerance for any
+    # slippage or fee at all, on both legs. Confirmed live 2026-09-24: two
+    # separate candidates (G59, DE4rkxMATU) each cleared model approval
+    # three times and were blocked here every single time - this dollar
+    # floor, not the (already much wider, entry-type-calibrated)
+    # impact/slippage check right below it, was the actual binding
+    # constraint. Recovering half of what was spent is still a real
+    # honeypot/thin-liquidity backstop (a token that can't clear that has
+    # a real problem) without accidentally demanding zero round-trip cost.
     validate_exit_quote(reverse, mint=decision.mint,
                         amount_raw=preflight.prepared.minimum_output_raw,
                         usdc_mint=USDC_MINT,
-                        policy=reverse_policy)
+                        policy=reverse_policy,
+                        min_proceeds_usd=decision.approved_cents / 100 * 0.5)
     if not await eligible():
         raise TrialHalted("buy signal expired before reservation")
     ledger.reserve_buy(intent=intent_key, agent="hunter-v1", mint=decision.mint,
