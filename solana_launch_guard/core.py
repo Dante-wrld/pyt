@@ -5,7 +5,7 @@ import math
 import sqlite3
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping, Protocol
 
@@ -2247,6 +2247,44 @@ class SQLiteStore:
                 [(now, row["id"]) for row in stale],
             )
         return [dict(row) for row in stale]
+
+    def reconcile_stale_auto_buy_executions(
+        self, *, older_than_seconds: float = 1800,
+    ) -> list[dict[str, Any]]:
+        """Move a PENDING auto_buy_executions row into REVIEW once it has
+        sat unconfirmed for longer than a normal buy ever takes.
+
+        preview_auto_buy_budget's max_open_positions gate counts PENDING
+        executions the same as OPEN positions - a row that never reaches
+        complete_auto_buy_execution (nor freeze_auto_buy_execution's own
+        REVIEW path) stays PENDING forever and keeps consuming capacity
+        indefinitely. Confirmed live 2026-09-24: two rows from 2026-09-22
+        (CATEWALK, BITCOINU) - both mints' buys plainly did succeed under
+        a *different* event_key from a later retry, since positions for
+        both were later opened and sold, but the original attempt's own
+        row was simply never revisited by anything to record its outcome.
+
+        30 minutes is comfortably past how long any real quote-to-
+        confirmation cycle takes, so this only ever catches an execution
+        nothing is going to touch again - never one still genuinely in
+        flight. Reuses freeze_auto_buy_execution's existing REVIEW state
+        rather than inventing a new one, and records why in `error` since
+        no outcome was ever observed for it.
+        """
+        cutoff = (datetime.now(timezone.utc) - timedelta(seconds=older_than_seconds)).isoformat()
+        rows = self.connection.execute(
+            "SELECT event_key, token_address, symbol FROM auto_buy_executions "
+            "WHERE status = 'PENDING' AND created_at < ?",
+            (cutoff,),
+        ).fetchall()
+        for row in rows:
+            self.freeze_auto_buy_execution(
+                event_key=row["event_key"],
+                error=f"reconciled: PENDING for over {older_than_seconds:.0f}s with no "
+                       "completion or freeze recorded; treated as abandoned rather than "
+                       "left blocking auto-buy capacity indefinitely",
+            )
+        return [dict(row) for row in rows]
 
     def start_auto_rebuy_watch(
         self,

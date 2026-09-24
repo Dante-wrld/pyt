@@ -1633,6 +1633,54 @@ def test_reconcile_stale_auto_buy_positions_closes_only_unheld_mints(
     store.close()
 
 
+def test_reconcile_stale_auto_buy_executions_frees_only_old_pending_rows(
+    tmp_path: Path,
+) -> None:
+    """Confirmed live 2026-09-24: two auto_buy_executions rows from
+    2026-09-22 sat PENDING forever - both mints' buys plainly succeeded
+    under a different event_key from a later retry (positions for both
+    were later opened and sold), but nothing ever revisited the original
+    attempt's own row to record an outcome. preview_auto_buy_budget counts
+    PENDING the same as an open position, so these blocked capacity
+    indefinitely even with zero real open positions."""
+    store = SQLiteStore(str(tmp_path / "auto-buy-executions.db"))
+    store.arm_auto_buy("MintOld", "OLD")
+    store.begin_auto_buy_execution(
+        event_key="old-attempt", token_address="MintOld", symbol="OLD",
+        funding_source="seed", input_usdc_raw=5_000_000, expected_output_raw=100,
+    )
+    store.connection.execute(
+        "UPDATE auto_buy_executions SET created_at = ? WHERE event_key = ?",
+        ("2020-01-01T00:00:00+00:00", "old-attempt"),
+    )
+    store.connection.commit()
+
+    store.arm_auto_buy("MintFresh", "FRESH")
+    store.begin_auto_buy_execution(
+        event_key="fresh-attempt", token_address="MintFresh", symbol="FRESH",
+        funding_source="seed", input_usdc_raw=5_000_000, expected_output_raw=100,
+    )
+
+    reconciled = store.reconcile_stale_auto_buy_executions(older_than_seconds=1800)
+
+    assert [row["token_address"] for row in reconciled] == ["MintOld"]
+    executions = {
+        row["event_key"]: row
+        for row in store.connection.execute("SELECT * FROM auto_buy_executions").fetchall()
+    }
+    assert executions["old-attempt"]["status"] == "REVIEW"
+    assert executions["old-attempt"]["error"] is not None
+    # The still-fresh attempt must be left alone - it may genuinely still
+    # be in flight.
+    assert executions["fresh-attempt"]["status"] == "PENDING"
+
+    pending = store.connection.execute(
+        "SELECT COUNT(*) FROM auto_buy_executions WHERE status='PENDING'"
+    ).fetchone()[0]
+    assert pending == 1
+    store.close()
+
+
 def test_key_store_refuses_mismatched_wallet_before_write(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -280,6 +280,13 @@ class PortfolioMonitorMixin(LaunchGuardState):
                             "this token; sold outside auto-buy's own tracked paths)",
                             row["symbol"], row["token_address"],
                         )
+                stuck_executions = self.store.reconcile_stale_auto_buy_executions()
+                for row in stuck_executions:
+                    LOGGER.info(
+                        "AUTO-BUY EXECUTION REVIEW %s mint=%s (stuck PENDING with no "
+                        "completion; moved to REVIEW so it stops blocking capacity)",
+                        row["symbol"], row["token_address"],
+                    )
 
                 if self.settings.auto_rebuy_enabled:
                     await self._monitor_auto_rebuys(balances_by_mint, rpc)
