@@ -148,6 +148,19 @@ class Settings:
     momentum_buy_min_ratio: float = 1.5
     momentum_buy_min_trades: int = 50
     momentum_buy_min_liquidity_growth_pct: float = 20.0
+    # Was an unconfigurable hardcoded 1 (a single poll's snapshot) until
+    # MOMENTUM BUY's 2026-09-23 pause: 17 losses vs 1 win, concentrated in
+    # this decision type, with the diagnosis (see live_trial_runner.py's
+    # MOMENTUM_BUY_PAUSED) being "buying into an already-confirmed move
+    # means the entry is often close to the top." Every other buy path
+    # requires multiple confirmations (a pullback needs 3+); this raises
+    # momentum's own bar to match - requiring the SAME strong-momentum
+    # evidence on 2 consecutive polls, not one, filters out a single noisy
+    # snapshot while still catching a token that's genuinely still running
+    # (which clears 2 polls easily) - unlike a hard cap on how far price
+    # has already moved, this doesn't risk excluding a real outsized
+    # winner the way an "already too extended" filter would.
+    momentum_buy_confirmation_polls: int = 2
     avoid_entry_momentum_pct: float = -8.0
     avoid_entry_sell_pressure_ratio: float = 2.0
     pushover_enabled: bool = False
@@ -445,6 +458,9 @@ class Settings:
             momentum_buy_min_trades=_int("MOMENTUM_BUY_MIN_TRADES", 50),
             momentum_buy_min_liquidity_growth_pct=_float(
                 "MOMENTUM_BUY_MIN_LIQUIDITY_GROWTH_PCT", 20.0
+            ),
+            momentum_buy_confirmation_polls=_int(
+                "MOMENTUM_BUY_CONFIRMATION_POLLS", 2
             ),
             avoid_entry_momentum_pct=float(
                 os.getenv("AVOID_ENTRY_MOMENTUM_PCT", "-8")
@@ -1063,6 +1079,8 @@ class Settings:
             raise ValueError("MOMENTUM_BUY_MIN_TRADES must not be negative")
         if self.momentum_buy_min_liquidity_growth_pct <= 0:
             raise ValueError("MOMENTUM_BUY_MIN_LIQUIDITY_GROWTH_PCT must be positive")
+        if self.momentum_buy_confirmation_polls < 1:
+            raise ValueError("MOMENTUM_BUY_CONFIRMATION_POLLS must be at least 1")
         if self.avoid_entry_momentum_pct >= 0:
             raise ValueError("AVOID_ENTRY_MOMENTUM_PCT must be negative")
         if self.avoid_entry_sell_pressure_ratio <= 0:

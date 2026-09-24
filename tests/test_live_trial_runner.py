@@ -341,11 +341,15 @@ def test_decide_hunter_entry_skips_the_model_once_the_daily_loss_limit_is_breach
     book.close()
 
 
-def test_momentum_buy_is_paused_and_never_reaches_the_model(tmp_path, monkeypatch):
+def test_momentum_buy_pause_blocks_it_before_the_model_when_engaged(tmp_path, monkeypatch):
     """Paused 2026-09-23 after a full session showed 17 losses vs 1 win,
-    concentrated almost entirely in MOMENTUM BUY entries - it must not
-    originate a buy, or even call the model, while paused."""
+    concentrated almost entirely in MOMENTUM BUY entries; re-enabled the
+    same night with a tighter confirmation bar and a $2 size cap (see
+    MOMENTUM_BUY_PAUSED's own comment), so False is the default now - this
+    still proves the pause mechanism itself works whenever it's engaged,
+    by explicitly re-enabling it rather than relying on the default."""
     monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    monkeypatch.setattr("solana_launch_guard.live_trial_runner.MOMENTUM_BUY_PAUSED", True)
     book = LiveTrialLedger(tmp_path / "trial.sqlite")
     book.start()
     model = Model()
@@ -358,6 +362,7 @@ def test_momentum_buy_is_paused_and_never_reaches_the_model(tmp_path, monkeypatc
 
 def test_pullback_entries_still_run_while_momentum_buy_is_paused(tmp_path, monkeypatch):
     monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    monkeypatch.setattr("solana_launch_guard.live_trial_runner.MOMENTUM_BUY_PAUSED", True)
     book = LiveTrialLedger(tmp_path / "trial.sqlite")
     book.start()
     model = Model()
@@ -385,6 +390,30 @@ def test_momentum_buy_would_otherwise_qualify_confirming_the_pause_is_what_block
     decision = decide_hunter_entry(momentum_snapshot, model=model, ledger=book)
     assert decision is not None
     assert model.calls == 1
+    # $2 fixed size for this decision type (see order_cap_usd), not the
+    # normal $5 - Model()'s default requested_usd is 5, so this also
+    # proves the cap actually binds rather than passing through unchanged.
+    assert decision.approved_cents == 200
+    book.close()
+
+
+def test_momentum_buy_is_skipped_rather_than_taken_undersized(tmp_path, monkeypatch):
+    """$2 is both the floor and the ceiling for MOMENTUM BUY - a model
+    request for less than that isn't a smaller, still-valid test of the
+    strategy, it's an uncontrolled position size, so this must decline the
+    trade entirely rather than take whatever smaller amount was on offer."""
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    monkeypatch.setattr("solana_launch_guard.live_trial_runner.MOMENTUM_BUY_PAUSED", False)
+    book = LiveTrialLedger(tmp_path / "trial.sqlite")
+    book.start()
+    model = Model(requested=1)
+    momentum_snapshot = snapshot(decision="MOMENTUM BUY")
+    momentum_snapshot["candidates"][0].update(buys_m5=40, sells_m5=20)
+    decision = decide_hunter_entry(momentum_snapshot, model=model, ledger=book)
+    assert decision is None
+    assert model.calls == 1
+    assert book.status()["recent_decisions"][0]["state"] == "BLOCKED"
+    assert "exactly $2.00" in book.status()["recent_decisions"][0]["reason"]
     book.close()
 
 

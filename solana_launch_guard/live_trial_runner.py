@@ -45,18 +45,28 @@ MINT_LOSS_STREAK_BLOCK = 2
 # ever calling the model - kept as one constant so the two can't drift apart.
 HUNTER_EQUITY_USD = 30
 
-# Paused 2026-09-23 pending a strategy review: across tonight's full
-# session, hunter-v1 realized 17 losses against 1 win (-$17.16 total),
-# and the losses were concentrated almost entirely in MOMENTUM BUY
-# entries - including the two largest of the night (-$4.87 and -$3.45).
-# Buying into an already-confirmed move, on a token population already
-# established as bimodal (instant-rug or instant-pump, rarely a real
-# trend), means the entry is often close to the top rather than the
-# start of a continuation. Pullback and EARLY BUY entries haven't shown
-# this pattern and keep running normally; only this one decision type is
-# paused. Flip back to False once the strategy issue is actually
-# addressed, not just because losses stop for a while.
-MOMENTUM_BUY_PAUSED = True
+# Paused 2026-09-23, re-enabled the same night once two changes actually
+# addressed the diagnosis rather than just waiting for losses to stop:
+# the original pause was after hunter-v1 realized 17 losses against 1 win
+# (-$17.16 total) in one session, concentrated almost entirely in
+# MOMENTUM BUY entries - including the two largest of the night (-$4.87
+# and -$3.45) - because buying into an already-confirmed move, on a token
+# population already established as bimodal (instant-rug or instant-
+# pump, rarely a real trend), means the entry is often close to the top
+# rather than the start of a continuation.
+#
+# Re-enabled with: (1) momentum_buy_confirmation_polls raised from an
+# unconfigurable 1 to 2 - the same strong-momentum evidence now has to
+# hold across two consecutive polls, not one snapshot, filtering out a
+# single noisy reading while a token genuinely still running clears it
+# easily; (2) this decision type's own order size capped at a fixed $2
+# (both floor and ceiling - see order_cap_usd below), down from the
+# normal $5, so the strategy change is tested with tightly bounded
+# downside rather than at full size on unproven results. Pullback and
+# EARLY BUY entries never showed this loss pattern and were never
+# paused. If losses concentrate here again even at this smaller size,
+# pause again and revisit the confirmation-poll count, not just the size.
+MOMENTUM_BUY_PAUSED = False
 
 # A mint hunter-v1 fully exits doesn't just get forgotten - the shared
 # recommendation engine evicts a crashed, low-scoring candidate from its own
@@ -253,11 +263,25 @@ def decide_hunter_entry(
         return None
     candidate = ready[0]
     mint = str(candidate.get("mint") or "")
+    decision_kind = candidate.get("decision")
     # An early-buy entry has no proven move behind it yet (that's the whole
     # trade-off: a better price in exchange for less evidence), so it gets
     # half the normal order size until it's earned a full-size position the
     # way a confirmed pullback or momentum entry already has.
-    order_cap_usd = 2.5 if candidate.get("decision") == "EARLY BUY" else 5
+    #
+    # MOMENTUM BUY specifically is capped at $2, not the normal $5 - see
+    # MOMENTUM_BUY_PAUSED's history: this decision type was responsible for
+    # nearly all of a prior session's losses (17 of 18 trades, -$17.16
+    # total, including single losses of -$4.87 and -$3.45 on $5 positions).
+    # Re-enabled with a tighter confirmation bar (momentum_buy_confirmation_
+    # polls) and this much smaller size specifically to bound how much a
+    # still-unproven-live strategy change can cost while it gathers fresh
+    # results, not because the entry logic itself changed size tiers.
+    order_cap_usd = (
+        2.5 if decision_kind == "EARLY BUY"
+        else 2.0 if decision_kind == "MOMENTUM BUY"
+        else 5
+    )
     live_arbiter = _live_arbiter(min_liquidity_usd=policy.min_liquidity_usd, max_order_usd=order_cap_usd)
     # The daily loss limit is a hard, deterministic gate that doesn't depend
     # on anything the model would say - checking it here (before the model
@@ -346,6 +370,16 @@ def decide_hunter_entry(
                          status["remaining_buy_cap_cents"], round(order_cap_usd * 100))
     requested_cents = round(proposal.requested_usd * 100)
     if not 0 < approved_cents <= requested_cents:
+        return None
+    if decision_kind == "MOMENTUM BUY" and approved_cents != round(order_cap_usd * 100):
+        # $2 is both the floor and the ceiling for this decision type (see
+        # order_cap_usd above) - a smaller fill because remaining budget or
+        # the model's own request came in under that isn't a smaller test
+        # of the strategy, it's a different, uncontrolled position size, so
+        # skip rather than take it undersized.
+        ledger.log(agent="hunter-v1", mint=proposal.mint, state="BLOCKED",
+                   reason=f"MOMENTUM BUY requires exactly ${order_cap_usd:.2f}; "
+                          f"only {approved_cents} cents available")
         return None
     ledger.log(agent="hunter-v1", mint=proposal.mint, state="APPROVED",
                reason=f"{review['entry_confirmations']} confirmations; approved {approved_cents} cents")

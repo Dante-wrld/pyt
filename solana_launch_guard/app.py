@@ -175,6 +175,9 @@ class LaunchGuard(
             momentum_buy_min_liquidity_growth_pct=(
                 settings.momentum_buy_min_liquidity_growth_pct
             ),
+            momentum_buy_confirmation_polls=(
+                settings.momentum_buy_confirmation_polls
+            ),
             avoid_momentum_pct=settings.avoid_entry_momentum_pct,
             avoid_sell_pressure_ratio=(
                 settings.avoid_entry_sell_pressure_ratio
