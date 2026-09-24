@@ -2422,21 +2422,83 @@ def test_snapshot_round_trip_and_colored_dashboard(tmp_path: Path) -> None:
     assert "\033[38;5;45m" in output
 
 
-def test_snapshot_candidates_carry_pair_address() -> None:
-    # build_snapshot hand-lists each candidate's output fields rather than
-    # using asdict() - a new RecommendationCandidate field silently never
-    # reaches this JSON (and so never reaches decide_hunter_entry's
-    # snapshot) unless it's added here too. Caught live: the candle-shape
-    # MOMENTUM BUY gate read candidate.get("pair_address") and always got
-    # None, so it blocked every attempt regardless of real market shape.
+# build_snapshot hand-lists each candidate's output fields rather than
+# reusing asdict(RecommendationCandidate) - some fields are surfaced
+# as-is, some under a different digest name (a computed property, or a
+# deliberate rename), and some are internal bookkeeping never meant to
+# reach the digest at all. Whichever bucket a field is in has to be a
+# decision someone actually made, not silence - a new dataclass field
+# that lands in none of these three maps means it was simply forgotten,
+# exactly what happened for real with pair_address: it silently never
+# reached launch_guard_recommendations.json, so decide_hunter_entry's
+# candle-confirmation gate for MOMENTUM BUY always got an empty pool and
+# blocked every attempt regardless of actual market shape - for the
+# entire length of a live trial, caught only by manually inspecting
+# production output, not by the test suite (see d6f3332).
+#
+# Same digest key name as the dataclass field.
+_DIGEST_SAME_NAME_FIELDS = frozenset({
+    "mint", "symbol", "chain", "tier", "price_currency", "liquidity_usd",
+    "initial_liquidity_usd", "buys_m5", "sells_m5", "price_change_m5_pct",
+    "buy_sell_ratio", "pair_address", "decision", "decision_reason",
+    "entry_zone_low", "entry_zone_high", "peak_price",
+    "entry_confirmation_count", "entry_confirmation_required",
+    "planned_entry_price",
+})
+# dataclass field -> digest key, where the digest surfaces it under a
+# different name (usually because the digest key is itself a computed
+# @property derived from the raw field, not a plain alias).
+_DIGEST_RENAMED_FIELDS = {
+    "current_price": "price",
+    "updated_at": "quoted_at",
+}
+# Dataclass fields deliberately absent from the digest: internal
+# bookkeeping (a baseline, a raw score/pct the digest exposes a
+# different *computed* view of instead) that decide_hunter_entry and the
+# dashboard have no use for.
+_DIGEST_EXCLUDED_FIELDS = frozenset({
+    "intelligence_score",  # digest exposes the computed `signal_score` instead
+    "initial_price",  # internal baseline for rise_pct, not surfaced raw
+    "volume_m5_usd",  # internal baseline; digest exposes `volume_label` instead
+    "initial_volume_m5_usd",
+    "observed_at",
+    "pullback_low_price",  # digest exposes computed `pullback_needed_pct` instead
+    "entry_confirmation_signal",
+    "planned_stop_pct",  # digest exposes computed dollar `planned_stop_price` instead
+    "planned_target_pct",  # digest exposes computed dollar `planned_target_price` instead
+})
+
+
+def test_snapshot_digest_accounts_for_every_recommendation_candidate_field() -> None:
+    import dataclasses
+
+    accounted_for = (
+        _DIGEST_SAME_NAME_FIELDS
+        | _DIGEST_RENAMED_FIELDS.keys()
+        | _DIGEST_EXCLUDED_FIELDS
+    )
+    all_fields = {f.name for f in dataclasses.fields(RecommendationCandidate)}
+    forgotten = all_fields - accounted_for
+    assert not forgotten, (
+        f"RecommendationCandidate field(s) {forgotten} are in none of "
+        "_DIGEST_SAME_NAME_FIELDS/_DIGEST_RENAMED_FIELDS/_DIGEST_EXCLUDED_FIELDS "
+        "above - add each new field to build_snapshot's candidate dict and to "
+        "the matching map here, or to _DIGEST_EXCLUDED_FIELDS with a reason if "
+        "it's genuinely internal-only."
+    )
+
     quote = market_quote(
         liquidity=50_000, market_cap=100_000, buys=60, sells=20,
         volume=15_000, change=15,
     )
     book = RecommendationBook(pool_size=10, ttl_seconds=60)
     book.add(quote, CoinIntelligence().score(quote), now=0)
-    snapshot = build_snapshot(book.ranked(), pending_count=0, poll_seconds=15)
-    assert snapshot["candidates"][0]["pair_address"] == "Pair111"
+    candidate = book.ranked()[0]
+    digest = build_snapshot(book.ranked(), pending_count=0, poll_seconds=15)["candidates"][0]
+    for field in _DIGEST_SAME_NAME_FIELDS:
+        assert digest[field] == getattr(candidate, field), field
+    for field, digest_key in _DIGEST_RENAMED_FIELDS.items():
+        assert digest_key in digest, digest_key
 
 
 def test_pullback_zone_is_anchored_and_alerts_once() -> None:
