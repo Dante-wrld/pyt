@@ -1118,6 +1118,8 @@ def test_portfolio_owned_exit_can_exceed_five_dollars_without_bypassing_guards(t
             return True
         def complete_auto_sell_execution(self, **kwargs):
             pass
+        def record_auto_buy_sale(self, **kwargs):
+            pass
 
     result = asyncio.run(execute_live_exit(
         ledger=book, agent="portfolio-v1", mint=MINT, symbol="TEST",
@@ -1168,6 +1170,8 @@ def test_full_liquidation_of_a_crashed_position_clears_the_two_dollar_floor(tmp_
         def begin_auto_sell_execution(self, **kwargs):
             return True
         def complete_auto_sell_execution(self, **kwargs):
+            pass
+        def record_auto_buy_sale(self, **kwargs):
             pass
 
     result = asyncio.run(execute_live_exit(
@@ -1265,7 +1269,63 @@ def _sell_store_stub():
         connection=_no_legacy_claim(),
         begin_auto_sell_execution=lambda **kwargs: True,
         complete_auto_sell_execution=lambda **kwargs: None,
+        record_auto_buy_sale=lambda **kwargs: None,
     )
+
+
+def test_confirmed_sell_syncs_back_to_the_auto_buy_position_ledger(tmp_path, monkeypatch):
+    """Observed live: CRAFTY was bought through the separate auto-buy-discovery
+    pipeline (its own auto_buy_positions/owned_holdings rows in the shared
+    database), then partially sold through this exit path - but this path only
+    ever wrote to auto_sell_executions and its own trial ledger, never back to
+    auto_buy_positions. That row was left showing the full original amount
+    forever after, so the auto-buy-discovery side had no idea ~37% of the
+    position was already gone. Every confirmed sell here must now also call
+    record_auto_buy_sale with the verified on-chain sold/proceeds amounts."""
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    book = LiveTrialLedger(tmp_path / "trial.sqlite")
+    book.start()
+    wallet = "synthetic-owner"
+    recorded = []
+
+    class Store:
+        connection = _no_legacy_claim()
+        def begin_auto_sell_execution(self, **kwargs):
+            return True
+        def complete_auto_sell_execution(self, **kwargs):
+            pass
+        def record_auto_buy_sale(self, **kwargs):
+            recorded.append(kwargs)
+
+    result = asyncio.run(execute_live_exit(
+        ledger=book, agent="portfolio-v1", mint=MINT, symbol="TEST",
+        decision="SELL", position_value_usd=12, quote_age_seconds=2,
+        liquidity_usd=60_000, fraction=1, rpc=SimpleNamespace(
+            token_balance=lambda owner, mint: _sell_balance(100_000_000),
+            get_transaction=lambda signature: _sell_transaction(wallet, 100_000_000, 10_000_000),
+        ), seller=_sell_seller(), store=Store(), wallet=wallet,
+        current_exit_allowed=lambda: True, reinvest_pct=25.0,
+    ))
+    assert result["proceeds_usdc_raw"] == 10_000_000
+    assert recorded == [{
+        "token_address": MINT, "sold_raw": 100_000_000,
+        "proceeds_usdc_raw": 10_000_000, "reinvest_pct": 25.0,
+        "managed_complete": True,
+    }]
+    book.close()
+
+
+async def _sell_balance(raw_amount):
+    return SimpleNamespace(raw_amount=raw_amount, decimals=6)
+
+
+async def _sell_transaction(wallet, token_amount, usdc_amount):
+    def row(index, mint, amount):
+        return {"accountIndex": index, "mint": mint, "owner": wallet,
+                "uiTokenAmount": {"amount": str(amount)}}
+    return {"meta": {"err": None,
+            "preTokenBalances": [row(0, MINT, token_amount)],
+            "postTokenBalances": [row(1, USDC_MINT, usdc_amount)]}}
 
 
 def test_sell_balance_drop_after_reservation_reconciles_instead_of_halting(tmp_path, monkeypatch):
@@ -1402,6 +1462,9 @@ def test_a_different_trial_session_can_still_sell_a_mint_the_last_session_claime
             return True
 
         def complete_auto_sell_execution(self, **kwargs):
+            pass
+
+        def record_auto_buy_sale(self, **kwargs):
             pass
 
     shared_store = SharedMainStore()

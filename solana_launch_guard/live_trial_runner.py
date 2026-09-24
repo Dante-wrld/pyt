@@ -719,6 +719,7 @@ async def execute_live_exit(
     max_price_impact_pct: float = 8.0,
     max_slippage_bps: int = 1500,
     stage_key: str = "",
+    reinvest_pct: float = 0.0,
 ) -> dict:
     """One owned-token exit; new-buy cap is inapplicable to existing holdings."""
     if not SOLANA_ADDRESS.fullmatch(mint) or agent not in {"hunter-v1", "copy-v1", "portfolio-v1"}:
@@ -924,6 +925,21 @@ async def execute_live_exit(
             raise TrialHalted("on-chain token and USDC changes differ from sell receipt")
         store.complete_auto_sell_execution(event_key=key, signature=sale.signature,
                                             next_stage=plan.stage + 1)
+        # This exit path manages positions from the wallet-scan (portfolio-v1)
+        # and hunter-v1 ledgers, but a sold mint may *also* have an open
+        # auto_buy_positions row from the separate auto-buy-discovery
+        # pipeline (its own capital pool, tracked in the same database). That
+        # row's remaining_raw/owned_holdings never update on their own - only
+        # record_auto_buy_sale does that - so without this call a token sold
+        # here (fully or partially) leaves auto-buy-discovery's bookkeeping
+        # believing it still holds the full original amount. record_auto_buy_sale
+        # itself no-ops when no OPEN row exists for this mint, so this is safe
+        # for every position this exit path already handles correctly.
+        store.record_auto_buy_sale(
+            token_address=mint, sold_raw=-token_delta,
+            proceeds_usdc_raw=usdc_delta, reinvest_pct=reinvest_pct,
+            managed_complete=is_full_liquidation,
+        )
         ledger.confirm_sell(intent=key, signature=sale.signature,
                             quantity_raw=-token_delta,
                             proceeds_cents=usdc_delta // 10_000,

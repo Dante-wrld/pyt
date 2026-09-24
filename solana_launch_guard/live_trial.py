@@ -510,6 +510,7 @@ async def cycle(*, ledger: LiveTrialLedger, settings: Settings, rpc: SolanaRpc,
                 max_slippage_bps=active_max_slippage,
                 current_exit_allowed=lambda mint=mint: _eligible_exit(_read_portfolio(), mint),
                 current_decision=lambda mint=mint: _signal_decision(_read_portfolio(), mint),
+                reinvest_pct=settings.auto_buy_reinvest_profit_pct,
             )
             await _track_exit_block_streak(
                 settings, exit_block_streaks, owner=owner, mint=mint,
@@ -618,6 +619,7 @@ async def cycle(*, ledger: LiveTrialLedger, settings: Settings, rpc: SolanaRpc,
                                  settings.auto_sell_min_value_usd),
             max_price_impact_pct=active_max_impact,
             max_slippage_bps=active_max_slippage,
+            reinvest_pct=settings.auto_buy_reinvest_profit_pct,
         )
         await _track_exit_block_streak(
             settings, exit_block_streaks, owner=position["agent"],
