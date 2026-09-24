@@ -642,21 +642,18 @@ async def cycle(*, ledger: LiveTrialLedger, settings: Settings, rpc: SolanaRpc,
         ledger.log(agent="hunter-v1", mint="", state="BUY_BLOCKED", reason=reason)
         return
     recommendations = _read_recommendations()
-    # candle_scanner intentionally NOT passed here for now (2026-09-24,
-    # user is awake and actively supervising) - it's the newest MOMENTUM
-    # BUY gate, the one with the least evidence behind it so far (the one
-    # real confirmation tonight, PINF, fired right at a local top rather
-    # than mid-continuation), and it was the dominant blocker across
-    # tonight's candidates. Everything else that makes this re-enable more
-    # robust than the version that lost $17 over 17/18 trades - the $2
-    # fixed size, the 2-poll confirmation, assess_entry's stricter
-    # momentum bar, the already-held check, the honeypot/exit-liquidity
-    # check - stays in place. Re-add candle_scanner=candle_scanner here to
-    # bring the gate back.
+    # Re-enabled 2026-09-24 after a supervised trial run with it off: the
+    # one MOMENTUM BUY that fired while it was disabled (GIFT, a pool only
+    # ~4.5 minutes old at entry) went from +3.38% to a near-total loss
+    # within minutes - not proof this gate specifically would have caught
+    # it, but exactly the shape of risk it exists to filter, and no
+    # evidence surfaced that the gate itself was the real bottleneck (the
+    # honeypot-floor bug and the buy-path signer gap were).
     decision = await decide_hunter_entry(recommendations, model=model, ledger=ledger,
                                          buy_zone_skip_reasons=buy_zone_skip_reasons,
                                          chase_first_target=chase_first_target,
                                          current_snapshot=_read_recommendations,
+                                         candle_scanner=candle_scanner,
                                          rpc=rpc, wallet=wallet)
     if decision is not None:
         active_buyer = (momentum_buyer if decision.candidate.get("decision") == "MOMENTUM BUY"
