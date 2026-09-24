@@ -3239,6 +3239,55 @@ def test_auto_buy_discovery_rejects_a_candidate_collapsed_from_its_starting_pric
     assert auto_buy_discovery_rejection(candidate, config, now=20) is None
 
 
+def test_auto_buy_discovery_rejects_a_candidate_collapsed_from_its_peak(
+    tmp_path: Path,
+) -> None:
+    """Observed live: "CRAFTY" pumped well above its own launch price (so
+    the starting-price floor never applies) and was bought at 45% of its
+    own recorded peak - a pump that had already substantially reversed by
+    the time of entry, and never recovered. Every legitimate pullback entry
+    elsewhere in this system buys within a few percent of peak, so a
+    sharp drawdown from peak needs its own explicit floor too."""
+    quote = market_quote(
+        liquidity=60_000,
+        market_cap=100_000,
+        buys=60,
+        sells=20,
+        volume=15_000,
+        change=5,
+    )
+    book = RecommendationBook(pool_size=10, ttl_seconds=60)
+    candidate = book.add(quote, CoinIntelligence().score(quote), now=0)
+    assert candidate is not None
+    book.update(quote, now=5)
+    book.update(quote, now=10)
+    assert candidate.decision == "EARLY BUY"
+
+    config = settings(
+        tmp_path / "discovery.db",
+        auto_buy_enabled=True,
+        auto_buy_discovery=True,
+        auto_buy_discovery_min_score=70,
+        auto_buy_discovery_min_liquidity_usd=50_000,
+        auto_buy_signal_max_age_seconds=30,
+    )
+    assert auto_buy_discovery_rejection(candidate, config, now=20) is None
+
+    # Pumped well above its launch price, then reversed hard - current
+    # price stays above initial_price throughout, so only the peak-based
+    # floor can catch this shape.
+    candidate.peak_price = candidate.initial_price * 2.5
+    candidate.current_price = candidate.peak_price * 0.45
+    assert candidate.current_price > candidate.initial_price
+    assert auto_buy_discovery_rejection(
+        candidate, config, now=20
+    ) == "price has collapsed too far below its recent peak"
+
+    # A real, more modest pullback from peak still clears the gate.
+    candidate.current_price = candidate.peak_price * 0.9
+    assert auto_buy_discovery_rejection(candidate, config, now=20) is None
+
+
 def test_auto_buy_discovery_arms_a_new_qualified_mint(
     tmp_path: Path,
 ) -> None:

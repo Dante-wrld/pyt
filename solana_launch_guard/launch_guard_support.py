@@ -43,6 +43,23 @@ def auto_buy_discovery_rejection(
         # down, so this needs its own explicit floor.
         return "price has collapsed too far below its starting price"
     if (
+        candidate.peak_price > 0
+        and candidate.current_price
+        < candidate.peak_price
+        * settings.auto_buy_discovery_min_price_vs_peak_pct
+        / 100
+    ):
+        # Observed live: "CRAFTY" was bought at 45% of its own recorded
+        # peak - well above its launch price (this pumped hard first), so
+        # the starting-price floor above never applies, but the pump had
+        # already reversed sharply by the time of entry and never
+        # recovered. Every legitimate pullback entry elsewhere in this
+        # system buys within a few percent of peak (hunter-v1's BUY ZONE
+        # typically enters a 4-6% pullback), so a 50% floor here is a wide
+        # margin above any real dip-buying strategy and only screens out
+        # a pump that has already substantially failed.
+        return "price has collapsed too far below its recent peak"
+    if (
         candidate.entry_confirmation_count
         < candidate.entry_confirmation_required
     ):

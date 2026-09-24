@@ -230,6 +230,7 @@ class Settings:
     auto_buy_discovery_min_score: int = 70
     auto_buy_discovery_min_liquidity_usd: float = 50_000.0
     auto_buy_discovery_min_price_vs_initial_pct: float = 20.0
+    auto_buy_discovery_min_price_vs_peak_pct: float = 50.0
     auto_buy_signal_max_age_seconds: float = 30.0
     auto_buy_watch_max_seconds: float = 86_400.0
     auto_buy_watch_max_candidates: int = 250
@@ -550,6 +551,9 @@ class Settings:
             auto_buy_discovery_min_price_vs_initial_pct=_float(
                 "AUTO_BUY_DISCOVERY_MIN_PRICE_VS_INITIAL_PCT", 20.0
             ),
+            auto_buy_discovery_min_price_vs_peak_pct=_float(
+                "AUTO_BUY_DISCOVERY_MIN_PRICE_VS_PEAK_PCT", 50.0
+            ),
             auto_buy_signal_max_age_seconds=_float(
                 "AUTO_BUY_SIGNAL_MAX_AGE_SECONDS", 30.0
             ),
@@ -841,6 +845,11 @@ class Settings:
         if not 0 <= self.auto_buy_discovery_min_price_vs_initial_pct <= 100:
             raise ValueError(
                 "AUTO_BUY_DISCOVERY_MIN_PRICE_VS_INITIAL_PCT must be from "
+                "0 through 100"
+            )
+        if not 0 <= self.auto_buy_discovery_min_price_vs_peak_pct <= 100:
+            raise ValueError(
+                "AUTO_BUY_DISCOVERY_MIN_PRICE_VS_PEAK_PCT must be from "
                 "0 through 100"
             )
         if self.auto_buy_signal_max_age_seconds < 5:
