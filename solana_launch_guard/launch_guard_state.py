@@ -51,7 +51,6 @@ class LaunchGuardState(Protocol):
     multichain_pending_count: int
     multichain_last_result: dict[str, tuple[str, int]]
     bitquery_client: BitqueryClient | None
-    launchlab_last_result: dict[str, tuple[str, int]]
     gecko_client: GeckoTerminalClient
     solana_momentum_last_result: dict[str, tuple[str, int]]
     recommendation_console_output: bool

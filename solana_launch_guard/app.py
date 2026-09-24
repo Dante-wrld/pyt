@@ -138,7 +138,6 @@ class LaunchGuard(
                 client_id=settings.bitquery_client_id,
                 client_secret=settings.bitquery_client_secret,
             )
-        self.launchlab_last_result: dict[str, tuple[str, int]] = {}
         self.gecko_client = GeckoTerminalClient()
         self.solana_momentum_last_result: dict[str, tuple[str, int]] = {}
         self.recommendation_console_output = True

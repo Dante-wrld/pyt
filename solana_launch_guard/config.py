@@ -295,14 +295,28 @@ class Settings:
     solana_momentum_throttled_poll_seconds: float = 600.0
     bitquery_client_id: str | None = None
     bitquery_client_secret: str | None = None
-    # 240s, not the 15-20s the other feeds use: even after merging
-    # creations/trades/pools into one combined query (5 points/poll instead
-    # of 15), the Personal plan's 100k-point monthly quota was still
-    # projected to run out around 2026-10-02 - over three weeks short of
-    # the October 24 renewal - at the interval this started the night at
-    # (60s). LaunchLab's launch volume is high enough that 240s still
-    # catches meaningful activity without threatening the monthly budget.
-    launchlab_poll_seconds: float = 240.0
+    # 600s: this feed now runs a discover-then-confirm funnel rather than
+    # scoring every poll's results immediately - a broad discovery pass
+    # every launchlab_poll_seconds, and a separate targeted trim-check (see
+    # launchlab_trim_window_seconds) for anything discovered that long ago.
+    # Matching the two cadences means a mint discovered right after one
+    # poll is trim-checked at the very next one, at most 2 Bitquery calls
+    # per tick (discovery + trim, trim only when something is due) instead
+    # of scoring - and paying for - every poll's raw results unconditionally.
+    launchlab_poll_seconds: float = 600.0
+    # How long a newly discovered mint sits in the pending set before its
+    # trim-check: long enough for real price action to develop past the
+    # noisy first few minutes, short enough that a genuine mover doesn't
+    # sit unscored for too long. See launch_guard_launchlab.py.
+    launchlab_trim_window_seconds: float = 600.0
+    # A pending mint is only promoted into the shared RecommendationBook if
+    # it BOTH still scores CORE/MOONSHOT after the trim window AND has
+    # moved at least this much in price since its phase-1 baseline -
+    # score alone can pass on a token that simply sat still, and movement
+    # alone can pass on a token that's still objectively unsafe (thin
+    # liquidity, one-sided flow); requiring both is the stricter of the
+    # two options considered, chosen deliberately over score-only.
+    launchlab_trim_min_price_move_pct: float = 5.0
     # Same idea and same reason as solana_momentum_throttled_poll_seconds
     # above - LaunchLab candidates are also fresh-origin only, so nothing
     # is actually missed by waiting longer here: no fresh candidate can be
@@ -674,7 +688,13 @@ class Settings:
             ),
             bitquery_client_id=(os.getenv("BITQUERY_CLIENT_ID") or None),
             bitquery_client_secret=(os.getenv("BITQUERY_CLIENT_SECRET") or None),
-            launchlab_poll_seconds=_float("LAUNCHLAB_POLL_SECONDS", 240.0),
+            launchlab_poll_seconds=_float("LAUNCHLAB_POLL_SECONDS", 600.0),
+            launchlab_trim_window_seconds=_float(
+                "LAUNCHLAB_TRIM_WINDOW_SECONDS", 600.0
+            ),
+            launchlab_trim_min_price_move_pct=_float(
+                "LAUNCHLAB_TRIM_MIN_PRICE_MOVE_PCT", 5.0
+            ),
             launchlab_throttled_poll_seconds=_float(
                 "LAUNCHLAB_THROTTLED_POLL_SECONDS", 1800.0
             ),
@@ -858,6 +878,12 @@ class Settings:
             raise ValueError(
                 "AUTO_BUY_DISCOVERY_MIN_PRICE_VS_PEAK_PCT must be from "
                 "0 through 100"
+            )
+        if self.launchlab_trim_window_seconds <= 0:
+            raise ValueError("LAUNCHLAB_TRIM_WINDOW_SECONDS must be above 0")
+        if not 0 <= self.launchlab_trim_min_price_move_pct <= 100:
+            raise ValueError(
+                "LAUNCHLAB_TRIM_MIN_PRICE_MOVE_PCT must be from 0 through 100"
             )
         if self.auto_buy_signal_max_age_seconds < 5:
             raise ValueError(

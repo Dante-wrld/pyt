@@ -1,5 +1,6 @@
 """BitqueryClient: OAuth2 token refresh and LaunchLab discovery/trade
 parsing, against real response shapes captured live 2026-09-23."""
+import asyncio
 import datetime
 import io
 import json
@@ -265,6 +266,59 @@ def test_recent_launchlab_snapshot_skips_a_creation_row_missing_the_mint_account
     }))
     client = BitqueryClient("id", "secret")
     assert client._recent_launchlab_snapshot(20, 50, 50) == ([], [], [])
+
+
+def test_launchlab_activity_for_mints_short_circuits_on_an_empty_list(monkeypatch):
+    """The trim-check's own caller never has a due mint until 600s of
+    discovery have passed, so an empty list is the routine case, not an
+    edge case - it must never spend a Bitquery call finding nothing to ask."""
+    calls = []
+    monkeypatch.setattr("urllib.request.urlopen", lambda *a, **k: calls.append(1))
+    client = BitqueryClient("id", "secret")
+    result = asyncio.run(client.launchlab_activity_for_mints([]))
+    assert result == ([], [])
+    assert calls == []
+
+
+def test_launchlab_activity_for_mints_filters_by_the_given_mint_list(monkeypatch):
+    """The whole point of this call over recent_launchlab_snapshot: fresh
+    data for a SPECIFIC set of already-known mints, not another broad
+    recent-N window that could crowd them out with unrelated launch
+    volume in the gap since they were first seen."""
+    combined = json.dumps({"data": {"Solana": {
+        "trades": [{
+            "Block": {"Time": "2026-09-23T08:27:34Z"},
+            "Trade": {
+                "Currency": {"MintAddress": "HTmQz7My6MehV7bjhJ6jde8nDND1yvsz68d24LP7YgUQ", "Symbol": "GP"},
+                "PriceInUSD": 0.5,
+                "Side": {"Type": "buy", "AmountInUSD": "10"},
+            },
+        }],
+        "pools": [],
+    }}}).encode()
+    seen_queries = []
+
+    def urlopen(request, timeout=None, context=None):
+        url = request.full_url if hasattr(request, "full_url") else request
+        if url == TOKEN_URL:
+            return io.BytesIO(TOKEN_BODY)
+        if url == GRAPHQL_URL:
+            seen_queries.append(json.loads(request.data)["query"])
+            return io.BytesIO(combined)
+        raise AssertionError(f"unexpected URL: {url}")
+
+    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+    client = BitqueryClient("id", "secret")
+    trades, pools = asyncio.run(client.launchlab_activity_for_mints(
+        ["HTmQz7My6MehV7bjhJ6jde8nDND1yvsz68d24LP7YgUQ", "MukLDtJ8Cx9DxLbeyLRSWPSposTMWuwHANbuaudpump"],
+    ))
+    assert len(trades) == 1 and trades[0].price_usd == 0.5
+    assert len(seen_queries) == 1
+    query = seen_queries[0]
+    assert "HTmQz7My6MehV7bjhJ6jde8nDND1yvsz68d24LP7YgUQ" in query
+    assert "MukLDtJ8Cx9DxLbeyLRSWPSposTMWuwHANbuaudpump" in query
+    # No creations lookup - these mints are already known from discovery.
+    assert "Instructions" not in query
 
 
 MINT = "A" * 44

@@ -191,6 +191,21 @@ class BitqueryClient:
             self._recent_launchlab_snapshot, creations_limit, trades_limit, pools_limit
         )
 
+    async def launchlab_activity_for_mints(
+        self, mints: list[str], *, trades_limit: int = 50, pools_limit: int = 50,
+    ) -> tuple[list[LaunchLabTrade], list[LaunchLabPool]]:
+        """Trades and pool reserves for a specific, already-known set of
+        mints - the trim-check half of the discover-then-confirm feed: no
+        creations lookup (these mints are already known), filtered to just
+        this list instead of the broad recent-N window, so a mint's trades
+        aren't crowded out by unrelated launch volume in the gap since it
+        was first seen."""
+        if not mints:
+            return [], []
+        return await asyncio.to_thread(
+            self._launchlab_activity_for_mints, mints, trades_limit, pools_limit
+        )
+
     def _access_token(self) -> str:
         now = time.monotonic()
         if self._token is not None and now < self._token_expires_at:
@@ -314,6 +329,54 @@ class BitqueryClient:
             if parsed_pool is not None:
                 pools.append(parsed_pool)
         return creations, trades, pools
+
+    def _launchlab_activity_for_mints(
+        self, mints: list[str], trades_limit: int, pools_limit: int,
+    ) -> tuple[list[LaunchLabTrade], list[LaunchLabPool]]:
+        mint_list = ", ".join(f'"{m}"' for m in mints)
+        query = f"""
+        query {{
+          Solana {{
+            trades: DEXTradeByTokens(
+              limit: {{count: {int(trades_limit)}}}
+              orderBy: {{descending: Block_Time}}
+              where: {{
+                Trade: {{
+                  Dex: {{ProtocolName: {{is: "{LAUNCHLAB_PROTOCOL_NAME}"}}}}
+                  Currency: {{MintAddress: {{in: [{mint_list}]}}}}
+                }}
+              }}
+            ) {{
+              {_TRADE_FIELDS}
+            }}
+            pools: DEXPools(
+              limit: {{count: {int(pools_limit)}}}
+              orderBy: {{descending: Block_Time}}
+              where: {{
+                Pool: {{
+                  Dex: {{ProtocolName: {{is: "{LAUNCHLAB_PROTOCOL_NAME}"}}}}
+                  Market: {{BaseCurrency: {{MintAddress: {{in: [{mint_list}]}}}}}}
+                }}
+              }}
+            ) {{
+              {_POOL_FIELDS}
+            }}
+          }}
+        }}
+        """
+        data = self._graphql(query)
+        solana = data.get("Solana", {}) or {}
+        trades: list[LaunchLabTrade] = []
+        for row in solana.get("trades", []) or []:
+            parsed_trade = _parse_trade(row)
+            if parsed_trade is not None:
+                trades.append(parsed_trade)
+        pools: list[LaunchLabPool] = []
+        for row in solana.get("pools", []) or []:
+            parsed_pool = _parse_pool(row)
+            if parsed_pool is not None:
+                pools.append(parsed_pool)
+        return trades, pools
 
 
 def _parse_pool_creation(row: dict[str, Any]) -> LaunchLabPoolCreation | None:
