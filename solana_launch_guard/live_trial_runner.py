@@ -753,9 +753,19 @@ async def execute_live_exit(
     if not current_exit_allowed() or _exit_signal_stale():
         raise TrialHalted("EXIT BLOCKED: exit signal expired or changed before reservation")
     ledger.assert_active()
-    if (seller.max_price_impact_pct > max_price_impact_pct
-        or seller.max_slippage_bps > max_slippage_bps):
-        raise TrialHalted("live seller exceeds guarded price impact or slippage limits")
+    # No longer asserting seller.max_slippage_bps/max_price_impact_pct <=
+    # the per-call guard here: that held when every caller only ever passed
+    # a guard at least as loose as the seller's own fixed baseline (the
+    # emergency seller for a wider guard, the normal seller otherwise), so
+    # a violation could only mean the wrong seller object was passed in.
+    # _profit_protecting_slippage_bps legitimately breaks that assumption -
+    # for a small unrealized gain it computes a guard TIGHTER than the
+    # normal seller's fixed 1500bps baseline (observed live: OTC halted
+    # the whole trial here on a routine ~3% gain). The seller object's own
+    # baseline only bounds what preflight() is willing to quote; the real
+    # enforcement against a too-slippy quote is the quoted_slippage_bps/
+    # quoted_price_impact_pct check just below, against this call's own
+    # (possibly tighter) guard - that still runs unconditionally.
     approval = _live_arbiter(max_quote_age_seconds=30).evaluate_live_exit(
         position_value_usd * fraction,
         RiskSnapshot(mode="live", current_position_usd=position_value_usd,

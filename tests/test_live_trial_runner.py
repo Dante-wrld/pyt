@@ -1315,6 +1315,39 @@ def test_confirmed_sell_syncs_back_to_the_auto_buy_position_ledger(tmp_path, mon
     book.close()
 
 
+def test_a_guard_tighter_than_the_sellers_own_baseline_still_exits(tmp_path, monkeypatch):
+    """Observed live: OTC halted the entire trial on a routine ~3% unrealized
+    gain. _profit_protecting_slippage_bps had (correctly) computed a guard
+    tighter than the normal seller's fixed 1500bps baseline for that small a
+    gain, and a since-removed early check treated any guard tighter than the
+    seller's own baseline as a sign of a misconfigured/wrong seller object -
+    true before profit-protecting slippage existed, but no longer, since that
+    feature intentionally passes a tighter-than-baseline guard by design. The
+    real enforcement (the quoted-slippage-vs-guard check just below) must
+    still be the only thing standing between a real quote and the guard."""
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    book = LiveTrialLedger(tmp_path / "trial.sqlite")
+    book.start()
+    wallet = "synthetic-owner"
+
+    # The seller's own fixed baseline (300bps) is wider than the guard this
+    # call passes (150bps) - exactly the shape _profit_protecting_slippage_bps
+    # produces for a small gain. The quoted slippage (100bps, from
+    # _sell_preflight) is still within the tighter 150bps guard, so this
+    # must succeed rather than halt before ever requesting a quote.
+    result = asyncio.run(execute_live_exit(
+        ledger=book, agent="hunter-v1", mint=MINT, symbol="TEST",
+        decision="SELL", position_value_usd=12, quote_age_seconds=2,
+        liquidity_usd=60_000, fraction=1, rpc=SimpleNamespace(
+            token_balance=lambda owner, mint: _sell_balance(100_000_000),
+            get_transaction=lambda signature: _sell_transaction(wallet, 100_000_000, 10_000_000),
+        ), seller=_sell_seller(), store=_sell_store_stub(), wallet=wallet,
+        current_exit_allowed=lambda: True, max_price_impact_pct=2, max_slippage_bps=150,
+    ))
+    assert result["proceeds_usdc_raw"] == 10_000_000
+    book.close()
+
+
 async def _sell_balance(raw_amount):
     return SimpleNamespace(raw_amount=raw_amount, decimals=6)
 
