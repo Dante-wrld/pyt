@@ -148,6 +148,7 @@ class PreparedBuy:
     quoted_slippage_bps: int | None = None
     reported_slippage_bps: int | None = None
     threshold_slippage_bps: int | None = None
+    signature_fee_payer: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1042,6 +1043,10 @@ class SolanaAutoBuyer:
             quoted_slippage_bps=quoted_slippage_bps,
             reported_slippage_bps=reported_slippage_bps,
             threshold_slippage_bps=threshold_slippage_bps,
+            signature_fee_payer=(
+                str(order["signatureFeePayer"])
+                if order.get("signatureFeePayer") else None
+            ),
         )
 
     async def execute(self, prepared: PreparedBuy) -> BuyReceipt:
@@ -1079,10 +1084,39 @@ class SolanaAutoBuyer:
         intent: BuyIntent,
         simulator: TransactionSimulator,
     ) -> BuyPreflightReceipt:
-        prepared = await self.prepare(
-            intent, exclude_routers=("jupiterz",)
-        )
-        signed = self.signer.sign(prepared.transaction)
+        # Mirrors SolanaAutoSeller.preflight's retry: JupiterZ's RFQ router
+        # requires a market-maker signature only added at execute, so it's
+        # excluded up front. Confirmed live 2026-09-24 (CATE): excluding
+        # JupiterZ alone isn't always enough - a different router's quote
+        # can also require a signer this wallet doesn't control, and
+        # without a retry that raised uncaught, halting the entire trial
+        # over one candidate's route instead of just skipping it. Requote
+        # once per additional offending router, same bound (3 attempts) as
+        # the sell side, so the two paths can't silently drift apart.
+        excluded: tuple[str, ...] = ("jupiterz",)
+        for _ in range(3):
+            prepared = await self.prepare(intent, exclude_routers=excluded)
+            if (
+                prepared.signature_fee_payer is not None
+                and prepared.signature_fee_payer != self.signer.public_key
+            ):
+                raise AdditionalSignerError(
+                    "Jupiter returned a sponsored transaction requiring a "
+                    "second signature, even with JupiterZ excluded; this "
+                    "wallet cannot fully sign or signature-verify its buy "
+                    "preflight. Check the wallet's SOL balance and fund its "
+                    "network fees before retrying. No transaction broadcast."
+                )
+            try:
+                signed = self.signer.sign(prepared.transaction)
+                break
+            except AdditionalSignerError:
+                router = (prepared.router or "").strip().lower()
+                if not router or router in excluded or len(excluded) >= 3:
+                    raise
+                excluded += (router,)
+        else:
+            raise AdditionalSignerError("no fully signed alternative quote")
         simulation = await simulator.simulate_transaction(signed)
         logs = simulation.get("logs")
         units = simulation.get("unitsConsumed")
