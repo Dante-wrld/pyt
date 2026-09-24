@@ -109,6 +109,50 @@ def _should_escalate_to_emergency(*, pnl_pct: float | None, block_streak: int,
     return pnl_pct <= 0 and block_streak >= EMERGENCY_BLOCK_STREAK
 
 
+# A TAKE_PARTIAL/PROTECT PROFIT signal that can never even get an attempt
+# through for several consecutive cycles - the model's proposal silently
+# rejected by _sell_choice, or a valid one blocked by _guarded_exit - is
+# worth taking as a full exit instead of continuing to retry the same
+# partial size indefinitely. Confirmed live 2026-09-24 (41RgtUg6VDvA): six
+# consecutive TAKE_PARTIAL proposals over ~6 minutes on a position that ran
+# from +54% to +80%, none of them ever reaching even a RESERVED order.
+# Deliberately separate from _should_escalate_to_emergency, which never
+# fires for a profitable position by design (a winning position waiting for
+# a better fill has little to lose) - this is not that: the model has
+# already decided partial profit-taking is warranted right now, so if even
+# that smaller sale can never clear, there is no reason to expect a repeat
+# of the identical partial to fare any better than it already has.
+TAKE_PARTIAL_STUCK_ESCALATE_STREAK = 3
+
+
+def _resolve_take_partial_decision(
+    *, ledger: LiveTrialLedger, agent: str, mint: str,
+    sell_choice: tuple[str, float] | None, is_partial_signal: bool,
+    streaks: dict[str, int],
+) -> tuple[str, float] | None:
+    if not is_partial_signal:
+        return sell_choice
+    streak = streaks.get(mint, 0)
+    if streak >= TAKE_PARTIAL_STUCK_ESCALATE_STREAK:
+        ledger.log(agent=agent, mint=mint, state="TAKE_PARTIAL_ESCALATED",
+                   reason=f"{streak} consecutive cycles unable to execute a partial "
+                          "sell; taking the full remaining position instead of "
+                          "continuing to retry the same partial size")
+        return "SELL", 1.0
+    return sell_choice
+
+
+def _track_take_partial_stuck_streak(
+    streaks: dict[str, int], *, mint: str, is_partial_signal: bool, executed: bool,
+) -> None:
+    if not is_partial_signal:
+        return
+    if executed:
+        streaks.pop(mint, None)
+    else:
+        streaks[mint] = streaks.get(mint, 0) + 1
+
+
 class BoundedTrialModel:
     """Persist a finite model-request cap before spending any API credits."""
 
@@ -408,6 +452,7 @@ async def cycle(*, ledger: LiveTrialLedger, settings: Settings, rpc: SolanaRpc,
                 oracle: DexScreenerOracle,
                 candle_scanner: MarketStructureScanner,
                 exit_block_streaks: dict[str, int],
+                take_partial_stuck_streaks: dict[str, int],
                 buy_zone_skip_reasons: dict[str, str],
                 chase_first_target: dict[str, float],
                 regrowth_skip_reasons: dict[str, str],
@@ -473,6 +518,7 @@ async def cycle(*, ledger: LiveTrialLedger, settings: Settings, rpc: SolanaRpc,
                 pnl_pct = float(row["pnl_pct"]) if row.get("pnl_pct") is not None else None
             except (TypeError, ValueError):
                 pnl_pct = None
+            is_partial_signal = signal in {"TAKE PARTIAL", "PROTECT PROFIT"}
             emergency = _should_escalate_to_emergency(
                 pnl_pct=pnl_pct, block_streak=exit_block_streaks.get(mint, 0),
             )
@@ -511,7 +557,20 @@ async def cycle(*, ledger: LiveTrialLedger, settings: Settings, rpc: SolanaRpc,
                 permitted_fraction = (settings.auto_sell_take_partial_fraction if signal == "TAKE PARTIAL"
                                       else settings.auto_sell_protect_profit_fraction)
                 sell_choice = _sell_choice(raw, mint, value, signal, permitted_fraction)
+                if sell_choice is None and is_partial_signal:
+                    ledger.log(agent="portfolio-v1", mint=mint, state="TAKE_PARTIAL_BLOCKED",
+                               reason=f"model proposal did not resolve to an executable partial "
+                                      f"sell (action={raw.get('action')!r} confidence={raw.get('confidence')!r} "
+                                      f"requested_usd={raw.get('requested_usd')!r})")
+                sell_choice = _resolve_take_partial_decision(
+                    ledger=ledger, agent="portfolio-v1", mint=mint, sell_choice=sell_choice,
+                    is_partial_signal=is_partial_signal, streaks=take_partial_stuck_streaks,
+                )
                 if sell_choice is None:
+                    _track_take_partial_stuck_streak(
+                        take_partial_stuck_streaks, mint=mint,
+                        is_partial_signal=is_partial_signal, executed=False,
+                    )
                     continue
                 chosen = sell_choice
                 active_seller = seller
@@ -540,6 +599,10 @@ async def cycle(*, ledger: LiveTrialLedger, settings: Settings, rpc: SolanaRpc,
             await _track_exit_block_streak(
                 settings, exit_block_streaks, owner=owner, mint=mint,
                 blocked=result is None,
+            )
+            _track_take_partial_stuck_streak(
+                take_partial_stuck_streaks, mint=mint,
+                is_partial_signal=is_partial_signal, executed=result is not None,
             )
             if result is None:
                 continue
@@ -577,6 +640,7 @@ async def cycle(*, ledger: LiveTrialLedger, settings: Settings, rpc: SolanaRpc,
         stage_key = ""
         partial_limit = 1.0
         emergency = False
+        is_partial_signal = review["state"] == "TAKE_PARTIAL"
         if review["state"] == "TAKE_PARTIAL":
             if not marked["principal_recovered"]:
                 stage_key = "PRINCIPAL"
@@ -617,8 +681,27 @@ async def cycle(*, ledger: LiveTrialLedger, settings: Settings, rpc: SolanaRpc,
                          "fresh_quote": market, "reversal_review": review,
                          "constraint": "Choose SELL for EXIT/EMERGENCY_EXIT or TAKE_PARTIAL for TAKE_PARTIAL, or HOLD. No buys."})
             sell_choice = _sell_choice(raw, position["mint"], current_value, review["state"], partial_limit)
+            if sell_choice is None and is_partial_signal:
+                ledger.log(agent=position["agent"], mint=position["mint"], state="TAKE_PARTIAL_BLOCKED",
+                           reason=f"model proposal did not resolve to an executable partial "
+                                  f"sell (action={raw.get('action')!r} confidence={raw.get('confidence')!r} "
+                                  f"requested_usd={raw.get('requested_usd')!r})")
+            sell_choice = _resolve_take_partial_decision(
+                ledger=ledger, agent=position["agent"], mint=position["mint"],
+                sell_choice=sell_choice, is_partial_signal=is_partial_signal,
+                streaks=take_partial_stuck_streaks,
+            )
             if sell_choice is None:
+                _track_take_partial_stuck_streak(
+                    take_partial_stuck_streaks, mint=position["mint"],
+                    is_partial_signal=is_partial_signal, executed=False,
+                )
                 continue
+            if sell_choice == ("SELL", 1.0) and is_partial_signal:
+                # An escalated full exit is no longer a partial-profit stage -
+                # execute_live_exit rejects a non-empty stage_key on any
+                # decision other than TAKE_PARTIAL.
+                stage_key = ""
             chosen = sell_choice
             active_seller = seller
             active_max_impact = min(8, settings.auto_sell_max_price_impact_pct)
@@ -649,6 +732,10 @@ async def cycle(*, ledger: LiveTrialLedger, settings: Settings, rpc: SolanaRpc,
         await _track_exit_block_streak(
             settings, exit_block_streaks, owner=position["agent"],
             mint=position["mint"], blocked=result is None,
+        )
+        _track_take_partial_stuck_streak(
+            take_partial_stuck_streaks, mint=position["mint"],
+            is_partial_signal=is_partial_signal, executed=result is not None,
         )
         if result is None:
             continue
@@ -753,6 +840,7 @@ async def supervise(*, interval_seconds: int = 30) -> dict:
         candle_scanner = MarketStructureScanner()
         consecutive_cycle_failures = 0
         exit_block_streaks: dict[str, int] = {}
+        take_partial_stuck_streaks: dict[str, int] = {}
         buy_zone_skip_reasons: dict[str, str] = {}
         chase_first_target: dict[str, float] = {}
         regrowth_skip_reasons: dict[str, str] = {}
@@ -766,6 +854,7 @@ async def supervise(*, interval_seconds: int = 30) -> dict:
                             model=model, store=store, oracle=oracle,
                             candle_scanner=candle_scanner,
                             exit_block_streaks=exit_block_streaks,
+                            take_partial_stuck_streaks=take_partial_stuck_streaks,
                             buy_zone_skip_reasons=buy_zone_skip_reasons,
                             chase_first_target=chase_first_target,
                             regrowth_skip_reasons=regrowth_skip_reasons,

@@ -9,15 +9,18 @@ from solana_launch_guard.live_trial import (
     EMERGENCY_STOP_LOSS_PCT,
     EXIT_STUCK_ALERT_STREAK,
     EXIT_WARNING_MODEL_SKIP_STREAK,
+    TAKE_PARTIAL_STUCK_ESCALATE_STREAK,
     BoundedTrialModel,
     _eligible_exit,
     _exit_warning_model_call_is_redundant,
     _guarded_entry,
     _guarded_exit,
     _profit_protecting_slippage_bps,
+    _resolve_take_partial_decision,
     _sell_choice,
     _should_escalate_to_emergency,
     _track_exit_block_streak,
+    _track_take_partial_stuck_streak,
     require_exclusive_trial_flags,
 )
 from solana_launch_guard.live_trial_ledger import LiveTrialLedger, TrialHalted
@@ -116,6 +119,66 @@ def test_profit_protecting_slippage_does_not_clamp_a_tiny_gain_to_zero():
     )
     assert widened == 50
     assert widened < 500
+
+
+def test_take_partial_stuck_streak_resets_on_success_and_ignores_full_exits(tmp_path):
+    streaks: dict[str, int] = {}
+    _track_take_partial_stuck_streak(streaks, mint="mint", is_partial_signal=True, executed=False)
+    _track_take_partial_stuck_streak(streaks, mint="mint", is_partial_signal=True, executed=False)
+    assert streaks["mint"] == 2
+    _track_take_partial_stuck_streak(streaks, mint="mint", is_partial_signal=True, executed=True)
+    assert "mint" not in streaks
+    # A full EXIT/EMERGENCY_EXIT signal is not this mechanism's concern -
+    # it already has _should_escalate_to_emergency - so a non-partial
+    # signal must never touch the streak either way.
+    _track_take_partial_stuck_streak(streaks, mint="other", is_partial_signal=False, executed=False)
+    assert "other" not in streaks
+
+
+def test_take_partial_escalates_to_a_full_exit_after_the_stuck_streak(tmp_path, monkeypatch):
+    """Confirmed live 2026-09-24 (41RgtUg6VDvA): six consecutive TAKE_PARTIAL
+    proposals over ~6 minutes on a position that ran from +54% to +80%,
+    none of them ever reaching even a RESERVED order - the model kept
+    deciding a partial sell was warranted, but nothing about retrying the
+    identical partial size was going to fare any differently. Below the
+    streak, the normal (possibly None) sell_choice passes through
+    unchanged - only crossing the threshold forces a full exit."""
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    ledger = LiveTrialLedger(tmp_path / "trial.sqlite")
+    ledger.start()
+    streaks = {"mint": TAKE_PARTIAL_STUCK_ESCALATE_STREAK - 1}
+    below_threshold = _resolve_take_partial_decision(
+        ledger=ledger, agent="hunter-v1", mint="mint",
+        sell_choice=("TAKE_PARTIAL", 0.5), is_partial_signal=True, streaks=streaks,
+    )
+    assert below_threshold == ("TAKE_PARTIAL", 0.5)
+    streaks["mint"] = TAKE_PARTIAL_STUCK_ESCALATE_STREAK
+    escalated = _resolve_take_partial_decision(
+        ledger=ledger, agent="hunter-v1", mint="mint",
+        sell_choice=None, is_partial_signal=True, streaks=streaks,
+    )
+    assert escalated == ("SELL", 1.0)
+    state = ledger.db.execute(
+        "SELECT state FROM decisions WHERE mint='mint' ORDER BY at DESC LIMIT 1"
+    ).fetchone()[0]
+    assert state == "TAKE_PARTIAL_ESCALATED"
+    ledger.close()
+
+
+def test_take_partial_escalation_never_applies_to_a_non_partial_signal(tmp_path, monkeypatch):
+    """A full EXIT WARNING/EMERGENCY_EXIT signal already has its own
+    escalation path (_should_escalate_to_emergency) - this mechanism must
+    leave it alone regardless of streak, or the two would double up."""
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    ledger = LiveTrialLedger(tmp_path / "trial.sqlite")
+    ledger.start()
+    streaks = {"mint": TAKE_PARTIAL_STUCK_ESCALATE_STREAK + 5}
+    result = _resolve_take_partial_decision(
+        ledger=ledger, agent="hunter-v1", mint="mint",
+        sell_choice=None, is_partial_signal=False, streaks=streaks,
+    )
+    assert result is None
+    ledger.close()
 
 
 def test_emergency_escalation_requires_a_hard_stop_loss_plus_a_prior_block():
