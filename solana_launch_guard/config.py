@@ -295,22 +295,23 @@ class Settings:
     solana_momentum_throttled_poll_seconds: float = 600.0
     bitquery_client_id: str | None = None
     bitquery_client_secret: str | None = None
-    # 60s, not the 15-20s the other feeds use: each poll spends 3 Bitquery
-    # queries (creations/trades/pools) against a metered points quota, and a
-    # continuous 20s cadence exhausted a real quota in ~25 minutes on
-    # 2026-09-23 ("access restricted by points limit: usage quota reached").
-    # LaunchLab's launch volume is high enough that 60s still catches
-    # meaningful activity without burning through the quota this fast.
-    launchlab_poll_seconds: float = 60.0
+    # 240s, not the 15-20s the other feeds use: even after merging
+    # creations/trades/pools into one combined query (5 points/poll instead
+    # of 15), the Personal plan's 100k-point monthly quota was still
+    # projected to run out around 2026-10-02 - over three weeks short of
+    # the October 24 renewal - at the interval this started the night at
+    # (60s). LaunchLab's launch volume is high enough that 240s still
+    # catches meaningful activity without threatening the monthly budget.
+    launchlab_poll_seconds: float = 240.0
     # Same idea and same reason as solana_momentum_throttled_poll_seconds
     # above - LaunchLab candidates are also fresh-origin only, so nothing
     # is actually missed by waiting longer here: no fresh candidate can be
     # acted on until a slot frees up regardless of how often this polls.
-    # 600s (vs the 300s this started at) roughly halves Bitquery point
-    # spend during at-capacity windows on top of the query-merge savings,
-    # while staying well under a typical position's lifetime tonight
-    # (observed 3min-45min), so little is lost if capacity frees up mid-window.
-    launchlab_throttled_poll_seconds: float = 600.0
+    # 1800s: pushed further out alongside launchlab_poll_seconds's own
+    # widening, for the same monthly-budget reason - a capacity-full
+    # window is the cheapest possible time to slow down further, since
+    # nothing found there could be acted on immediately anyway.
+    launchlab_throttled_poll_seconds: float = 1800.0
     evm_wallet_address: str | None = None
     hyperliquid_address: str | None = None
     evm_wallet_poll_seconds: float = 10.0
@@ -673,9 +674,9 @@ class Settings:
             ),
             bitquery_client_id=(os.getenv("BITQUERY_CLIENT_ID") or None),
             bitquery_client_secret=(os.getenv("BITQUERY_CLIENT_SECRET") or None),
-            launchlab_poll_seconds=_float("LAUNCHLAB_POLL_SECONDS", 60.0),
+            launchlab_poll_seconds=_float("LAUNCHLAB_POLL_SECONDS", 240.0),
             launchlab_throttled_poll_seconds=_float(
-                "LAUNCHLAB_THROTTLED_POLL_SECONDS", 600.0
+                "LAUNCHLAB_THROTTLED_POLL_SECONDS", 1800.0
             ),
             evm_wallet_address=(os.getenv("EVM_WALLET_ADDRESS") or None),
             hyperliquid_address=(
