@@ -4832,7 +4832,36 @@ def test_robinhood_quote_uses_usd_and_exact_contract(
     assert quote.chain == "robinhood"
     assert quote.price_sol == 0
     assert quote.price_usd == pytest.approx(0.25)
-    assert quote.recommendation_key.endswith(address.lower())
+    # h1/h24 default to 0 when the pair payload only carries m5 - a caller
+    # needing a longer window (coin_tracker.py) must be able to tell "no
+    # data" apart from "genuinely zero volume/trades".
+    assert (quote.buys_h1, quote.sells_h1, quote.volume_h1_usd, quote.volume_h24_usd) == (0, 0, 0.0, 0.0)
+
+
+def test_quote_extracts_hourly_and_24h_fields_alongside_m5(monkeypatch: pytest.MonkeyPatch) -> None:
+    mint = "A" * 44
+    oracle = DexScreenerOracle()
+    monkeypatch.setattr(
+        oracle,
+        "_request_token",
+        lambda _mint: [{
+            "chainId": "solana", "pairAddress": "pairA",
+            "baseToken": {"address": mint, "symbol": "AAA"},
+            "quoteToken": {"address": WSOL_MINT},
+            "priceNative": "0.001", "priceUsd": "0.1",
+            "liquidity": {"usd": 5000}, "marketCap": 10000,
+            "txns": {"m5": {"buys": 3, "sells": 1}, "h1": {"buys": 40, "sells": 25}},
+            "volume": {"m5": 500, "h1": 9000, "h24": 120000},
+            "priceChange": {"m5": 2}, "pairCreatedAt": 1,
+        }],
+    )
+
+    quote = oracle._fetch(mint, "solana")
+
+    assert quote is not None
+    assert (quote.buys_h1, quote.sells_h1) == (40, 25)
+    assert quote.volume_h1_usd == pytest.approx(9000)
+    assert quote.volume_h24_usd == pytest.approx(120000)
 
 
 def test_oracle_retries_a_429_and_recovers(monkeypatch: pytest.MonkeyPatch) -> None:

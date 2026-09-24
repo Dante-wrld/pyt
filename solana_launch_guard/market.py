@@ -31,6 +31,14 @@ class MarketQuote:
     price_change_m5_pct: float | None
     chain: str = "solana"
     price_usd: float | None = None
+    # Additive, optional: only m5 was ever needed for live_trial's own
+    # decisions, so h1/h24 (present in the same DexScreener pair payload
+    # this already parses) went unextracted until a caller - coin_tracker.py
+    # - needed a longer window than five minutes to score a token's health.
+    buys_h1: int = 0
+    sells_h1: int = 0
+    volume_h1_usd: float = 0.0
+    volume_h24_usd: float = 0.0
 
     @property
     def recommendation_price(self) -> float:
@@ -397,7 +405,10 @@ class DexScreenerOracle:
             market_cap_usd = None
 
         txns_m5 = ((pair.get("txns") or {}).get("m5") or {})
+        txns_h1 = ((pair.get("txns") or {}).get("h1") or {})
         volume_m5 = (pair.get("volume") or {}).get("m5") or 0
+        volume_h1 = (pair.get("volume") or {}).get("h1") or 0
+        volume_h24 = (pair.get("volume") or {}).get("h24") or 0
         price_change_m5 = (pair.get("priceChange") or {}).get("m5")
         pair_created = pair.get("pairCreatedAt")
         try:
@@ -424,6 +435,10 @@ class DexScreenerOracle:
             sells_m5=int(txns_m5.get("sells") or 0),
             volume_m5_usd=float(volume_m5),
             price_change_m5_pct=change,
+            buys_h1=int(txns_h1.get("buys") or 0),
+            sells_h1=int(txns_h1.get("sells") or 0),
+            volume_h1_usd=float(volume_h1),
+            volume_h24_usd=float(volume_h24),
             chain=chain,
             price_usd=price_usd,
         )
