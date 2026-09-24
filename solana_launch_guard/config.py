@@ -308,14 +308,15 @@ class Settings:
     solana_momentum_throttled_poll_seconds: float = 600.0
     bitquery_client_id: str | None = None
     bitquery_client_secret: str | None = None
-    # 600s: this feed now runs a discover-then-confirm funnel rather than
+    # 600s: this feed runs a discover-then-confirm funnel rather than
     # scoring every poll's results immediately - a broad discovery pass
     # every launchlab_poll_seconds, and a separate targeted trim-check (see
     # launchlab_trim_window_seconds) for anything discovered that long ago.
-    # Matching the two cadences means a mint discovered right after one
-    # poll is trim-checked at the very next one, at most 2 Bitquery calls
-    # per tick (discovery + trim, trim only when something is due) instead
-    # of scoring - and paying for - every poll's raw results unconditionally.
+    # The loop itself wakes far more often than this (see
+    # launchlab_check_interval_seconds) so a trim-check can fire as soon as
+    # it's due, but the broad discovery call - the more expensive of the
+    # two, since it's an unconditional poll rather than a check gated on
+    # something being due - still only runs on this cadence.
     launchlab_poll_seconds: float = 600.0
     # How long a newly discovered mint sits in the pending set before its
     # trim-check: long enough for real price action to develop past the
@@ -330,6 +331,28 @@ class Settings:
     # liquidity, one-sided flow); requiring both is the stricter of the
     # two options considered, chosen deliberately over score-only.
     launchlab_trim_min_price_move_pct: float = 5.0
+    # Decouples the loop's own wake cadence from launchlab_poll_seconds -
+    # broad discovery still only runs every launchlab_poll_seconds (unchanged
+    # cost), but a pending mint's trim-check can fire as soon as it's due
+    # instead of waiting for whichever discovery tick happens to land after
+    # it. Checking "is anything due" costs nothing (a time comparison, no
+    # network call) unless something actually is, so this only adds
+    # opportunities to check sooner, not guaranteed extra Bitquery spend.
+    launchlab_check_interval_seconds: float = 60.0
+    # A mint whose discovery-time baseline already shows this many combined
+    # 5-minute buys+sells looks unusually active - give it a shorter dwell
+    # before its first trim-check instead of making it wait the full
+    # launchlab_trim_window_seconds like every other discovery.
+    launchlab_hot_min_trades: int = 15
+    launchlab_hot_trim_window_seconds: float = 90.0
+    # A mint that still scores CORE/MOONSHOT but simply hasn't moved enough
+    # yet gets one more look this far after its first trim-check, instead of
+    # being dropped outright - a candidate that's still objectively good
+    # deserves a little more patience than one that failed the safety/score
+    # bar (that one is dropped immediately, no retry). Bounded to a single
+    # retry per mint - not unbounded "keep checking until it trades", which
+    # would undo the whole reason launchlab_poll_seconds was widened.
+    launchlab_trim_retry_window_seconds: float = 300.0
     # Same idea and same reason as solana_momentum_throttled_poll_seconds
     # above - LaunchLab candidates are also fresh-origin only, so nothing
     # is actually missed by waiting longer here: no fresh candidate can be
@@ -714,6 +737,16 @@ class Settings:
             launchlab_throttled_poll_seconds=_float(
                 "LAUNCHLAB_THROTTLED_POLL_SECONDS", 1800.0
             ),
+            launchlab_check_interval_seconds=_float(
+                "LAUNCHLAB_CHECK_INTERVAL_SECONDS", 60.0
+            ),
+            launchlab_hot_min_trades=_int("LAUNCHLAB_HOT_MIN_TRADES", 15),
+            launchlab_hot_trim_window_seconds=_float(
+                "LAUNCHLAB_HOT_TRIM_WINDOW_SECONDS", 90.0
+            ),
+            launchlab_trim_retry_window_seconds=_float(
+                "LAUNCHLAB_TRIM_RETRY_WINDOW_SECONDS", 300.0
+            ),
             evm_wallet_address=(os.getenv("EVM_WALLET_ADDRESS") or None),
             hyperliquid_address=(
                 os.getenv("HYPERLIQUID_ADDRESS")
@@ -901,6 +934,14 @@ class Settings:
             raise ValueError(
                 "LAUNCHLAB_TRIM_MIN_PRICE_MOVE_PCT must be from 0 through 100"
             )
+        if self.launchlab_check_interval_seconds <= 0:
+            raise ValueError("LAUNCHLAB_CHECK_INTERVAL_SECONDS must be above 0")
+        if self.launchlab_hot_min_trades < 0:
+            raise ValueError("LAUNCHLAB_HOT_MIN_TRADES must be 0 or above")
+        if self.launchlab_hot_trim_window_seconds <= 0:
+            raise ValueError("LAUNCHLAB_HOT_TRIM_WINDOW_SECONDS must be above 0")
+        if self.launchlab_trim_retry_window_seconds <= 0:
+            raise ValueError("LAUNCHLAB_TRIM_RETRY_WINDOW_SECONDS must be above 0")
         if self.auto_buy_signal_max_age_seconds < 5:
             raise ValueError(
                 "AUTO_BUY_SIGNAL_MAX_AGE_SECONDS must be at least 5"
