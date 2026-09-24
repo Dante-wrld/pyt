@@ -102,6 +102,22 @@ def test_profit_protecting_slippage_can_tighten_a_small_gains_cap():
     assert widened == 1104  # breakeven ~1304 bps, minus the 200 bps margin
 
 
+def test_profit_protecting_slippage_does_not_clamp_a_tiny_gain_to_zero():
+    """Confirmed live 2026-09-24 (JEANCOIN): at +1.60% unrealized, breakeven
+    (~157 bps) minus the 200 bps margin goes negative - the old code
+    clamped this straight to 0 bps, a tolerance no real quote can ever
+    clear, so the position could never exit while sitting in this range.
+    It blocked three consecutive attempts on a token with $176k of
+    liquidity while the gain decayed away underneath it. The floor must
+    keep this reachable without reopening the erase-the-profit risk the
+    tightening exists to prevent (still far below the 500 bps base cap)."""
+    widened = _profit_protecting_slippage_bps(
+        gain_pct=1.60, base_slippage_bps=500, ceiling_bps=4000, margin_bps=200,
+    )
+    assert widened == 50
+    assert widened < 500
+
+
 def test_emergency_escalation_requires_a_hard_stop_loss_plus_a_prior_block():
     """A stop-loss breach alone (first attempt, no prior block) stays on the
     normal path - the immediate fresh-quote retry gets a chance first."""

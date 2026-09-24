@@ -82,6 +82,13 @@ EMERGENCY_BLOCK_STREAK = 2
 # depends on model judgment and is left untouched.
 EXIT_WARNING_MODEL_SKIP_STREAK = 5
 
+# _profit_protecting_slippage_bps's floor: without it, a small enough gain
+# (breakeven room smaller than profit_protecting_slippage_margin_bps) clamps
+# to a literal 0 bps tolerance, which no real quote can ever clear - a
+# winning position gets permanently stuck rather than merely tightly
+# guarded. See that function's docstring for the live JEANCOIN incident.
+MIN_PROFIT_PROTECTING_SLIPPAGE_BPS = 50
+
 
 def _exit_warning_model_call_is_redundant(signal: str, block_streak: int) -> bool:
     """True once an EXIT WARNING position has repeated the same obvious
@@ -281,6 +288,21 @@ def _profit_protecting_slippage_bps(
     the fill is required to still be profitable, not just break even
     exactly (which fees/rounding could tip into a small loss anyway).
 
+    A small paper gain legitimately gets a *tighter* tolerance than the base
+    cap - that's the point, not a bug (see the small-gain test below). But
+    margin_bps is a flat subtraction: once it exceeds the gain's own
+    breakeven room, the old code clamped straight to a literal 0 bps -
+    a tolerance no real quote can ever clear, so the position gets stuck
+    with no way to exit at all rather than merely a tight one. MIN_SLIPPAGE_BPS
+    floors that specific pathological case without touching the intentional
+    tightening for gains large enough to still clear it.
+
+    Confirmed live 2026-09-24 (JEANCOIN): at +1.60% unrealized (breakeven
+    ~157 bps) minus the 200 bps margin went negative and clamped to 0 bps -
+    blocking three consecutive exit attempts on a token with $176k of
+    liquidity while the gain decayed away underneath it, unable to fill at
+    any slippage at all.
+
     Confirmed live 2026-09-23 (MOLTYATT): a TAKE_PARTIAL at +155.3%
     unrealized needed ~20.01% slippage to fill and was blocked by the
     fixed 15% cap; liquidity collapsed about a minute later before a
@@ -291,7 +313,8 @@ def _profit_protecting_slippage_bps(
     if gain_pct is None or gain_pct <= 0:
         return base_slippage_bps
     breakeven_bps = (gain_pct / (100 + gain_pct)) * 10000
-    return max(0, min(ceiling_bps, int(breakeven_bps) - margin_bps))
+    widened = int(breakeven_bps) - margin_bps
+    return max(MIN_PROFIT_PROTECTING_SLIPPAGE_BPS, min(ceiling_bps, widened))
 
 
 async def _notify(settings: Settings, *, title: str, message: str) -> None:
