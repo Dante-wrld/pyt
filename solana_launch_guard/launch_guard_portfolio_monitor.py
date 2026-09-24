@@ -275,8 +275,27 @@ class PortfolioMonitorMixin(LaunchGuardState):
                 await self._monitor_loss_sales(balances_by_mint)
 
                 semaphore = asyncio.Semaphore(5)
+                # Solana holdings (the overwhelming majority - currently
+                # ~75) go through one batched tokens/v1 call instead of one
+                # /latest/dex/tokens/{mint} request each: that single-token
+                # endpoint sits on a much tighter DexScreener rate-limit
+                # bucket than the batch one, and this scan alone was
+                # generating most of this process's request volume against
+                # it (confirmed live 2026-09-24: consistent 429s from this
+                # machine's combined polling). Non-solana holdings are rare
+                # enough to keep on the old per-mint path.
+                solana_mints = [
+                    holding.token_address for holding in holdings
+                    if holding.chain == "solana"
+                ]
+                solana_quotes = (
+                    await self.oracle.quote_many(solana_mints, chain="solana")
+                    if solana_mints else {}
+                )
 
                 async def evaluate(holding: OwnedHolding):
+                    if holding.chain == "solana":
+                        return holding, solana_quotes.get(holding.token_address)
                     async with semaphore:
                         quote = await self.oracle.quote(
                             holding.token_address, chain=holding.chain

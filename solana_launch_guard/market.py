@@ -109,6 +109,59 @@ class DexScreenerOracle:
         self._cache[cache_key] = (now, result)
         return result
 
+    async def quote_many(
+        self, mints: list[str], *, chain: str = "solana"
+    ) -> dict[str, MarketQuote | None]:
+        """Batched quote lookup, for a bulk scan over many mints at once
+        (the portfolio monitor's own holdings, currently ~75 and growing).
+
+        DexScreener's public tokens/v1/{chain}/{addresses} endpoint accepts
+        up to 30 comma-separated addresses per request and sits on a
+        separate, much less restrictive rate-limit bucket than the
+        single-token /latest/dex/tokens/{mint} endpoint _fetch/quote use -
+        confirmed live 2026-09-24: the single-token endpoint was returning
+        429 on every request from this machine's combined polling volume
+        (portfolio scan + the live trial's own quote checks), while
+        tokens/v1 served the exact same pair data cleanly at the same time.
+        Batching ~75 individual requests into ~3 cuts both the request
+        count and the 429 exposure by roughly the same factor.
+
+        Reuses the same per-mint cache quote() does, so a mint already
+        fresh from an earlier call (batched or not) is served without a
+        network call, and every mint this fetches is cached afterward for
+        any other caller (e.g. the live trial's own per-position checks).
+        """
+        results: dict[str, MarketQuote | None] = {}
+        now = time.monotonic()
+        to_fetch: list[str] = []
+        for mint in mints:
+            normalized = mint if chain == "solana" else mint.lower()
+            cache_key = f"{chain}:{normalized}"
+            cached = self._cache.get(cache_key)
+            if cached and now - cached[0] <= self.cache_seconds:
+                results[mint] = cached[1]
+            else:
+                to_fetch.append(mint)
+        for start in range(0, len(to_fetch), 30):
+            batch = to_fetch[start:start + 30]
+            pairs = await asyncio.to_thread(self._request_tokens_batch, batch, chain)
+            by_mint: dict[str, list[dict[str, Any]]] = {mint: [] for mint in batch}
+            for pair in pairs:
+                base_address = str((pair.get("baseToken") or {}).get("address") or "")
+                for mint in batch:
+                    matches = (
+                        base_address == mint if chain == "solana"
+                        else base_address.casefold() == mint.casefold()
+                    )
+                    if matches:
+                        by_mint[mint].append(pair)
+            for mint in batch:
+                quote = self._select_quote(mint, by_mint[mint], chain)
+                results[mint] = quote
+                normalized = mint if chain == "solana" else mint.lower()
+                self._cache[f"{chain}:{normalized}"] = (now, quote)
+        return results
+
     async def discover_token_profiles(self, chain: str) -> tuple[str, ...]:
         return await asyncio.to_thread(self._discover_token_profiles, chain)
 
@@ -151,6 +204,34 @@ class DexScreenerOracle:
                 ) as response:
                     payload = json.load(response)
                 return list(payload.get("pairs") or [])
+            except urllib.error.HTTPError as exc:
+                if exc.code == 429 and attempt < self._max_429_retries:
+                    time.sleep(0.5 * (attempt + 1))
+                    continue
+                return []
+            except (OSError, ValueError, urllib.error.URLError):
+                return []
+        return []
+
+    def _request_tokens_batch(
+        self, mints: list[str], chain: str
+    ) -> list[dict[str, Any]]:
+        encoded = ",".join(urllib.parse.quote(mint, safe="") for mint in mints)
+        url = f"https://api.dexscreener.com/tokens/v1/{chain}/{encoded}"
+        request = urllib.request.Request(
+            url,
+            headers={
+                "Accept": "application/json",
+                "User-Agent": "solana-launch-guard/0.7",
+            },
+        )
+        for attempt in range(self._max_429_retries + 1):
+            try:
+                with urllib.request.urlopen(
+                    request, timeout=10, context=self._ssl
+                ) as response:
+                    payload = json.load(response)
+                return list(payload) if isinstance(payload, list) else []
             except urllib.error.HTTPError as exc:
                 if exc.code == 429 and attempt < self._max_429_retries:
                     time.sleep(0.5 * (attempt + 1))
@@ -256,6 +337,11 @@ class DexScreenerOracle:
 
     def _fetch(self, mint: str, chain: str = "solana") -> MarketQuote | None:
         pairs = self._request_token(mint)
+        return self._select_quote(mint, pairs, chain)
+
+    def _select_quote(
+        self, mint: str, pairs: list[dict[str, Any]], chain: str = "solana"
+    ) -> MarketQuote | None:
         candidates: list[dict[str, Any]] = []
         for pair in pairs:
             if pair.get("chainId") != chain:

@@ -52,7 +52,7 @@ from solana_launch_guard.execution import (
 )
 from solana_launch_guard.intelligence import CoinIntelligence
 from solana_launch_guard.launch_guard_support import hunter_v1_is_at_capacity
-from solana_launch_guard.market import DexScreenerOracle, MarketQuote
+from solana_launch_guard.market import WSOL_MINT, DexScreenerOracle, MarketQuote
 from solana_launch_guard.multichain import EvmRpc, EvmTransfer, HyperCoreWatcher
 from solana_launch_guard.notifications import (
     DecisionNotifier,
@@ -4821,6 +4821,103 @@ def test_oracle_with_zero_retries_gives_up_on_first_429(monkeypatch: pytest.Monk
     assert pairs == []
     assert len(calls) == 1
     assert slept == []
+
+
+def test_quote_many_batches_into_one_request_and_matches_each_mint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Confirmed live 2026-09-24: tokens/v1/{chain}/{addresses} accepts
+    comma-separated mints and sits on a separate, less restrictive rate
+    limit than the single-token endpoint _fetch/quote use - it returned
+    200 for real mints at the exact moment the single-token endpoint was
+    returning 429 for the same machine. This is the batched call the
+    portfolio monitor's ~75-holding scan now uses instead of one request
+    per holding."""
+    mint_a = "A" * 44
+    mint_b = "B" * 44
+    requested_urls = []
+
+    def fake_batch(self, mints, chain):
+        requested_urls.append((tuple(mints), chain))
+        return [
+            {"chainId": "solana", "pairAddress": "pairA",
+             "baseToken": {"address": mint_a, "symbol": "AAA"},
+             "quoteToken": {"address": WSOL_MINT},
+             "priceNative": "0.001", "priceUsd": "0.1",
+             "liquidity": {"usd": 5000}, "marketCap": 10000,
+             "txns": {"m5": {"buys": 3, "sells": 1}},
+             "volume": {"m5": 500}, "priceChange": {"m5": 2}, "pairCreatedAt": 1},
+            {"chainId": "solana", "pairAddress": "pairB",
+             "baseToken": {"address": mint_b, "symbol": "BBB"},
+             "quoteToken": {"address": WSOL_MINT},
+             "priceNative": "0.002", "priceUsd": "0.2",
+             "liquidity": {"usd": 8000}, "marketCap": 20000,
+             "txns": {"m5": {"buys": 4, "sells": 2}},
+             "volume": {"m5": 700}, "priceChange": {"m5": -1}, "pairCreatedAt": 2},
+        ]
+
+    monkeypatch.setattr(DexScreenerOracle, "_request_tokens_batch", fake_batch)
+    oracle = DexScreenerOracle()
+
+    results = asyncio.run(oracle.quote_many([mint_a, mint_b], chain="solana"))
+
+    assert len(requested_urls) == 1
+    assert set(requested_urls[0][0]) == {mint_a, mint_b}
+    assert results[mint_a] is not None and results[mint_a].symbol == "AAA"
+    assert results[mint_b] is not None and results[mint_b].symbol == "BBB"
+
+
+def test_quote_many_reuses_the_single_mint_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    mint_a = "A" * 44
+    mint_b = "B" * 44
+    calls = []
+
+    def fake_batch(self, mints, chain):
+        calls.append(tuple(mints))
+        return [
+            {"chainId": "solana", "pairAddress": "pairB",
+             "baseToken": {"address": mint_b, "symbol": "BBB"},
+             "quoteToken": {"address": WSOL_MINT},
+             "priceNative": "0.002", "priceUsd": "0.2",
+             "liquidity": {"usd": 8000}, "marketCap": 20000,
+             "txns": {"m5": {"buys": 4, "sells": 2}},
+             "volume": {"m5": 700}, "priceChange": {"m5": -1}, "pairCreatedAt": 2},
+        ]
+
+    monkeypatch.setattr(DexScreenerOracle, "_request_tokens_batch", fake_batch)
+    oracle = DexScreenerOracle()
+    oracle._cache[f"solana:{mint_a}"] = (time.monotonic(), MarketQuote(
+        mint=mint_a, symbol="CACHED", price_sol=0.001, liquidity_usd=1000,
+        market_cap_usd=None, pair_address="pairA", pair_created_at_ms=None,
+        buys_m5=0, sells_m5=0, volume_m5_usd=0, price_change_m5_pct=None,
+        price_usd=0.05,
+    ))
+
+    results = asyncio.run(oracle.quote_many([mint_a, mint_b], chain="solana"))
+
+    # mint_a was already fresh in the cache - only mint_b should ever
+    # reach the network, in one batch call.
+    assert calls == [(mint_b,)]
+    assert results[mint_a] is not None and results[mint_a].symbol == "CACHED"
+    assert results[mint_b] is not None and results[mint_b].symbol == "BBB"
+
+
+def test_quote_many_chunks_more_than_thirty_mints(monkeypatch: pytest.MonkeyPatch) -> None:
+    mints = [f"{i:044d}" for i in range(35)]
+    batch_sizes = []
+
+    def fake_batch(self, batch, chain):
+        batch_sizes.append(len(batch))
+        return []
+
+    monkeypatch.setattr(DexScreenerOracle, "_request_tokens_batch", fake_batch)
+    oracle = DexScreenerOracle()
+
+    results = asyncio.run(oracle.quote_many(mints, chain="solana"))
+
+    assert batch_sizes == [30, 5]
+    assert set(results) == set(mints)
+    assert all(quote is None for quote in results.values())
 
 
 def test_robinhood_profiles_and_stock_contracts_are_discovered(
