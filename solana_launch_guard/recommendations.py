@@ -924,6 +924,7 @@ def build_snapshot(
                 "mint": candidate.mint,
                 "symbol": candidate.symbol,
                 "chain": candidate.chain,
+                "pair_address": candidate.pair_address,
                 "tier": candidate.tier,
                 "signal_score": candidate.signal_score,
                 "rise_pct": candidate.rise_pct,

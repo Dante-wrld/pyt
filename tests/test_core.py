@@ -2422,6 +2422,23 @@ def test_snapshot_round_trip_and_colored_dashboard(tmp_path: Path) -> None:
     assert "\033[38;5;45m" in output
 
 
+def test_snapshot_candidates_carry_pair_address() -> None:
+    # build_snapshot hand-lists each candidate's output fields rather than
+    # using asdict() - a new RecommendationCandidate field silently never
+    # reaches this JSON (and so never reaches decide_hunter_entry's
+    # snapshot) unless it's added here too. Caught live: the candle-shape
+    # MOMENTUM BUY gate read candidate.get("pair_address") and always got
+    # None, so it blocked every attempt regardless of real market shape.
+    quote = market_quote(
+        liquidity=50_000, market_cap=100_000, buys=60, sells=20,
+        volume=15_000, change=15,
+    )
+    book = RecommendationBook(pool_size=10, ttl_seconds=60)
+    book.add(quote, CoinIntelligence().score(quote), now=0)
+    snapshot = build_snapshot(book.ranked(), pending_count=0, poll_seconds=15)
+    assert snapshot["candidates"][0]["pair_address"] == "Pair111"
+
+
 def test_pullback_zone_is_anchored_and_alerts_once() -> None:
     initial = market_quote(
         liquidity=50_000,
