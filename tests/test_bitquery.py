@@ -24,9 +24,11 @@ TOKEN_BODY = json.dumps(
 ).encode()
 
 # A real pool-creation response, trimmed to one row, captured live against
-# Bitquery 2026-09-23 - see bitquery.py's module docstring.
+# Bitquery 2026-09-23 - see bitquery.py's module docstring. Nested under
+# "creations", the alias the combined snapshot query gives this field (see
+# _recent_launchlab_snapshot), not the raw "Instructions" field name.
 POOL_CREATION_BODY = json.dumps({
-    "data": {"Solana": {"Instructions": [{
+    "data": {"Solana": {"creations": [{
         "Block": {"Time": "2026-09-23T07:56:47Z"},
         "Transaction": {
             "Signer": "3bEwPfUAuwu6eEtQmRTNDpxWCno9RYUXt9MJBy56XzD6",
@@ -61,9 +63,10 @@ POOL_CREATION_BODY = json.dumps({
     }]}}
 }).encode()
 
-# A real trade response, trimmed to one row.
+# A real trade response, trimmed to one row - nested under "trades", the
+# alias the combined snapshot query gives this field.
 TRADE_BODY = json.dumps({
-    "data": {"Solana": {"DEXTradeByTokens": [{
+    "data": {"Solana": {"trades": [{
         "Block": {"Time": "2026-09-23T08:27:34Z"},
         "Trade": {
             "Currency": {"MintAddress": "HTmQz7My6MehV7bjhJ6jde8nDND1yvsz68d24LP7YgUQ", "Symbol": "GP"},
@@ -76,8 +79,9 @@ TRADE_BODY = json.dumps({
 # A real pool response, trimmed to one row - note the quote currency is
 # NOT SOL here (confirmed live: some LaunchLab pools, e.g. stonk.fun's
 # stock-paired launches, are quoted against another token entirely).
+# Nested under "pools", the alias the combined snapshot query gives this field.
 POOL_BODY = json.dumps({
-    "data": {"Solana": {"DEXPools": [{
+    "data": {"Solana": {"pools": [{
         "Block": {"Time": "2026-09-23T13:32:17Z"},
         "Pool": {
             "Base": {"PostAmountInUSD": "5240.602"},
@@ -149,13 +153,13 @@ def test_bad_token_response_raises_bitquery_auth_error(monkeypatch):
         client._access_token()
 
 
-def test_recent_pool_creations_parses_a_real_shaped_response(monkeypatch):
+def test_recent_launchlab_snapshot_parses_creations(monkeypatch):
     monkeypatch.setattr("urllib.request.urlopen", _routed_urlopen({
         TOKEN_URL: TOKEN_BODY, GRAPHQL_URL: POOL_CREATION_BODY,
     }))
     client = BitqueryClient("id", "secret")
-    results = client._recent_pool_creations(20)
-    assert results == [LaunchLabPoolCreation(
+    creations, trades, pools = client._recent_launchlab_snapshot(20, 50, 50)
+    assert creations == [LaunchLabPoolCreation(
         mint="3WPyk6CgxRg4tgMwcrKStXfLSxZQc59koSvVUgbsiray",
         name="DIESEL FUEL COIN", symbol="DFCN",
         creator="3bEwPfUAuwu6eEtQmRTNDpxWCno9RYUXt9MJBy56XzD6",
@@ -164,33 +168,65 @@ def test_recent_pool_creations_parses_a_real_shaped_response(monkeypatch):
         supply_raw=1000000000000000, total_base_sell_raw=793100000000000,
         total_quote_fund_raising_lamports=85000000000, migrate_type=1,
     )]
+    assert trades == []
+    assert pools == []
 
 
-def test_recent_trades_parses_a_real_shaped_response(monkeypatch):
+def test_recent_launchlab_snapshot_parses_trades(monkeypatch):
     monkeypatch.setattr("urllib.request.urlopen", _routed_urlopen({
         TOKEN_URL: TOKEN_BODY, GRAPHQL_URL: TRADE_BODY,
     }))
     client = BitqueryClient("id", "secret")
-    results = client._recent_trades(50)
-    assert results == [LaunchLabTrade(
+    creations, trades, pools = client._recent_launchlab_snapshot(20, 50, 50)
+    assert trades == [LaunchLabTrade(
         mint="HTmQz7My6MehV7bjhJ6jde8nDND1yvsz68d24LP7YgUQ", symbol="GP",
         side="sell", price_usd=0.015908367667455122, amount_usd=33.83653,
         block_time="2026-09-23T08:27:34Z",
     )]
+    assert creations == []
+    assert pools == []
 
 
-def test_recent_pools_parses_a_real_shaped_response(monkeypatch):
+def test_recent_launchlab_snapshot_parses_pools(monkeypatch):
     monkeypatch.setattr("urllib.request.urlopen", _routed_urlopen({
         TOKEN_URL: TOKEN_BODY, GRAPHQL_URL: POOL_BODY,
     }))
     client = BitqueryClient("id", "secret")
-    results = client._recent_pools(50)
-    assert results == [LaunchLabPool(
+    creations, trades, pools = client._recent_launchlab_snapshot(20, 50, 50)
+    assert pools == [LaunchLabPool(
         mint="GePzjSdq6z1o8sgCYEGQo9kApBYdXUosTqXQuBJsap8p", symbol="FORWARD",
         liquidity_usd=5240.602 + 2471.9941,
         quote_mint="FWDtiB5fXHdVAewPqvHPL2dh4aBC1C6GacQbePoQXKjz",
         quote_symbol="FWDI", block_time="2026-09-23T13:32:17Z",
     )]
+    assert creations == []
+    assert trades == []
+
+
+def test_recent_launchlab_snapshot_makes_one_graphql_call_not_three(monkeypatch):
+    """The whole point of combining creations/trades/pools into one request:
+    Bitquery bills a flat 5 points per call regardless of row count, so this
+    must cost the same as any single one of the old three separate calls did
+    alone - a two-thirds cut in LaunchLab's per-poll point spend."""
+    combined = json.dumps({"data": {"Solana": {
+        "creations": [], "trades": [], "pools": [],
+    }}}).encode()
+    graphql_calls = []
+
+    def urlopen(request, timeout=None, context=None):
+        url = request.full_url if hasattr(request, "full_url") else request
+        if url == TOKEN_URL:
+            return io.BytesIO(TOKEN_BODY)
+        if url == GRAPHQL_URL:
+            graphql_calls.append(url)
+            return io.BytesIO(combined)
+        raise AssertionError(f"unexpected URL: {url}")
+
+    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+    client = BitqueryClient("id", "secret")
+    creations, trades, pools = client._recent_launchlab_snapshot(20, 50, 50)
+    assert (creations, trades, pools) == ([], [], [])
+    assert len(graphql_calls) == 1
 
 
 def test_graphql_errors_raise_instead_of_silently_returning_empty(monkeypatch):
@@ -200,14 +236,14 @@ def test_graphql_errors_raise_instead_of_silently_returning_empty(monkeypatch):
     }))
     client = BitqueryClient("id", "secret")
     with pytest.raises(RuntimeError, match="bad query"):
-        client._recent_pool_creations(20)
+        client._recent_launchlab_snapshot(20, 50, 50)
 
 
-def test_recent_pool_creations_skips_a_row_missing_the_mint_account(monkeypatch):
+def test_recent_launchlab_snapshot_skips_a_creation_row_missing_the_mint_account(monkeypatch):
     """Accounts with no Token.Mint==Address match (the mint-identification
     heuristic) must not raise or fabricate an empty-string mint."""
     malformed = json.dumps({
-        "data": {"Solana": {"Instructions": [{
+        "data": {"Solana": {"creations": [{
             "Block": {"Time": "t"},
             "Transaction": {"Signer": "s", "Signature": "sig"},
             "Instruction": {
@@ -228,7 +264,7 @@ def test_recent_pool_creations_skips_a_row_missing_the_mint_account(monkeypatch)
         TOKEN_URL: TOKEN_BODY, GRAPHQL_URL: malformed,
     }))
     client = BitqueryClient("id", "secret")
-    assert client._recent_pool_creations(20) == []
+    assert client._recent_launchlab_snapshot(20, 50, 50) == ([], [], [])
 
 
 MINT = "A" * 44

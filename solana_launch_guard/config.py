@@ -303,8 +303,14 @@ class Settings:
     # meaningful activity without burning through the quota this fast.
     launchlab_poll_seconds: float = 60.0
     # Same idea and same reason as solana_momentum_throttled_poll_seconds
-    # above - LaunchLab candidates are also fresh-origin only.
-    launchlab_throttled_poll_seconds: float = 300.0
+    # above - LaunchLab candidates are also fresh-origin only, so nothing
+    # is actually missed by waiting longer here: no fresh candidate can be
+    # acted on until a slot frees up regardless of how often this polls.
+    # 600s (vs the 300s this started at) roughly halves Bitquery point
+    # spend during at-capacity windows on top of the query-merge savings,
+    # while staying well under a typical position's lifetime tonight
+    # (observed 3min-45min), so little is lost if capacity frees up mid-window.
+    launchlab_throttled_poll_seconds: float = 600.0
     evm_wallet_address: str | None = None
     hyperliquid_address: str | None = None
     evm_wallet_poll_seconds: float = 10.0
@@ -669,7 +675,7 @@ class Settings:
             bitquery_client_secret=(os.getenv("BITQUERY_CLIENT_SECRET") or None),
             launchlab_poll_seconds=_float("LAUNCHLAB_POLL_SECONDS", 60.0),
             launchlab_throttled_poll_seconds=_float(
-                "LAUNCHLAB_THROTTLED_POLL_SECONDS", 300.0
+                "LAUNCHLAB_THROTTLED_POLL_SECONDS", 600.0
             ),
             evm_wallet_address=(os.getenv("EVM_WALLET_ADDRESS") or None),
             hyperliquid_address=(

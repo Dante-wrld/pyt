@@ -67,6 +67,46 @@ _TOKEN_REFRESH_MARGIN_SECONDS = 60
 LAUNCHLAB_STANDARD_SUPPLY = 1_000_000_000.0
 _FIVE_MINUTES_SECONDS = 300
 
+# Field-selection fragments shared by the combined snapshot query below -
+# kept in one place so the three result shapes and their parsers
+# (_parse_pool_creation/_parse_trade/_parse_pool) never drift apart.
+_CREATION_FIELDS = """
+              Block { Time }
+              Transaction { Signer Signature }
+              Instruction {
+                Accounts { Address Token { Mint Owner } }
+                Program {
+                  Arguments {
+                    Name
+                    Value {
+                      ... on Solana_ABI_Json_Value_Arg { json }
+                    }
+                  }
+                }
+              }
+"""
+
+_TRADE_FIELDS = """
+              Block { Time }
+              Trade {
+                Currency { MintAddress Symbol }
+                PriceInUSD
+                Side { Type AmountInUSD }
+              }
+"""
+
+_POOL_FIELDS = """
+              Block { Time }
+              Pool {
+                Base { PostAmountInUSD }
+                Quote { PostAmountInUSD }
+                Market {
+                  BaseCurrency { MintAddress Symbol }
+                  QuoteCurrency { MintAddress Symbol }
+                }
+              }
+"""
+
 
 @dataclass(frozen=True, slots=True)
 class LaunchLabPoolCreation:
@@ -144,14 +184,12 @@ class BitqueryClient:
         self._token: str | None = None
         self._token_expires_at: float = 0.0
 
-    async def recent_pool_creations(self, *, limit: int = 20) -> list[LaunchLabPoolCreation]:
-        return await asyncio.to_thread(self._recent_pool_creations, limit)
-
-    async def recent_trades(self, *, limit: int = 50) -> list[LaunchLabTrade]:
-        return await asyncio.to_thread(self._recent_trades, limit)
-
-    async def recent_pools(self, *, limit: int = 50) -> list[LaunchLabPool]:
-        return await asyncio.to_thread(self._recent_pools, limit)
+    async def recent_launchlab_snapshot(
+        self, *, creations_limit: int = 20, trades_limit: int = 50, pools_limit: int = 50,
+    ) -> tuple[list[LaunchLabPoolCreation], list[LaunchLabTrade], list[LaunchLabPool]]:
+        return await asyncio.to_thread(
+            self._recent_launchlab_snapshot, creations_limit, trades_limit, pools_limit
+        )
 
     def _access_token(self) -> str:
         now = time.monotonic()
@@ -211,12 +249,19 @@ class BitqueryClient:
             raise RuntimeError(f"Bitquery GraphQL error: {errors}")
         return payload.get("data") or {}
 
-    def _recent_pool_creations(self, limit: int) -> list[LaunchLabPoolCreation]:
+    def _recent_launchlab_snapshot(
+        self, creations_limit: int, trades_limit: int, pools_limit: int,
+    ) -> tuple[list[LaunchLabPoolCreation], list[LaunchLabTrade], list[LaunchLabPool]]:
+        # One combined GraphQL request in place of three separate ones -
+        # Bitquery bills a flat 5 points per call regardless of row count,
+        # so three aliased fields under one Solana block costs the same 5
+        # points as any single one of them did alone, cutting LaunchLab's
+        # per-poll cost by two-thirds with no change to freshness or data.
         query = f"""
         query {{
           Solana {{
-            Instructions(
-              limit: {{count: {int(limit)}}}
+            creations: Instructions(
+              limit: {{count: {int(creations_limit)}}}
               orderBy: {{descending: Block_Time}}
               where: {{
                 Instruction: {{
@@ -228,91 +273,47 @@ class BitqueryClient:
                 Transaction: {{Result: {{Success: true}}}}
               }}
             ) {{
-              Block {{ Time }}
-              Transaction {{ Signer Signature }}
-              Instruction {{
-                Accounts {{ Address Token {{ Mint Owner }} }}
-                Program {{
-                  Arguments {{
-                    Name
-                    Value {{
-                      ... on Solana_ABI_Json_Value_Arg {{ json }}
-                    }}
-                  }}
-                }}
-              }}
+              {_CREATION_FIELDS}
             }}
-          }}
-        }}
-        """
-        data = self._graphql(query)
-        results: list[LaunchLabPoolCreation] = []
-        for row in data.get("Solana", {}).get("Instructions", []) or []:
-            parsed = _parse_pool_creation(row)
-            if parsed is not None:
-                results.append(parsed)
-        return results
-
-    def _recent_trades(self, limit: int) -> list[LaunchLabTrade]:
-        query = f"""
-        query {{
-          Solana {{
-            DEXTradeByTokens(
-              limit: {{count: {int(limit)}}}
+            trades: DEXTradeByTokens(
+              limit: {{count: {int(trades_limit)}}}
               orderBy: {{descending: Block_Time}}
               where: {{
                 Trade: {{Dex: {{ProtocolName: {{is: "{LAUNCHLAB_PROTOCOL_NAME}"}}}}}}
               }}
             ) {{
-              Block {{ Time }}
-              Trade {{
-                Currency {{ MintAddress Symbol }}
-                PriceInUSD
-                Side {{ Type AmountInUSD }}
-              }}
+              {_TRADE_FIELDS}
             }}
-          }}
-        }}
-        """
-        data = self._graphql(query)
-        results: list[LaunchLabTrade] = []
-        for row in data.get("Solana", {}).get("DEXTradeByTokens", []) or []:
-            parsed = _parse_trade(row)
-            if parsed is not None:
-                results.append(parsed)
-        return results
-
-    def _recent_pools(self, limit: int) -> list[LaunchLabPool]:
-        query = f"""
-        query {{
-          Solana {{
-            DEXPools(
-              limit: {{count: {int(limit)}}}
+            pools: DEXPools(
+              limit: {{count: {int(pools_limit)}}}
               orderBy: {{descending: Block_Time}}
               where: {{
                 Pool: {{Dex: {{ProtocolName: {{is: "{LAUNCHLAB_PROTOCOL_NAME}"}}}}}}
               }}
             ) {{
-              Block {{ Time }}
-              Pool {{
-                Base {{ PostAmountInUSD }}
-                Quote {{ PostAmountInUSD }}
-                Market {{
-                  BaseCurrency {{ MintAddress Symbol }}
-                  QuoteCurrency {{ MintAddress Symbol }}
-                }}
-              }}
+              {_POOL_FIELDS}
             }}
           }}
         }}
         """
         data = self._graphql(query)
-        results: list[LaunchLabPool] = []
-        for row in data.get("Solana", {}).get("DEXPools", []) or []:
-            parsed = _parse_pool(row)
-            if parsed is not None:
-                results.append(parsed)
-        return results
+        solana = data.get("Solana", {}) or {}
+        creations: list[LaunchLabPoolCreation] = []
+        for row in solana.get("creations", []) or []:
+            parsed_creation = _parse_pool_creation(row)
+            if parsed_creation is not None:
+                creations.append(parsed_creation)
+        trades: list[LaunchLabTrade] = []
+        for row in solana.get("trades", []) or []:
+            parsed_trade = _parse_trade(row)
+            if parsed_trade is not None:
+                trades.append(parsed_trade)
+        pools: list[LaunchLabPool] = []
+        for row in solana.get("pools", []) or []:
+            parsed_pool = _parse_pool(row)
+            if parsed_pool is not None:
+                pools.append(parsed_pool)
+        return creations, trades, pools
 
 
 def _parse_pool_creation(row: dict[str, Any]) -> LaunchLabPoolCreation | None:

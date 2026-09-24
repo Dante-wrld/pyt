@@ -44,11 +44,7 @@ class LaunchLabFeedMixin(LaunchGuardState):
                 await asyncio.sleep(self.settings.launchlab_throttled_poll_seconds)
                 continue
             try:
-                creations, trades, pools = await asyncio.gather(
-                    client.recent_pool_creations(),
-                    client.recent_trades(),
-                    client.recent_pools(),
-                )
+                creations, trades, pools = await client.recent_launchlab_snapshot()
                 # recent_pool_creations() always returns its newest-N window,
                 # so a signature that scrolls out of it never comes back -
                 # replacing the seen-set with this poll's own signatures
