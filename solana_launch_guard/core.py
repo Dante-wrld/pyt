@@ -17,6 +17,13 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+# See SQLiteStore.reconcile_stale_auto_buy_positions's docstring: a mint
+# must look unheld for this many consecutive calls before that method's
+# irreversible write fires, so one transient partial wallet-balance read
+# can't permanently wipe bookkeeping for a position that was never sold.
+AUTO_BUY_RECONCILE_MISSING_STREAK = 3
+
+
 def optional_float(value: Any) -> float | None:
     if value is None or isinstance(value, bool):
         return None
@@ -328,6 +335,9 @@ class SQLiteStore:
         self.connection = sqlite3.connect(path)
         self.connection.row_factory = sqlite3.Row
         self._migrate()
+        # In-memory only, per process lifetime - see
+        # reconcile_stale_auto_buy_positions's grace-period docstring.
+        self._auto_buy_missing_streaks: dict[str, int] = {}
 
     def _migrate(self) -> None:
         self.connection.executescript(
@@ -2210,7 +2220,8 @@ class SQLiteStore:
         self, *, chain: str, held_mints: frozenset[str]
     ) -> list[dict[str, Any]]:
         """Close out any OPEN auto_buy_positions row for a mint the wallet
-        no longer holds at all.
+        no longer holds at all, once it has looked that way for
+        AUTO_BUY_RECONCILE_MISSING_STREAK consecutive calls in a row.
 
         record_auto_buy_sale only updates this bookkeeping when a sale
         executes through a path this app itself tracks (auto-buy's own
@@ -2224,6 +2235,20 @@ class SQLiteStore:
         2026-09-24: 36 of 38 "OPEN" rows were already fully sold on-chain,
         some going back two days, permanently pinning auto-buy at capacity.
 
+        The grace period exists because `held_mints` is only as reliable
+        as the caller's own wallet-balance read: SolanaRpc.token_holdings()
+        gathers two parallel per-token-program RPC calls and only raises
+        if BOTH fail, so a single transient failure of just one of them
+        silently returns a PARTIAL holdings list rather than an error -
+        every mint held under the failed program is indistinguishable
+        from "genuinely not held" for that one call. Since this method's
+        write is irreversible (nothing in the codebase ever reads
+        RECONCILED_EXTERNAL back to reopen a position), acting on a
+        single snapshot risked permanently wiping bookkeeping for a
+        position that was never actually sold. Requiring several
+        consecutive misses rides out one bad read while still catching a
+        genuine external sale within a few portfolio-monitor cycles.
+
         The real sale happened entirely outside anything this app
         tracked, so its actual proceeds/profit are unknown - this marks
         the row reconciled without fabricating a P&L, the same way the
@@ -2236,7 +2261,18 @@ class SQLiteStore:
             "WHERE chain = ? AND status = 'OPEN'",
             (chain,),
         ).fetchall()
-        stale = [row for row in rows if row["token_address"] not in held_mints]
+        missing = [row for row in rows if row["token_address"] not in held_mints]
+        missing_mints = {row["token_address"] for row in missing}
+        for mint in list(self._auto_buy_missing_streaks):
+            if mint not in missing_mints:
+                self._auto_buy_missing_streaks.pop(mint, None)
+        stale = []
+        for row in missing:
+            mint = row["token_address"]
+            streak = self._auto_buy_missing_streaks.get(mint, 0) + 1
+            self._auto_buy_missing_streaks[mint] = streak
+            if streak >= AUTO_BUY_RECONCILE_MISSING_STREAK:
+                stale.append(row)
         if not stale:
             return []
         now = utc_now()
@@ -2246,6 +2282,8 @@ class SQLiteStore:
                 "remaining_raw = 0, updated_at = ? WHERE id = ?",
                 [(now, row["id"]) for row in stale],
             )
+        for row in stale:
+            self._auto_buy_missing_streaks.pop(row["token_address"], None)
         return [dict(row) for row in stale]
 
     def reconcile_stale_auto_buy_executions(

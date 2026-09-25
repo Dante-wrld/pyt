@@ -121,18 +121,78 @@ def test_profit_protecting_slippage_does_not_clamp_a_tiny_gain_to_zero():
     assert widened < 500
 
 
+def test_profit_protecting_slippage_floor_never_exceeds_breakeven():
+    """Confirmed live 2026-09-24: a second gap in the zero-clamp fix above -
+    for a gain small enough that breakeven itself is under the 50 bps
+    floor (e.g. +0.3%, breakeven ~30 bps), the flat floor exceeded
+    breakeven, letting a fill clear at a price that would turn the real
+    gain into a realized loss - the exact outcome this function exists to
+    prevent. The floor must be capped at breakeven_bps itself, however
+    small the gain, not just at a flat constant."""
+    widened = _profit_protecting_slippage_bps(
+        gain_pct=0.30, base_slippage_bps=500, ceiling_bps=4000, margin_bps=200,
+    )
+    # breakeven ~30 bps; the floor must never push past that.
+    assert widened <= 30
+    assert 0 < widened
+
+
+def test_profit_protecting_slippage_floor_never_exceeds_the_ceiling():
+    """The unstick floor must respect the caller's own ceiling_bps just
+    like the normal widening path already does - a low configured ceiling
+    must not be silently exceeded just because the gain is tiny."""
+    widened = _profit_protecting_slippage_bps(
+        gain_pct=1.60, base_slippage_bps=500, ceiling_bps=10, margin_bps=200,
+    )
+    assert widened <= 10
+
+
+def test_profit_protecting_slippage_leaves_a_genuinely_tight_positive_result_alone():
+    """A small-but-positive result from the margin math (still profitable,
+    just tight) is the intentional tightening this function is meant to
+    apply - the unstick floor must not loosen it, only the truly
+    unfillable <= 0 case."""
+    # breakeven ~210 bps, minus the 200 bps margin leaves a real 10 bps.
+    widened = _profit_protecting_slippage_bps(
+        gain_pct=2.15, base_slippage_bps=500, ceiling_bps=4000, margin_bps=200,
+    )
+    assert widened == 10
+
+
 def test_take_partial_stuck_streak_resets_on_success_and_ignores_full_exits(tmp_path):
-    streaks: dict[str, int] = {}
-    _track_take_partial_stuck_streak(streaks, mint="mint", is_partial_signal=True, executed=False)
-    _track_take_partial_stuck_streak(streaks, mint="mint", is_partial_signal=True, executed=False)
-    assert streaks["mint"] == 2
-    _track_take_partial_stuck_streak(streaks, mint="mint", is_partial_signal=True, executed=True)
-    assert "mint" not in streaks
+    streaks: dict[tuple[str, str], int] = {}
+    _track_take_partial_stuck_streak(streaks, agent="hunter-v1", mint="mint", is_partial_signal=True, executed=False)
+    _track_take_partial_stuck_streak(streaks, agent="hunter-v1", mint="mint", is_partial_signal=True, executed=False)
+    assert streaks[("hunter-v1", "mint")] == 2
+    _track_take_partial_stuck_streak(streaks, agent="hunter-v1", mint="mint", is_partial_signal=True, executed=True)
+    assert ("hunter-v1", "mint") not in streaks
     # A full EXIT/EMERGENCY_EXIT signal is not this mechanism's concern -
     # it already has _should_escalate_to_emergency - so a non-partial
     # signal must never touch the streak either way.
-    _track_take_partial_stuck_streak(streaks, mint="other", is_partial_signal=False, executed=False)
-    assert "other" not in streaks
+    _track_take_partial_stuck_streak(streaks, agent="hunter-v1", mint="other", is_partial_signal=False, executed=False)
+    assert ("hunter-v1", "other") not in streaks
+
+
+def test_take_partial_stuck_streak_keeps_agents_separate_for_the_same_mint(tmp_path):
+    """Confirmed live 2026-09-24: a hunter-v1-owned mint is evaluated by
+    BOTH the portfolio-v1 wallet-scan loop and hunter-v1's own position-
+    review loop in the same cycle - nothing excludes a hunter-owned mint
+    from the wallet scan. Keying the streak by mint alone let a blocked
+    proposal from one loop combine with an unrelated failure from the
+    other to force a full liquidation neither loop's own attempts had
+    actually earned. Keying by (agent, mint) keeps the two counts apart."""
+    streaks: dict[tuple[str, str], int] = {}
+    _track_take_partial_stuck_streak(
+        streaks, agent="portfolio-v1", mint="mint", is_partial_signal=True, executed=False,
+    )
+    _track_take_partial_stuck_streak(
+        streaks, agent="portfolio-v1", mint="mint", is_partial_signal=True, executed=False,
+    )
+    _track_take_partial_stuck_streak(
+        streaks, agent="hunter-v1", mint="mint", is_partial_signal=True, executed=False,
+    )
+    assert streaks[("portfolio-v1", "mint")] == 2
+    assert streaks[("hunter-v1", "mint")] == 1
 
 
 def test_take_partial_escalates_to_a_full_exit_after_the_stuck_streak(tmp_path, monkeypatch):
@@ -146,13 +206,13 @@ def test_take_partial_escalates_to_a_full_exit_after_the_stuck_streak(tmp_path, 
     monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
     ledger = LiveTrialLedger(tmp_path / "trial.sqlite")
     ledger.start()
-    streaks = {"mint": TAKE_PARTIAL_STUCK_ESCALATE_STREAK - 1}
+    streaks = {("hunter-v1", "mint"): TAKE_PARTIAL_STUCK_ESCALATE_STREAK - 1}
     below_threshold = _resolve_take_partial_decision(
         ledger=ledger, agent="hunter-v1", mint="mint",
         sell_choice=("TAKE_PARTIAL", 0.5), is_partial_signal=True, streaks=streaks,
     )
     assert below_threshold == ("TAKE_PARTIAL", 0.5)
-    streaks["mint"] = TAKE_PARTIAL_STUCK_ESCALATE_STREAK
+    streaks[("hunter-v1", "mint")] = TAKE_PARTIAL_STUCK_ESCALATE_STREAK
     escalated = _resolve_take_partial_decision(
         ledger=ledger, agent="hunter-v1", mint="mint",
         sell_choice=None, is_partial_signal=True, streaks=streaks,
@@ -172,7 +232,7 @@ def test_take_partial_escalation_never_applies_to_a_non_partial_signal(tmp_path,
     monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
     ledger = LiveTrialLedger(tmp_path / "trial.sqlite")
     ledger.start()
-    streaks = {"mint": TAKE_PARTIAL_STUCK_ESCALATE_STREAK + 5}
+    streaks = {("hunter-v1", "mint"): TAKE_PARTIAL_STUCK_ESCALATE_STREAK + 5}
     result = _resolve_take_partial_decision(
         ledger=ledger, agent="hunter-v1", mint="mint",
         sell_choice=None, is_partial_signal=False, streaks=streaks,

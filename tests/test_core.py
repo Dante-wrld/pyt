@@ -25,6 +25,7 @@ from solana_launch_guard.app import (
 )
 from solana_launch_guard.config import Settings
 from solana_launch_guard.core import (
+    AUTO_BUY_RECONCILE_MISSING_STREAK,
     Launch,
     PaperBroker,
     RiskEngine,
@@ -1611,11 +1612,19 @@ def test_reconcile_stale_auto_buy_positions_closes_only_unheld_mints(
         )
 
     # MintBuy1 was sold outside anything this app tracks (wallet no longer
-    # holds it); MintBuy2 is still genuinely held.
+    # holds it); MintBuy2 is still genuinely held. The grace period means
+    # it takes AUTO_BUY_RECONCILE_MISSING_STREAK consecutive misses, not
+    # one, before the irreversible write fires.
+    for _ in range(AUTO_BUY_RECONCILE_MISSING_STREAK - 1):
+        assert store.reconcile_stale_auto_buy_positions(
+            chain="solana", held_mints=frozenset({"MintBuy2"}),
+        ) == []
+    positions = {row["token_address"]: row for row in store.auto_buy_status()["positions"]}
+    assert positions["MintBuy1"]["status"] == "OPEN"  # still just missing, not yet reconciled
+
     reconciled = store.reconcile_stale_auto_buy_positions(
         chain="solana", held_mints=frozenset({"MintBuy2"}),
     )
-
     assert [row["token_address"] for row in reconciled] == ["MintBuy1"]
     positions = {row["token_address"]: row for row in store.auto_buy_status()["positions"]}
     assert positions["MintBuy1"]["status"] == "RECONCILED_EXTERNAL"
@@ -1625,11 +1634,50 @@ def test_reconcile_stale_auto_buy_positions_closes_only_unheld_mints(
     assert positions["MintBuy2"]["status"] == "OPEN"
     assert positions["MintBuy2"]["remaining_raw"] == 100
 
-    # A second sweep with the same held set is a no-op, not a re-reconcile.
+    # A further sweep with the same held set is a no-op, not a re-reconcile.
     again = store.reconcile_stale_auto_buy_positions(
         chain="solana", held_mints=frozenset({"MintBuy2"}),
     )
     assert again == []
+    store.close()
+
+
+def test_reconcile_stale_auto_buy_positions_grace_period_resets_on_recovery(
+    tmp_path: Path,
+) -> None:
+    """Confirmed live 2026-09-24: SolanaRpc.token_holdings() only raises if
+    BOTH of its parallel per-token-program calls fail - one transient
+    failure silently returns a partial holdings list, indistinguishable
+    from "genuinely not held" for mints under the failed program. Since
+    this reconciliation is irreversible (nothing ever reopens
+    RECONCILED_EXTERNAL), a single missing reading must not be enough -
+    and a mint that reappears (the transient failure recovered) must reset
+    its streak rather than carry a partial count toward a future miss."""
+    store = SQLiteStore(str(tmp_path / "auto-buy-grace.db"))
+    store.arm_auto_buy("MintBuy1", "BUY1")
+    amount, source = store.preview_auto_buy_budget(
+        seed_size_usdc_raw=5_000_000, max_seed_buys=2, max_open_positions=5,
+    )
+    store.begin_auto_buy_execution(
+        event_key="buy-1", token_address="MintBuy1", symbol="BUY1",
+        funding_source=source, input_usdc_raw=amount, expected_output_raw=100,
+    )
+    store.complete_auto_buy_execution(
+        event_key="buy-1", signature="signature-1",
+        actual_output_raw=100, output_decimals=0,
+    )
+
+    # Missing once (a transient partial RPC read), then reappears.
+    assert store.reconcile_stale_auto_buy_positions(chain="solana", held_mints=frozenset()) == []
+    assert store.reconcile_stale_auto_buy_positions(
+        chain="solana", held_mints=frozenset({"MintBuy1"}),
+    ) == []
+    # Missing again for fewer than the full streak - must not carry over
+    # partial credit from the earlier, since-recovered miss.
+    for _ in range(AUTO_BUY_RECONCILE_MISSING_STREAK - 1):
+        assert store.reconcile_stale_auto_buy_positions(chain="solana", held_mints=frozenset()) == []
+    positions = {row["token_address"]: row for row in store.auto_buy_status()["positions"]}
+    assert positions["MintBuy1"]["status"] == "OPEN"
     store.close()
 
 

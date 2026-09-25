@@ -126,14 +126,26 @@ def _should_escalate_to_emergency(*, pnl_pct: float | None, block_streak: int,
 TAKE_PARTIAL_STUCK_ESCALATE_STREAK = 3
 
 
+# Keyed by (agent, mint), not mint alone: a hunter-v1-owned mint is
+# evaluated by BOTH the portfolio-v1 wallet-scan loop (every SELL_WORTHY_
+# DECISIONS signal from the AI recommendation feed, regardless of who
+# bought it) and hunter-v1's own position-review state machine, in the
+# same cycle - nothing excludes a hunter-owned mint from the wallet scan.
+# Confirmed live 2026-09-24: keying by mint alone let a blocked proposal
+# from one loop's own criteria combine with an unrelated failure from the
+# other loop's criteria to reach TAKE_PARTIAL_STUCK_ESCALATE_STREAK and
+# force a full liquidation neither loop's own attempts had actually earned
+# on their own. The two loops already pass their own distinct `agent`
+# ("portfolio-v1" literal vs the position's real owner) into these two
+# functions - namespacing the streak by it costs nothing extra.
 def _resolve_take_partial_decision(
     *, ledger: LiveTrialLedger, agent: str, mint: str,
     sell_choice: tuple[str, float] | None, is_partial_signal: bool,
-    streaks: dict[str, int],
+    streaks: dict[tuple[str, str], int],
 ) -> tuple[str, float] | None:
     if not is_partial_signal:
         return sell_choice
-    streak = streaks.get(mint, 0)
+    streak = streaks.get((agent, mint), 0)
     if streak >= TAKE_PARTIAL_STUCK_ESCALATE_STREAK:
         ledger.log(agent=agent, mint=mint, state="TAKE_PARTIAL_ESCALATED",
                    reason=f"{streak} consecutive cycles unable to execute a partial "
@@ -144,14 +156,16 @@ def _resolve_take_partial_decision(
 
 
 def _track_take_partial_stuck_streak(
-    streaks: dict[str, int], *, mint: str, is_partial_signal: bool, executed: bool,
+    streaks: dict[tuple[str, str], int], *, agent: str, mint: str,
+    is_partial_signal: bool, executed: bool,
 ) -> None:
     if not is_partial_signal:
         return
+    key = (agent, mint)
     if executed:
-        streaks.pop(mint, None)
+        streaks.pop(key, None)
     else:
-        streaks[mint] = streaks.get(mint, 0) + 1
+        streaks[key] = streaks.get(key, 0) + 1
 
 
 class BoundedTrialModel:
@@ -348,15 +362,32 @@ def _profit_protecting_slippage_bps(
     margin_bps is a flat subtraction: once it exceeds the gain's own
     breakeven room, the old code clamped straight to a literal 0 bps -
     a tolerance no real quote can ever clear, so the position gets stuck
-    with no way to exit at all rather than merely a tight one. MIN_SLIPPAGE_BPS
-    floors that specific pathological case without touching the intentional
-    tightening for gains large enough to still clear it.
+    with no way to exit at all rather than merely a tight one.
+
+    MIN_PROFIT_PROTECTING_SLIPPAGE_BPS only ever replaces a result that
+    would otherwise be <= 0 (truly unfillable), and even then is capped at
+    breakeven_bps and at ceiling_bps - it can widen the unfillable case up
+    to a real, fillable tolerance, but it can never push past the point a
+    fill would still leave real profit (the function's own core promise)
+    or past the caller's own ceiling. A genuinely tight-but-positive
+    result from the margin math (e.g. 10 bps on a small gain) is left
+    untouched - that's still the intentional tightening, not the
+    pathological case this floor exists for.
 
     Confirmed live 2026-09-24 (JEANCOIN): at +1.60% unrealized (breakeven
     ~157 bps) minus the 200 bps margin went negative and clamped to 0 bps -
     blocking three consecutive exit attempts on a token with $176k of
     liquidity while the gain decayed away underneath it, unable to fill at
     any slippage at all.
+
+    Confirmed live 2026-09-24, a second gap in the first version of this
+    fix: for a gain small enough that breakeven_bps itself is under 50
+    (e.g. +0.3%, breakeven ~30 bps), a flat 50 bps floor exceeded
+    breakeven - letting a fill clear at a price that would turn the real
+    gain into a realized loss, the exact outcome this function exists to
+    prevent. Flooring at min(MIN_PROFIT_PROTECTING_SLIPPAGE_BPS,
+    breakeven_bps, ceiling_bps) instead keeps the floor from ever
+    outrunning breakeven, however small the gain.
 
     Confirmed live 2026-09-23 (MOLTYATT): a TAKE_PARTIAL at +155.3%
     unrealized needed ~20.01% slippage to fill and was blocked by the
@@ -368,8 +399,10 @@ def _profit_protecting_slippage_bps(
     if gain_pct is None or gain_pct <= 0:
         return base_slippage_bps
     breakeven_bps = (gain_pct / (100 + gain_pct)) * 10000
-    widened = int(breakeven_bps) - margin_bps
-    return max(MIN_PROFIT_PROTECTING_SLIPPAGE_BPS, min(ceiling_bps, widened))
+    widened = min(ceiling_bps, int(breakeven_bps) - margin_bps)
+    if widened <= 0:
+        widened = max(0, min(MIN_PROFIT_PROTECTING_SLIPPAGE_BPS, int(breakeven_bps), ceiling_bps))
+    return widened
 
 
 async def _notify(settings: Settings, *, title: str, message: str) -> None:
@@ -463,7 +496,7 @@ async def cycle(*, ledger: LiveTrialLedger, settings: Settings, rpc: SolanaRpc,
                 oracle: DexScreenerOracle,
                 candle_scanner: MarketStructureScanner,
                 exit_block_streaks: dict[str, int],
-                take_partial_stuck_streaks: dict[str, int],
+                take_partial_stuck_streaks: dict[tuple[str, str], int],
                 buy_zone_skip_reasons: dict[str, str],
                 chase_first_target: dict[str, float],
                 regrowth_skip_reasons: dict[str, str],
@@ -579,7 +612,7 @@ async def cycle(*, ledger: LiveTrialLedger, settings: Settings, rpc: SolanaRpc,
                 )
                 if sell_choice is None:
                     _track_take_partial_stuck_streak(
-                        take_partial_stuck_streaks, mint=mint,
+                        take_partial_stuck_streaks, agent="portfolio-v1", mint=mint,
                         is_partial_signal=is_partial_signal, executed=False,
                     )
                     continue
@@ -612,7 +645,10 @@ async def cycle(*, ledger: LiveTrialLedger, settings: Settings, rpc: SolanaRpc,
                 blocked=result is None,
             )
             _track_take_partial_stuck_streak(
-                take_partial_stuck_streaks, mint=mint,
+                # Same "portfolio-v1" literal _resolve_take_partial_decision used
+                # above for this loop, not `owner` - the read and write must use
+                # the identical key or the streak silently never accumulates.
+                take_partial_stuck_streaks, agent="portfolio-v1", mint=mint,
                 is_partial_signal=is_partial_signal, executed=result is not None,
             )
             if result is None:
@@ -704,7 +740,7 @@ async def cycle(*, ledger: LiveTrialLedger, settings: Settings, rpc: SolanaRpc,
             )
             if sell_choice is None:
                 _track_take_partial_stuck_streak(
-                    take_partial_stuck_streaks, mint=position["mint"],
+                    take_partial_stuck_streaks, agent=position["agent"], mint=position["mint"],
                     is_partial_signal=is_partial_signal, executed=False,
                 )
                 continue
@@ -745,7 +781,7 @@ async def cycle(*, ledger: LiveTrialLedger, settings: Settings, rpc: SolanaRpc,
             mint=position["mint"], blocked=result is None,
         )
         _track_take_partial_stuck_streak(
-            take_partial_stuck_streaks, mint=position["mint"],
+            take_partial_stuck_streaks, agent=position["agent"], mint=position["mint"],
             is_partial_signal=is_partial_signal, executed=result is not None,
         )
         if result is None:
@@ -851,7 +887,7 @@ async def supervise(*, interval_seconds: int = 30) -> dict:
         candle_scanner = MarketStructureScanner()
         consecutive_cycle_failures = 0
         exit_block_streaks: dict[str, int] = {}
-        take_partial_stuck_streaks: dict[str, int] = {}
+        take_partial_stuck_streaks: dict[tuple[str, str], int] = {}
         buy_zone_skip_reasons: dict[str, str] = {}
         chase_first_target: dict[str, float] = {}
         regrowth_skip_reasons: dict[str, str] = {}
