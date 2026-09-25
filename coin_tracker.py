@@ -33,6 +33,7 @@ import asyncio
 import json
 import logging
 import math
+import os
 import statistics
 import time
 from collections import deque
@@ -45,13 +46,35 @@ from solana_launch_guard.market import DexScreenerOracle, MarketQuote
 # Config
 # --------------------------------------------------------------------------
 CONFIG = {
-    "watchlist": [
+    # Always watched, whatever the board says.
+    "pinned": [
         "DFQHUegJWE29Xu3BUxPezqi77uyHURRyxJpdtyvLpump",
         "4WECKfvfgEiojyZJq5Xm12Hvk76rhM4VHQAZGaELpump",
     ],
+    # Dynamic watchlist: follow the main bot's board (read-only) so this
+    # tracker paper-trades the same pool the live strategy trades. Filters
+    # default to the live strategy profile (ENTRY_MIN_TOKEN_AGE_DAYS and
+    # AUTO_BUY_DISCOVERY_MIN_LIQUIDITY_USD). Tokens with an open paper
+    # position are never dropped, even after they leave the board.
+    "dynamic_watchlist": True,
+    "board_snapshot_path": os.getenv(
+        "RECOMMENDATION_SNAPSHOT_PATH", "launch_guard_recommendations.json"
+    ),
+    "board_refresh_seconds": 300,
+    "board_max_tokens": 20,
+    "board_min_age_days": float(os.getenv("ENTRY_MIN_TOKEN_AGE_DAYS") or 3),
+    "board_min_liquidity_usd": float(
+        os.getenv("AUTO_BUY_DISCOVERY_MIN_LIQUIDITY_USD") or 50_000
+    ),
+    "board_max_snapshot_age_seconds": 900,  # older file = bot not running
     "poll_seconds": 30,
     "warmup_minutes": 15,             # observe this long before any trade
-    "position_usd": 50.0,             # first buy per token
+    "position_usd": 5.0,              # first buy; matches live orders so
+                                      # simulated price impact is comparable
+    # Adding to a falling position is averaging down - the same risk as the
+    # live recovery re-buy that is switched off. Off by default; turn on to
+    # compare results with and without it.
+    "dip_buys_enabled": False,
     "dip_add_fraction": 0.5,          # each dip-buy = this x first buy
     "max_total_usd_per_token": 150.0,
     "entry_min_health": 60,           # 0-100
@@ -286,16 +309,63 @@ class Position:
 
 
 # --------------------------------------------------------------------------
+# Dynamic watchlist
+# --------------------------------------------------------------------------
+def read_board(path, max_age_seconds, now=None):
+    """Board rows from the main bot's snapshot, or None when the file is
+    missing, unreadable or stale (so the caller keeps its current list
+    instead of dropping everything because the bot restarted)."""
+    try:
+        snapshot = json.loads(Path(path).read_text())
+    except (OSError, ValueError):
+        return None
+    now = time.time() if now is None else now
+    generated_at = float(snapshot.get("generated_at") or 0.0)
+    if now - generated_at > max_age_seconds:
+        return None
+    rows = snapshot.get("candidates")
+    return rows if isinstance(rows, list) else None
+
+
+def select_watchlist(board_rows, pinned, held, cfg, now=None):
+    """Pinned mints, then open positions, then the best board tokens that
+    pass the live strategy's age and liquidity floors, up to the cap."""
+    now = time.time() if now is None else now
+    chosen = list(dict.fromkeys([*pinned, *held]))
+    eligible = []
+    for row in board_rows or []:
+        if not isinstance(row, dict) or row.get("chain", "solana") != "solana":
+            continue
+        mint = row.get("mint")
+        created = row.get("pair_created_at_ms")
+        if not mint or mint in chosen or not created:
+            continue
+        age_days = (now * 1000 - float(created)) / 86_400_000
+        if age_days < cfg["board_min_age_days"]:
+            continue
+        if float(row.get("liquidity_usd") or 0) < cfg["board_min_liquidity_usd"]:
+            continue
+        eligible.append((float(row.get("signal_score") or 0), mint))
+    eligible.sort(reverse=True)
+    room = max(0, cfg["board_max_tokens"] - len(chosen))
+    return chosen + [mint for _, mint in eligible[:room]]
+
+
+# --------------------------------------------------------------------------
 # Bot
 # --------------------------------------------------------------------------
 class Bot:
     def __init__(self, cfg, executor):
         self.cfg, self.ex = cfg, executor
         self.oracle = DexScreenerOracle()
-        maxlen = int(cfg["history_hours"] * 3600 / cfg["poll_seconds"])
-        self.hist = {t: TokenHistory(maxlen) for t in cfg["watchlist"]}
+        self.maxlen = int(cfg["history_hours"] * 3600 / cfg["poll_seconds"])
+        self.watchlist = list(cfg["pinned"])
+        self.hist = {t: TokenHistory(self.maxlen) for t in self.watchlist}
         self.positions, self.cooldown, self.total_pnl = {}, {}, 0.0
+        self.last_board_refresh = 0.0
         self._load()
+        for t in self.watchlist:
+            self.hist.setdefault(t, TokenHistory(self.maxlen))
 
     # ---- persistence -------------------------------------------------------
     def _load(self):
@@ -306,14 +376,18 @@ class Bot:
         self.positions = {t: Position(**d) for t, d in st.get("positions", {}).items()}
         self.cooldown = st.get("cooldown", {})
         self.total_pnl = st.get("total_pnl", 0.0)
+        saved = st.get("watchlist") or []
+        self.watchlist = list(dict.fromkeys([*self.watchlist, *saved, *self.positions]))
         for t, snaps in st.get("history", {}).items():
-            if t in self.hist:
+            if t in self.watchlist:
+                h = self.hist.setdefault(t, TokenHistory(self.maxlen))
                 for s in snaps:
-                    self.hist[t].add(Snapshot(**s))
+                    h.add(Snapshot(**s))
         log.info("Loaded state: %d open positions", len(self.positions))
 
     def save(self):
         st = {
+            "watchlist": self.watchlist,
             "positions": {t: asdict(p) for t, p in self.positions.items()},
             "cooldown": self.cooldown,
             "total_pnl": self.total_pnl,
@@ -322,6 +396,36 @@ class Bot:
         tmp = Path(self.cfg["state_file"] + ".tmp")
         tmp.write_text(json.dumps(st))
         tmp.replace(self.cfg["state_file"])
+
+    # ---- watchlist ---------------------------------------------------------
+    def refresh_watchlist(self, now=None):
+        now = time.time() if now is None else now
+        if not self.cfg["dynamic_watchlist"]:
+            return
+        if now - self.last_board_refresh < self.cfg["board_refresh_seconds"]:
+            return
+        self.last_board_refresh = now
+        rows = read_board(
+            self.cfg["board_snapshot_path"],
+            self.cfg["board_max_snapshot_age_seconds"],
+            now,
+        )
+        if rows is None:
+            log.warning("board snapshot missing or stale; keeping %d tokens",
+                        len(self.watchlist))
+            return
+        new = select_watchlist(rows, self.cfg["pinned"], self.positions, self.cfg, now)
+        added = [t for t in new if t not in self.watchlist]
+        dropped = [t for t in self.watchlist if t not in new]
+        for t in added:
+            self.hist.setdefault(t, TokenHistory(self.maxlen))
+        for t in dropped:
+            self.hist.pop(t, None)  # no position (those are always kept)
+        self.watchlist = new
+        if added or dropped:
+            log.info("watchlist now %d tokens (+%s -%s)", len(new),
+                     ",".join(t[:6] for t in added) or "0",
+                     ",".join(t[:6] for t in dropped) or "0")
 
     # ---- main step ---------------------------------------------------------
     async def poll_all(self):
@@ -332,8 +436,9 @@ class Bot:
         oracle catches its own network/HTTP errors), so each token's own
         step() is still isolated here only against a logic bug in the
         scoring/rule functions below, not against a shared fetch failure."""
-        quotes = await self.oracle.quote_many(self.cfg["watchlist"], chain="solana")
-        for token in self.cfg["watchlist"]:
+        self.refresh_watchlist()
+        quotes = await self.oracle.quote_many(self.watchlist, chain="solana")
+        for token in self.watchlist:
             try:
                 self.step(token, quotes.get(token))
             except Exception:
@@ -430,7 +535,8 @@ class Bot:
         # 6. Buy the dip: healthy coin, normal-sized dip, liquidity holding, bounce starting
         drawdown = 1 - price / pos.peak
         add_usd = self.cfg["position_usd"] * self.cfg["dip_add_fraction"]
-        if (pos.adds < prof.max_adds and not warns and pos.tps_hit == 0
+        if (self.cfg["dip_buys_enabled"]
+                and pos.adds < prof.max_adds and not warns and pos.tps_hit == 0
                 and snap.ts - pos.last_add >= 600
                 and 1.5 * mu <= drawdown <= min(3.5, prof.stop_k - 1) * mu
                 and h.pct_change("liquidity", 15) > -0.05
@@ -466,7 +572,8 @@ class Bot:
 
 async def run():
     bot = Bot(CONFIG, PaperExecutor())
-    log.info("Tracking %d tokens (paper mode)", len(CONFIG["watchlist"]))
+    log.info("Tracking %d pinned tokens%s (paper mode)", len(CONFIG["pinned"]),
+             " + board tokens" if CONFIG["dynamic_watchlist"] else "")
     while True:
         await bot.poll_all()
         bot.save()
