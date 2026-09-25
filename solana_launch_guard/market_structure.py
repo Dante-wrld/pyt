@@ -3,13 +3,17 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import os
 import ssl
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 
 import certifi
+
+from .geckoterminal import COINGECKO_PRO_ONCHAIN_BASE_URL
 
 
 @dataclass(frozen=True)
@@ -129,6 +133,7 @@ class MarketStructureScanner:
         self._cache: dict[tuple[str, str, str], tuple[float, list[Candle] | None]] = {}
         self._request_times: list[float] = []
         self._exit_pending: dict[tuple[str, str], asyncio.Task] = {}
+        self._api_key = os.getenv("GECKOTERMINAL_API_KEY") or None
 
     def exit_research(self, *, pool: str, mint: str) -> dict | None:
         """Refresh in background so candle research cannot delay a live risk exit."""
@@ -176,15 +181,21 @@ class MarketStructureScanner:
             {"aggregate": aggregate, "limit": 32, "currency": "usd",
              "token": mint, "include_empty_intervals": "true"}
         )
-        url = (
-            "https://api.geckoterminal.com/api/v2/networks/solana/pools/"
-            + urllib.parse.quote(pool, safe="")
+        path = (
+            "/networks/solana/pools/" + urllib.parse.quote(pool, safe="")
             + "/ohlcv/" + timeframe + "?" + params
         )
-        request = urllib.request.Request(url, headers={"Accept": "application/json"})
-        context = ssl.create_default_context(cafile=certifi.where())
-        with urllib.request.urlopen(request, timeout=5, context=context) as response:
-            payload = json.load(response)
+        try:
+            payload = self._request_ohlcv(
+                "https://api.geckoterminal.com/api/v2" + path, api_key=None
+            )
+        except urllib.error.HTTPError as exc:
+            if exc.code != 429 or not self._api_key:
+                raise
+            # Free API's rate limit hit: fall back to the paid one this once.
+            payload = self._request_ohlcv(
+                COINGECKO_PRO_ONCHAIN_BASE_URL + path, api_key=self._api_key
+            )
         metadata = payload.get("meta") or {}
         addresses = [
             str((metadata.get(side) or {}).get("address") or "")
@@ -193,6 +204,15 @@ class MarketStructureScanner:
         if mint not in addresses:
             return None
         return parse_closed_candles(payload, period=period, now=time.time())
+
+    def _request_ohlcv(self, url: str, *, api_key: str | None) -> dict:
+        headers = {"Accept": "application/json"}
+        if api_key:
+            headers["x-cg-pro-api-key"] = api_key
+        request = urllib.request.Request(url, headers=headers)
+        context = ssl.create_default_context(cafile=certifi.where())
+        with urllib.request.urlopen(request, timeout=5, context=context) as response:
+            return dict(json.load(response))
 
     async def scan(self, *, pool: str, mint: str, age_seconds: float) -> StructureEvidence | None:
         if not pool or not mint or age_seconds < 3 * 3600:

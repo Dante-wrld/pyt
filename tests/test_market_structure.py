@@ -1,7 +1,12 @@
+import io
+import json as jsonlib
+from urllib.error import HTTPError
+
 import pytest
 
 from solana_launch_guard.market_structure import (
-    Candle, PAIRS, assess_bullish_continuation_candle, assess_structure, parse_closed_candles,
+    Candle, MarketStructureScanner, PAIRS, assess_bullish_continuation_candle,
+    assess_structure, parse_closed_candles,
 )
 
 
@@ -96,3 +101,60 @@ def test_bullish_continuation_rejects_corrupted_candle_values():
 
 def test_bullish_continuation_rejects_no_candles():
     assert assess_bullish_continuation_candle([], now=90) is None
+
+
+FREE_OHLCV_URL = (
+    "https://api.geckoterminal.com/api/v2/networks/solana/pools/POOL1/ohlcv/minute"
+)
+PAID_OHLCV_URL = (
+    "https://pro-api.coingecko.com/api/v3/onchain/networks/solana/pools/POOL1/ohlcv/minute"
+)
+
+
+def _ohlcv_payload(mint):
+    return jsonlib.dumps({
+        "meta": {"base": {"address": mint}, "quote": {"address": "OTHER"}},
+        "data": {"attributes": {"ohlcv_list": [
+            [0, 1, 1.1, 0.9, 1, 100],
+            [60, 1, 1.1, 0.9, 1, 100],
+        ]}},
+    }).encode()
+
+
+def test_ohlcv_429_falls_back_to_the_paid_api_when_a_key_is_configured(monkeypatch):
+    calls = []
+
+    def urlopen(request, timeout=None, context=None):
+        calls.append(request)
+        if request.full_url.startswith(FREE_OHLCV_URL):
+            raise HTTPError(request.full_url, 429, "Too Many Requests",
+                            {}, io.BytesIO(b"rate limited"))
+        if request.full_url.startswith(PAID_OHLCV_URL):
+            return io.BytesIO(_ohlcv_payload("MINT1"))
+        raise AssertionError(f"unexpected URL: {request.full_url}")
+
+    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+    monkeypatch.setenv("GECKOTERMINAL_API_KEY", "CG-test-key")
+    scanner = MarketStructureScanner()
+    candles = scanner._fetch("POOL1", "MINT1", ("minute", 1, 60))
+    assert candles is not None and len(candles) == 2
+    assert len(calls) == 2
+    assert calls[0].full_url.startswith(FREE_OHLCV_URL)
+    assert calls[1].full_url.startswith(PAID_OHLCV_URL)
+    assert calls[1].get_header("X-cg-pro-api-key") == "CG-test-key"
+
+
+def test_ohlcv_429_without_a_key_never_falls_back(monkeypatch):
+    calls = []
+
+    def urlopen(request, timeout=None, context=None):
+        calls.append(request)
+        raise HTTPError(request.full_url, 429, "Too Many Requests",
+                        {}, io.BytesIO(b"rate limited"))
+
+    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+    monkeypatch.delenv("GECKOTERMINAL_API_KEY", raising=False)
+    scanner = MarketStructureScanner()
+    with pytest.raises(HTTPError):
+        scanner._fetch("POOL1", "MINT1", ("minute", 1, 60))
+    assert len(calls) == 1

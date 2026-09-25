@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import datetime
 import json
+import os
 import ssl
 import urllib.error
 import urllib.request
@@ -32,6 +33,11 @@ import certifi
 from .market import MarketQuote
 
 GECKOTERMINAL_BASE_URL = "https://api.geckoterminal.com/api/v2"
+# A paid CoinGecko key (GECKOTERMINAL_API_KEY) is only a fallback for when
+# the free, unauthenticated, undocumented-rate-limit API above returns a
+# 429 - the free API is still tried first on every call. Same paths and
+# query params past this prefix, per CoinGecko's own docs.
+COINGECKO_PRO_ONCHAIN_BASE_URL = "https://pro-api.coingecko.com/api/v3/onchain"
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,8 +63,9 @@ class GeckoTerminalError(RuntimeError):
 
 
 class GeckoTerminalClient:
-    def __init__(self) -> None:
+    def __init__(self, *, api_key: str | None = None) -> None:
         self._ssl = ssl.create_default_context(cafile=certifi.where())
+        self._api_key = api_key if api_key is not None else os.getenv("GECKOTERMINAL_API_KEY") or None
 
     async def trending_pools(self, *, pages: int = 1) -> list[GeckoPool]:
         return await asyncio.to_thread(self._trending_pools, pages)
@@ -66,30 +73,51 @@ class GeckoTerminalClient:
     def _trending_pools(self, pages: int) -> list[GeckoPool]:
         results: list[GeckoPool] = []
         for page in range(1, max(1, pages) + 1):
-            url = f"{GECKOTERMINAL_BASE_URL}/networks/solana/trending_pools?page={page}"
-            payload = self._get(url)
+            payload = self._get(f"/networks/solana/trending_pools?page={page}")
             for row in payload.get("data") or []:
                 parsed = _parse_pool(row)
                 if parsed is not None:
                     results.append(parsed)
         return results
 
-    def _get(self, url: str) -> dict[str, Any]:
-        request = urllib.request.Request(
-            url,
-            headers={
-                "Accept": "application/json",
-                "User-Agent": "solana-launch-guard/0.7",
-            },
-        )
+    def _get(self, path: str) -> dict[str, Any]:
+        """The free API first; only on a rate limit (HTTP 429), and only if a
+        paid key is configured, retry once against CoinGecko's paid onchain
+        API. The free API stays the default even when a key is set."""
         try:
-            with urllib.request.urlopen(request, timeout=20, context=self._ssl) as response:
-                return dict(json.load(response))
+            return self._request(GECKOTERMINAL_BASE_URL + path, api_key=None)
         except urllib.error.HTTPError as exc:
-            body = exc.read().decode("utf-8", "replace")
-            raise GeckoTerminalError(f"GeckoTerminal HTTP {exc.code}: {body}") from exc
+            if exc.code == 429 and self._api_key:
+                return self._request_or_raise(
+                    COINGECKO_PRO_ONCHAIN_BASE_URL + path, api_key=self._api_key
+                )
+            raise self._as_error(exc) from exc
         except (OSError, ValueError) as exc:
             raise GeckoTerminalError(f"GeckoTerminal request failed: {exc}") from exc
+
+    def _request_or_raise(self, url: str, *, api_key: str) -> dict[str, Any]:
+        try:
+            return self._request(url, api_key=api_key)
+        except urllib.error.HTTPError as exc:
+            raise self._as_error(exc) from exc
+        except (OSError, ValueError) as exc:
+            raise GeckoTerminalError(f"GeckoTerminal request failed: {exc}") from exc
+
+    def _request(self, url: str, *, api_key: str | None) -> dict[str, Any]:
+        headers = {
+            "Accept": "application/json",
+            "User-Agent": "solana-launch-guard/0.7",
+        }
+        if api_key:
+            headers["x-cg-pro-api-key"] = api_key
+        request = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(request, timeout=20, context=self._ssl) as response:
+            return dict(json.load(response))
+
+    @staticmethod
+    def _as_error(exc: urllib.error.HTTPError) -> GeckoTerminalError:
+        body = exc.read().decode("utf-8", "replace")
+        return GeckoTerminalError(f"GeckoTerminal HTTP {exc.code}: {body}")
 
 
 def _parse_pool(row: dict[str, Any]) -> GeckoPool | None:
