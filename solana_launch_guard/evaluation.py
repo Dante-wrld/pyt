@@ -457,3 +457,83 @@ def horizon_stats(
     return HorizonStats(
         horizon_seconds, counted, median, dead / counted, doubled / counted
     )
+
+
+def excursion_stats(
+    decisions: Sequence[TrackedDecision],
+    rules: ExitRules,
+    *,
+    breakeven_pct: float,
+    stop_pct: float,
+    window_seconds: float = 24 * 3600.0,
+    thresholds: Sequence[float] = (20.0, 50.0, 100.0),
+) -> dict:
+    """How far prices went after entry, and whether a target came before the
+    stop. "Rose above entry" alone is nearly always true (any uptick counts),
+    so this reports the size of the moves and their order against the stop."""
+    targets = [breakeven_pct, *thresholds]
+    reached = {t: 0 for t in targets}
+    before_stop = {t: 0 for t in targets}
+    peaks: list[float] = []
+    peak_minutes: list[float] = []
+    stopped = counted = 0
+    for decision in decisions:
+        entry = entry_observation(decision, rules)
+        if entry is None:
+            continue
+        start, entry_obs = entry
+        entry_price = float(entry_obs.price_usd or 0.0)
+        path = [
+            o for o in decision.observations[start + 1 :]
+            if o.observed_at - entry_obs.observed_at <= window_seconds
+            and o.usable(rules.min_exit_liquidity_usd)
+        ]
+        if not path:
+            continue
+        counted += 1
+        stop_price = entry_price * (1 - stop_pct / 100)
+        stop_hit = False
+        best, best_at = entry_price, entry_obs.observed_at
+        hit: set[float] = set()
+        for obs in path:
+            price = float(obs.price_usd or 0.0)
+            if price > best:
+                best, best_at = price, obs.observed_at
+            for t in targets:
+                if t not in hit and price >= entry_price * (1 + t / 100):
+                    hit.add(t)
+                    reached[t] += 1
+                    if not stop_hit:
+                        before_stop[t] += 1
+            if price <= stop_price:
+                stop_hit = True
+        stopped += stop_hit
+        peaks.append((best / entry_price - 1) * 100)
+        peak_minutes.append((best_at - entry_obs.observed_at) / 60)
+
+    def median(values: list[float]) -> float | None:
+        if not values:
+            return None
+        ordered = sorted(values)
+        mid = len(ordered) // 2
+        if len(ordered) % 2:
+            return ordered[mid]
+        return (ordered[mid - 1] + ordered[mid]) / 2
+
+    return {
+        "tokens": counted,
+        "breakeven_pct": breakeven_pct,
+        "stop_pct": stop_pct,
+        "share_hit_stop": stopped / counted if counted else None,
+        "median_peak_pct": median(peaks),
+        "median_minutes_to_peak": median(peak_minutes),
+        "targets": [
+            {
+                "pct": t,
+                "reached": reached[t] / counted if counted else None,
+                "reached_before_stop": before_stop[t] / counted if counted else None,
+            }
+            for t in targets
+        ],
+    }
+

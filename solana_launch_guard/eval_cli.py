@@ -32,6 +32,7 @@ from .evaluation import (
     Summary,
     TrackedDecision,
     TradeResult,
+    excursion_stats,
     horizon_stats,
     reason_category,
     simulate_ladder_trade,
@@ -271,6 +272,11 @@ def build_report(
             "all": summarize(_simulate(members, rules, costs)).as_dict(),
             "train": summarize(_simulate(train, rules, costs)).as_dict(),
             "test": summarize(_simulate(test, rules, costs)).as_dict(),
+            "excursions": excursion_stats(
+                members, _entry_rules(rules),
+                breakeven_pct=costs.breakeven_move_pct(),
+                stop_pct=rules.stop_loss_pct,
+            ),
             "horizons": [
                 _horizon_dict(horizon_stats(members, h, _entry_rules(rules)))
                 for h in DEFAULT_HORIZONS
@@ -413,6 +419,25 @@ def _render(report: dict) -> str:
             )
         if horizon_bits:
             lines.append("  " + " | ".join(horizon_bits))
+        exc = group.get("excursions") or {}
+        if exc.get("tokens"):
+            bits = []
+            for t in exc["targets"]:
+                label = (
+                    f"break-even +{t['pct']:.1f}%"
+                    if t["pct"] == exc["breakeven_pct"] else f"+{t['pct']:g}%"
+                )
+                first = _fmt_pct(t["reached_before_stop"])
+                bits.append(
+                    f"{label} {_fmt_pct(t['reached'])} "
+                    f"({first} before -{exc['stop_pct']:g}%)"
+                )
+            lines.append("  upside reached: " + " | ".join(bits))
+            lines.append(
+                f"  median peak {exc['median_peak_pct']:+.0f}% after "
+                f"{exc['median_minutes_to_peak']:.0f} min; "
+                f"{_fmt_pct(exc['share_hit_stop'])} hit the stop at some point"
+            )
         lines.append("")
 
     if report.get("momentum_vs_buy_zone"):
