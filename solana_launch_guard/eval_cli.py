@@ -3,6 +3,7 @@
     launch-guard-eval track            # run beside the bot; read-only on its DBs
     launch-guard-eval report           # offline; no network
     launch-guard-eval report --json    # machine-readable
+    launch-guard-eval copyfomo         # CopyFomo's realized SOL P&L, offline
 """
 from __future__ import annotations
 
@@ -15,6 +16,12 @@ import os
 from collections import defaultdict
 from collections.abc import Sequence
 
+from .copyfomo_report import (
+    build_copyfomo_report,
+    load_trades,
+    per_token,
+    render_copyfomo_report,
+)
 from .evaluation import (
     CostModel,
     ExitRules,
@@ -75,6 +82,17 @@ def _parser() -> argparse.ArgumentParser:
     report.add_argument("--train-fraction", type=float, default=0.7)
     report.add_argument("--min-category-size", type=int, default=20)
     report.add_argument("--json", action="store_true")
+
+    copyfomo = sub.add_parser(
+        "copyfomo", help="CopyFomo's realized P&L from its recorded wallet trades"
+    )
+    copyfomo.add_argument(
+        "--db", default=os.getenv("DATABASE_PATH", "launch_guard.db")
+    )
+    copyfomo.add_argument(
+        "--wallet", default=os.getenv("COPYFOMO_SOLANA_WALLET", "")
+    )
+    copyfomo.add_argument("--json", action="store_true")
     return parser
 
 
@@ -282,6 +300,16 @@ def _render(report: dict) -> str:
 def main(argv: Sequence[str] | None = None) -> None:
     args = _parser().parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
+    if args.command == "copyfomo":
+        if not args.wallet:
+            raise SystemExit("Set COPYFOMO_SOLANA_WALLET or pass --wallet.")
+        cf_report = build_copyfomo_report(per_token(load_trades(args.db, args.wallet)))
+        print(
+            json.dumps(cf_report, indent=2)
+            if args.json
+            else render_copyfomo_report(cf_report, args.wallet)
+        )
+        return
     store = OutcomeStore(args.outcomes_db)
     try:
         if args.command == "track":

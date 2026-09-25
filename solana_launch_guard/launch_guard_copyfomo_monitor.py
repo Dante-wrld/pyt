@@ -29,7 +29,8 @@ class CopyFomoMonitorMixin(LaunchGuardState):
     async def handle_copyfomo_solana_trade(self, trade: WalletTrade) -> None:
         quote = await self.oracle.quote(trade.mint)
         symbol = quote.symbol if quote else trade.mint[:6]
-        price = quote.price_usd if quote else None
+        # The column is observed_price_sol; this used to store the USD price.
+        price = quote.price_sol if quote else None
         inserted = self.store.save_wallet_trade(
             wallet=trade.wallet,
             signature=trade.signature,

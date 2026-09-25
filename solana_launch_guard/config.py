@@ -9,6 +9,20 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 
 
+def _dotenv_value(raw: str) -> str:
+    """Parse one .env value like standard dotenv: a quoted value is taken
+    verbatim (so it may contain '#'); an unquoted one ends at a ' #' comment."""
+    value = raw.strip()
+    if value.startswith("#"):
+        return ""  # KEY=   # comment  -> empty value
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+        return value[1:-1]
+    match = re.search(r"\s#", value)
+    if match:
+        value = value[: match.start()]
+    return value.strip().strip('"').strip("'")
+
+
 def _load_dotenv(path: str = ".env") -> None:
     """Load a simple .env file without overwriting real environment variables."""
     file_path = Path(path)
@@ -20,7 +34,7 @@ def _load_dotenv(path: str = ".env") -> None:
             continue
         key, value = line.split("=", 1)
         key = key.strip()
-        value = value.strip().strip('"').strip("'")
+        value = _dotenv_value(value)
         if key:
             os.environ.setdefault(key, value)
 

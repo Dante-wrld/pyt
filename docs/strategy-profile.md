@@ -22,18 +22,24 @@ Unset variables keep the previous behaviour.
 ## Recommended starting profile
 
 ```ini
-FEED_PUMPPORTAL_LAUNCHES=false  # see note below
-FEED_SOLANA_MOMENTUM=true       # the live candidate source
+# See the note below on why the launch feed is off.
+FEED_PUMPPORTAL_LAUNCHES=false
+# The live candidate source.
+FEED_SOLANA_MOMENTUM=true
 FEED_LAUNCHLAB=false
-FEED_COPYFOMO_WALLETS=false
+# Read-only: records CopyFomo's own trades, never buys.
+FEED_COPYFOMO_WALLETS=true
+COPYFOMO_SOLANA_WALLET=<CopyFomo's wallet address>
 FEED_MULTICHAIN=false
 ENTRY_ALLOWED_DECISIONS=BUY ZONE
 ENTRY_MIN_TOKEN_AGE_DAYS=3
 SOLANA_MOMENTUM_MIN_AGE_DAYS=3
 AUTO_BUY_DISCOVERY_MIN_LIQUIDITY_USD=50000
 AUTO_REBUY_ENABLED=false
+# Real copy-trading stays off.
 WATCHED_WALLETS=
-AGENT_LIVE_KILL_SWITCH=true     # LLM agents stay paper/shadow
+# LLM agents stay paper/shadow.
+AGENT_LIVE_KILL_SWITCH=true
 ```
 
 Why the launch feed is off: the recommendation pool (30 slots) evicts the
@@ -46,3 +52,24 @@ Roll-out: run a day with `AUTO_BUY_LIVE=false`, check the `AUTO-BUY SHADOW`
 and `STRATEGY PROFILE` lines look right, then decide whether to go live. Keep
 `launch-guard-eval track` running throughout and judge the result with
 `launch-guard-eval report` against the stopping rule you set in advance.
+
+## CopyFomo evaluation
+
+`FEED_COPYFOMO_WALLETS` only watches CopyFomo's own wallet
+(`COPYFOMO_SOLANA_WALLET`) and records its trades; it never scores or buys.
+This is different from `WATCHED_WALLETS`, which makes Launch Guard buy what
+other wallets buy. Keep that off.
+
+```bash
+launch-guard-eval copyfomo          # realized SOL P&L per position and per week
+launch-guard-eval copyfomo --json
+```
+
+Results come from the SOL that actually moved in CopyFomo's wallet, so they
+include every fee and all slippage. Tokens are identified by the mint in the
+on-chain trade, never by name. Legs that cannot be priced from SOL flow
+(token-to-token swaps, WSOL/USDC routes, airdrops, sells of positions opened
+before monitoring began) are listed as UNPRICED and left out of the totals
+rather than guessed. The wallet shows what CopyFomo traded, not which leader
+it copied; per-leader results need CopyFomo's own history.
+

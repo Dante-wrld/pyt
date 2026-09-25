@@ -11,7 +11,6 @@ from pathlib import Path
 from openai import OpenAIError
 
 from .agent_capital import CapitalBook
-from .hunter_shadow_strategy import ShadowRecoveryPolicy, assess_entry, assess_exit
 from .agents import (
     AgentCoordinator,
     AgentRecord,
@@ -22,6 +21,8 @@ from .agents import (
     RiskSnapshot,
     TradeAction,
 )
+from .config import _dotenv_value
+from .hunter_shadow_strategy import ShadowRecoveryPolicy, assess_entry, assess_exit
 from .openai_agents import OpenAIProposalModel, connection_test
 
 
@@ -35,7 +36,7 @@ def load_dotenv(path: str = ".env") -> None:
             continue
         key, value = line.split("=", 1)
         if key.strip():
-            os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+            os.environ.setdefault(key.strip(), _dotenv_value(value))
 
 
 def friendly_api_error(exc: Exception) -> str:
