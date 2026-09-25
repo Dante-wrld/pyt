@@ -273,3 +273,31 @@ def test_report_cli_runs_on_empty_store(tmp_path, capsys):
     main(["--outcomes-db", str(tmp_path / "o.db"), "report"])
     out = capsys.readouterr().out
     assert "Break-even" in out and "No tracked decisions" in out
+
+
+def test_tracker_reads_board_candidates_from_intelligence_scores(tmp_path):
+    launch_db = tmp_path / "launch_guard.db"
+    _make_launch_db(launch_db, [])
+    db = sqlite3.connect(launch_db)
+    db.execute(
+        "CREATE TABLE intelligence_scores (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "scored_at TEXT, mint TEXT, symbol TEXT, tier TEXT, total_score INTEGER, "
+        "safety_score INTEGER, momentum_score INTEGER, reasons_json TEXT)"
+    )
+    for _ in range(3):  # the momentum feed re-saves the same mint every poll
+        db.execute(
+            "INSERT INTO intelligence_scores(scored_at, mint, symbol, tier, "
+            "total_score, safety_score, momentum_score, reasons_json) "
+            "VALUES (?, 'OLD', 'OLD', 'CORE', 80, 40, 40, '[]')",
+            (datetime.fromtimestamp(1000.0, UTC).isoformat(),),
+        )
+    db.commit()
+    db.close()
+    store = OutcomeStore(tmp_path / "outcomes.db")
+    tracker = OutcomeTracker(
+        store, FakeClient({"OLD": 1.0}), TrackerConfig(),
+        launch_db=launch_db, ledger_db=None, clock=lambda: 1010.0,
+    )
+    assert tracker.ingest() == 1
+    assert store.due_mints(1010.0, 10) == ["OLD"]
+    store.close()

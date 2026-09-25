@@ -57,6 +57,10 @@ class RecommendationCandidate:
     planned_entry_price: float | None = None
     planned_stop_pct: float = 20.0
     planned_target_pct: float = 40.0
+    # Pool creation time from the quote, so live-entry gates can tell an
+    # established token from a fresh launch. None on snapshots saved before
+    # this field existed; the first quote update fills it in.
+    pair_created_at_ms: int | None = None
 
     def to_json(self) -> str:
         """Serialize the complete signal state for restart-safe monitoring."""
@@ -334,6 +338,7 @@ class RecommendationBook:
             observed_at=timestamp,
             updated_at=timestamp,
             pair_address=quote.pair_address or None,
+            pair_created_at_ms=quote.pair_created_at_ms,
             peak_price=price,
             entry_confirmation_required=self.entry_confirmation_polls,
             planned_stop_pct=stop_pct,
@@ -358,6 +363,8 @@ class RecommendationBook:
         candidate.current_price = price
         candidate.peak_price = max(candidate.peak_price, price)
         candidate.pair_address = quote.pair_address or None
+        if quote.pair_created_at_ms is not None:
+            candidate.pair_created_at_ms = quote.pair_created_at_ms
         candidate.liquidity_usd = quote.liquidity_usd
         candidate.volume_m5_usd = quote.volume_m5_usd
         candidate.buys_m5 = quote.buys_m5
@@ -925,6 +932,7 @@ def build_snapshot(
                 "symbol": candidate.symbol,
                 "chain": candidate.chain,
                 "pair_address": candidate.pair_address,
+                "pair_created_at_ms": candidate.pair_created_at_ms,
                 "tier": candidate.tier,
                 "signal_score": candidate.signal_score,
                 "rise_pct": candidate.rise_pct,

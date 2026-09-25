@@ -12,6 +12,9 @@ launch-guard-eval track
 
 - Opens `launch_guard.db` and the live-trial ledger **read-only** and writes
   only to `launch_guard_outcomes.db`. It holds no keys and sends no orders.
+- Sources: launch risk decisions, board candidates accepted by the
+  intelligence layer (`intelligence_scores`, which is where Solana momentum
+  candidates appear), and live-trial agent decisions.
 - For each new decision it samples the price immediately (the realistic
   entry), every 60s for the first hour for accepted/agent-considered tokens,
   and at 5m, 15m, 1h, 4h and 24h for everything.
@@ -29,7 +32,8 @@ launch-guard-eval report --take-profit-pct 50 --stop-loss-pct 25 --max-hold-seco
 launch-guard-eval report --slippage-bps 500 --json
 ```
 
-For every group (`launch:ACCEPTED`, `launch:REJECTED`, `ledger:<agent>:<state>`)
+For every group (`launch:ACCEPTED`, `launch:REJECTED`, `scored:<tier>`,
+`ledger:<agent>:<state>`)
 it prints net results after costs on all data, the earlier 70% (train) and
 the later 30% (test), plus how tokens looked at each horizon. It then shows,
 for each rejection reason, what those tokens would have made if bought under

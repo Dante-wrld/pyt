@@ -21,6 +21,7 @@ from .live_trial_ledger import LiveTrialLedger, TrialHalted
 from .execution import BuyIntent, USDC_MINT, PortfolioSignalExitPlanner
 from .market_structure import MarketStructureScanner
 from .wallet import SolanaRpc
+from .strategy_profile import StrategyProfile
 from dataclasses import replace
 
 
@@ -240,6 +241,19 @@ async def decide_hunter_entry(
                  "reasons": ["MOMENTUM BUY is paused pending a strategy review"]})
             for c, review in assessed
         ]
+    # The same shadow-only gate the deterministic auto-buyer uses: blocked
+    # signals still flow through assessment and BUY_ZONE_SKIPPED logging, so
+    # the ledger and outcome tracker keep recording them without an order.
+    profile = StrategyProfile.from_env()
+    gated = []
+    for c, review in assessed:
+        blocked = profile.entry_block_reason(
+            c.get("decision"), c.get("pair_created_at_ms"), now=at
+        )
+        if blocked is not None and review["state"] == "BUY_READY":
+            review = {**review, "state": "PAUSED", "reasons": [blocked]}
+        gated.append((c, review))
+    assessed = gated
     ready = [c for c, review in assessed if review["state"] == "BUY_READY"]
     if not ready:
         # A candidate can already show BUY ZONE/BUY NOW in the recommendation

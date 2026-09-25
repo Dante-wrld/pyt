@@ -34,6 +34,17 @@ class AutoBuyMixin(LaunchGuardState):
             or candidate.mint in self.settings.auto_buy_excluded_mints
         ):
             return
+        blocked = self.strategy_profile.entry_block_reason(
+            candidate.decision, candidate.pair_created_at_ms
+        )
+        if blocked is not None:
+            if self.entry_block_logged.get(candidate.mint) != blocked:
+                self.entry_block_logged[candidate.mint] = blocked
+                LOGGER.info(
+                    "AUTO-BUY SHADOW %s %s mint=%s (%s)",
+                    candidate.symbol, candidate.decision, candidate.mint, blocked,
+                )
+            return
         if self.settings.auto_buy_discovery:
             rejection = auto_buy_discovery_rejection(
                 candidate, self.settings

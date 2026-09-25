@@ -177,6 +177,39 @@ def read_launch_decisions(path: str | Path, after_id: int) -> list[NewDecision]:
     return decisions
 
 
+def read_scored_candidates(path: str | Path, after_id: int) -> list[NewDecision]:
+    """Candidates the intelligence layer accepted onto the board (read-only).
+
+    This is the only record of established-token candidates from the Solana
+    momentum feed, which never writes to ``decisions``. Labelled by tier.
+    """
+    connection = _open_read_only(path)
+    if connection is None:
+        return []
+    try:
+        rows = connection.execute(
+            "SELECT id, scored_at, mint, tier, total_score FROM intelligence_scores "
+            "WHERE id > ? ORDER BY id LIMIT 5000",
+            (after_id,),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return []
+    finally:
+        connection.close()
+    decisions: list[NewDecision] = []
+    for row_id, scored_at, mint, tier, score in rows:
+        try:
+            at = _iso_to_epoch(scored_at)
+        except (ValueError, TypeError):
+            continue
+        decisions.append(
+            NewDecision(
+                "scored", row_id, mint, at, str(tier), None, (f"score {score}",)
+            )
+        )
+    return decisions
+
+
 def read_ledger_decisions(path: str | Path, after_id: int) -> list[NewDecision]:
     """Live-trial agent decisions (read-only), labelled 'agent:STATE'."""
     connection = _open_read_only(path)
@@ -379,6 +412,10 @@ class OutcomeTracker:
             sources.append(
                 ("launch", read_launch_decisions(
                     self.launch_db, self.store.cursor("launch")))
+            )
+            sources.append(
+                ("scored", read_scored_candidates(
+                    self.launch_db, self.store.cursor("scored")))
             )
         if self.ledger_db:
             sources.append(

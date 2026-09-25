@@ -2539,7 +2539,7 @@ _DIGEST_SAME_NAME_FIELDS = frozenset({
     "buy_sell_ratio", "pair_address", "decision", "decision_reason",
     "entry_zone_low", "entry_zone_high", "peak_price",
     "entry_confirmation_count", "entry_confirmation_required",
-    "planned_entry_price",
+    "planned_entry_price", "pair_created_at_ms",
 })
 # dataclass field -> digest key, where the digest surfaces it under a
 # different name (usually because the digest key is itself a computed

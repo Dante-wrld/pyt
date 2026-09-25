@@ -80,6 +80,7 @@ from .recommendations import (
     write_snapshot,
 )
 from .strategy import AdaptiveStrategy
+from .strategy_profile import StrategyProfile
 from .wallet import (
     SolanaRpc,
     WalletWatcher,
@@ -139,6 +140,8 @@ class LaunchGuard(
                 client_secret=settings.bitquery_client_secret,
             )
         self.gecko_client = GeckoTerminalClient()
+        self.strategy_profile = StrategyProfile.from_env()
+        self.entry_block_logged: dict[str, str] = {}
         self.solana_momentum_last_result: dict[str, tuple[str, int]] = {}
         self.recommendation_console_output = True
         self.portfolio_monitor_enabled = False
@@ -346,13 +349,16 @@ class LaunchGuard(
 
     async def run(self, mode: str) -> None:
         await self._purge_restored_stock_token_candidates()
+        profile = self.strategy_profile
+        LOGGER.warning("STRATEGY PROFILE %s", profile.describe())
         tasks: list[asyncio.Task[Any]] = []
         if mode != "portfolio":
             tasks.append(asyncio.create_task(self.run_price_monitor()))
         if self.portfolio_monitor_enabled:
             tasks.append(asyncio.create_task(self.run_portfolio_monitor()))
         if mode in {"launches", "both", "all"}:
-            tasks.append(asyncio.create_task(self.run_launch_feed()))
+            if profile.feed_pumpportal_launches:
+                tasks.append(asyncio.create_task(self.run_launch_feed()))
             if (
                 self.settings.auto_buy_enabled
                 and self.settings.auto_buy_discovery
@@ -362,16 +368,18 @@ class LaunchGuard(
                         self.run_auto_buy_discovery_monitor()
                     )
                 )
-            if self.bitquery_client is not None:
+            if self.bitquery_client is not None and profile.feed_launchlab:
                 tasks.append(asyncio.create_task(self.run_launchlab_feed()))
-            tasks.append(asyncio.create_task(self.run_solana_momentum_feed()))
-            tasks.extend(self.build_copyfomo_wallet_tasks())
+            if profile.feed_solana_momentum:
+                tasks.append(asyncio.create_task(self.run_solana_momentum_feed()))
+            if profile.feed_copyfomo_wallets:
+                tasks.extend(self.build_copyfomo_wallet_tasks())
 
         if mode == "robinhood":
             tasks.append(
                 asyncio.create_task(self.run_multichain_feed(("robinhood",)))
             )
-        if mode in {"multichain", "all"}:
+        if mode in {"multichain", "all"} and profile.feed_multichain:
             tasks.append(
                 asyncio.create_task(
                     self.run_multichain_feed(

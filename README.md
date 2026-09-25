@@ -24,7 +24,8 @@ Direct on-chain swaps use Jupiter; Launch Guard does not log in to or control
 Fomo's app or website.
 
 Before changing strategy settings, measure them: see
-`docs/evaluation.md` (`launch-guard-eval track` / `report`).
+`docs/evaluation.md` (`launch-guard-eval track` / `report`). Feed and live-entry
+switches live in one place: `docs/strategy-profile.md`.
 
 ## What it does
 

@@ -37,6 +37,7 @@ from .portfolio import PortfolioAdvisor, PortfolioSignal
 from .pullback_tracking import PullbackTracker
 from .recommendations import RecommendationBook, RecommendationCandidate
 from .strategy import AdaptiveStrategy
+from .strategy_profile import StrategyProfile
 from .wallet import SolanaRpc, SolanaTokenHolding
 
 
@@ -71,6 +72,8 @@ class LaunchGuardState(Protocol):
     portfolio_signal_exit: PortfolioSignalExitPlanner
     auto_seller: SolanaAutoSeller | None
     auto_buyer: SolanaAutoBuyer | None
+    strategy_profile: StrategyProfile
+    entry_block_logged: dict[str, str]
 
     async def _maybe_auto_buy(
         self, candidate: RecommendationCandidate
