@@ -267,17 +267,22 @@ class SolanaRpc:
         return payload.get("result")
 
 
-def _token_amount(item: dict[str, Any]) -> Decimal:
+def _token_amount(item: dict[str, Any]) -> Decimal | None:
+    """A balance, or None when the RPC entry cannot be read. Never 0 for an
+    unreadable entry: a post-balance of 0 would read as selling everything."""
     ui = item.get("uiTokenAmount") or {}
     raw = ui.get("uiAmountString")
     if raw is not None:
         try:
             return Decimal(str(raw))
-        except Exception:
-            return Decimal(0)
-    amount = Decimal(str(ui.get("amount") or 0))
-    decimals = int(ui.get("decimals") or 0)
-    return amount / (Decimal(10) ** decimals)
+        except (ArithmeticError, ValueError):
+            pass  # fall back to the raw integer amount below
+    try:
+        amount = Decimal(str(ui.get("amount") or 0))
+        decimals = int(ui.get("decimals") or 0)
+        return amount / (Decimal(10) ** decimals)
+    except (ArithmeticError, ValueError, TypeError):
+        return None
 
 
 def parse_wallet_trades(
@@ -304,20 +309,21 @@ def parse_wallet_trades(
 
     before: dict[str, Decimal] = {}
     after: dict[str, Decimal] = {}
-    for item in meta.get("preTokenBalances") or []:
-        if item.get("owner") == wallet:
-            before[str(item.get("mint"))] = (
-                before.get(str(item.get("mint")), Decimal(0)) + _token_amount(item)
-            )
-    for item in meta.get("postTokenBalances") or []:
-        if item.get("owner") == wallet:
-            after[str(item.get("mint"))] = (
-                after.get(str(item.get("mint")), Decimal(0)) + _token_amount(item)
-            )
+    unreadable: set[str] = set()
+    for key, balances in (("preTokenBalances", before), ("postTokenBalances", after)):
+        for item in meta.get(key) or []:
+            if item.get("owner") != wallet:
+                continue
+            mint = str(item.get("mint"))
+            amount = _token_amount(item)
+            if amount is None:
+                unreadable.add(mint)
+                continue
+            balances[mint] = balances.get(mint, Decimal(0)) + amount
 
     trades: list[WalletTrade] = []
     for mint in sorted(set(before) | set(after)):
-        if mint in IGNORED_MINTS:
+        if mint in IGNORED_MINTS or mint in unreadable:
             continue
         delta = after.get(mint, Decimal(0)) - before.get(mint, Decimal(0))
         if delta == 0:

@@ -155,3 +155,32 @@ def test_commented_env_block_loads_cleanly(tmp_path, monkeypatch):
     assert os.environ["COPYFOMO_SOLANA_WALLET"] == ""
     monkeypatch.delenv("FEED_COPYFOMO_WALLETS")
     monkeypatch.delenv("COPYFOMO_SOLANA_WALLET")
+
+
+def test_unreadable_token_balance_is_skipped_not_read_as_a_full_sell():
+    from solana_launch_guard.wallet import parse_wallet_trades
+
+    wallet = "W" * 44
+    tx = {
+        "transaction": {"message": {"accountKeys": [wallet]}},
+        "meta": {
+            "preBalances": [1_000_000_000], "postBalances": [900_000_000],
+            "preTokenBalances": [
+                {"owner": wallet, "mint": "BAD",
+                 "uiTokenAmount": {"uiAmountString": "500"}},
+                {"owner": wallet, "mint": "OK",
+                 "uiTokenAmount": {"uiAmountString": "0"}},
+            ],
+            "postTokenBalances": [
+                {"owner": wallet, "mint": "BAD",
+                 "uiTokenAmount": {"uiAmountString": "garbled", "amount": "x"}},
+                {"owner": wallet, "mint": "OK",
+                 "uiTokenAmount": {"uiAmountString": "not-a-number",
+                                   "amount": "2500000", "decimals": 6}},
+            ],
+        },
+    }
+    trades = {t.mint: t for t in parse_wallet_trades(tx, wallet, "sig", 1)}
+    assert "BAD" not in trades  # unreadable: skipped, not a phantom full sell
+    # the raw integer amount is used when the display string is unreadable
+    assert trades["OK"].side == "BUY" and trades["OK"].token_delta == 2.5
