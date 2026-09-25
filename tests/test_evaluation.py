@@ -269,7 +269,8 @@ def test_tracker_end_to_end_report(tmp_path):
     store.close()
 
 
-def test_report_cli_runs_on_empty_store(tmp_path, capsys):
+def test_report_cli_runs_on_empty_store(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr("solana_launch_guard.eval_cli._load_dotenv", lambda: None)
     main(["--outcomes-db", str(tmp_path / "o.db"), "report"])
     out = capsys.readouterr().out
     assert "Break-even" in out and "No tracked decisions" in out

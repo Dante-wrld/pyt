@@ -26,7 +26,7 @@ import sqlite3
 from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 from .evaluation import bootstrap_mean_ci
@@ -151,7 +151,7 @@ def per_token(trades: Sequence[WalletTradeRow]) -> list[TokenResult]:
 
 
 def _week(epoch: float) -> str:
-    year, week, _ = datetime.fromtimestamp(epoch).isocalendar()
+    year, week, _ = datetime.fromtimestamp(epoch, UTC).isocalendar()
     return f"{year}-W{week:02d}"
 
 

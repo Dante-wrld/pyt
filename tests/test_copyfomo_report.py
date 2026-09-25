@@ -2,6 +2,7 @@ import asyncio
 from datetime import UTC, datetime
 
 import pytest
+import solana_launch_guard.eval_cli as eval_cli
 from solana_launch_guard.app import LaunchGuard
 from solana_launch_guard.config import _dotenv_value, _load_dotenv
 from solana_launch_guard.copyfomo_report import (
@@ -105,7 +106,8 @@ def test_monitor_stores_the_sol_price_in_the_sol_column(tmp_path):
     store.close()
 
 
-def test_end_to_end_from_recorded_trades_to_cli(tmp_path, capsys):
+def test_end_to_end_from_recorded_trades_to_cli(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(eval_cli, "_load_dotenv", lambda: None)
     database, store, guard = _guard_with_quote(tmp_path, 0.000002, 0.0003)
     for sig, side, sol in [("b", "BUY", -0.05), ("s", "SELL", 0.08)]:
         asyncio.run(guard.handle_copyfomo_solana_trade(WalletTrade(
@@ -121,6 +123,7 @@ def test_end_to_end_from_recorded_trades_to_cli(tmp_path, capsys):
 
 
 def test_cli_requires_a_wallet(monkeypatch):
+    monkeypatch.setattr(eval_cli, "_load_dotenv", lambda: None)
     monkeypatch.delenv("COPYFOMO_SOLANA_WALLET", raising=False)
     with pytest.raises(SystemExit, match="COPYFOMO_SOLANA_WALLET"):
         main(["copyfomo", "--wallet", ""])

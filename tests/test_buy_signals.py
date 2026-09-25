@@ -2,6 +2,7 @@ import asyncio
 import sqlite3
 from datetime import UTC, datetime
 
+import solana_launch_guard.eval_cli as eval_cli
 from solana_launch_guard.app import LaunchGuard
 from solana_launch_guard.core import SQLiteStore
 from solana_launch_guard.eval_cli import _promotion_verdict, build_report, main
@@ -178,7 +179,8 @@ def test_promotion_rule():
     )
 
 
-def test_group_filter(tmp_path, capsys):
+def test_group_filter(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(eval_cli, "_load_dotenv", lambda: None)
     store = OutcomeStore(tmp_path / "o.db")
     store.close()
     main(["--outcomes-db", str(tmp_path / "o.db"), "report", "--group", "signal:"])
