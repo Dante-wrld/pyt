@@ -17,7 +17,7 @@ from .agents import (
     RiskSnapshot, TradeAction,
 )
 from .hunter_shadow_strategy import ShadowRecoveryPolicy, assess_entry
-from .live_trial_ledger import LiveTrialLedger, TrialHalted
+from .live_trial_ledger import MAX_POSITIONS_PER_AGENT, LiveTrialLedger, TrialHalted
 from .execution import BuyIntent, USDC_MINT, PortfolioSignalExitPlanner
 from .market_structure import MarketStructureScanner
 from .wallet import SolanaRpc
@@ -299,6 +299,11 @@ async def decide_hunter_entry(
     same_kind_cap = (HUNTER_MOMENTUM_MAX_OPEN_POSITIONS if is_momentum
                      else HUNTER_NORMAL_MAX_OPEN_POSITIONS)
     if status["remaining_buy_cap_cents"] <= 0 or same_kind_open >= same_kind_cap:
+        return None
+    # The ledger's own ceiling counts every origin. Without this, a third buy
+    # passes the per-kind caps, pays for model approval and Jupiter quotes,
+    # and is then refused at reservation - every cycle.
+    if len(ledger.positions("hunter-v1")) >= MAX_POSITIONS_PER_AGENT:
         return None
     # An early-buy entry has no proven move behind it yet (that's the whole
     # trade-off: a better price in exchange for less evidence), so it gets
@@ -738,6 +743,8 @@ async def decide_regrowth_rebuy(
     positions = ledger.positions("hunter-v1")
     regrowth_open_positions = sum(1 for p in positions if p["origin"] == "regrowth")
     if status["remaining_buy_cap_cents"] <= 0 or regrowth_open_positions >= REGROWTH_MAX_OPEN_POSITIONS:
+        return None
+    if len(positions) >= MAX_POSITIONS_PER_AGENT:
         return None
     live_arbiter = _live_arbiter(min_liquidity_usd=REGROWTH_MIN_LIQUIDITY_USD, max_order_usd=5,
                                  max_open_positions=REGROWTH_MAX_OPEN_POSITIONS)

@@ -15,6 +15,11 @@ from typing import Any
 
 BUY_AGENTS = ("hunter-v1", "copy-v1")
 BUY_CAP_CENTS = 500
+# Hard ceiling on held positions across every origin and decision kind
+# (fresh MOMENTUM BUY, fresh other, regrowth). The runner's per-kind caps can
+# only be narrower than this; it checks this first so it never pays for model
+# approval of a buy the ledger will refuse at reservation.
+MAX_POSITIONS_PER_AGENT = 2
 AGENT_BUDGET_CENTS = 3000
 TRIAL_SECONDS = 8 * 3600
 
@@ -232,7 +237,8 @@ class LiveTrialLedger:
             if self.db.execute("SELECT 1 FROM orders WHERE mint=? AND side='BUY' "
                                "AND state IN ('RESERVED','SUBMITTED','UNCERTAIN')", (mint,)).fetchone():
                 raise ValueError("token buy has an unresolved trial intent")
-            if self.db.execute("SELECT COUNT(*) FROM positions WHERE agent=?", (agent,)).fetchone()[0] >= 2:
+            if self.db.execute("SELECT COUNT(*) FROM positions WHERE agent=?",
+                               (agent,)).fetchone()[0] >= MAX_POSITIONS_PER_AGENT:
                 raise ValueError("maximum two live positions per agent")
             self.db.execute(
                 "INSERT INTO orders(intent,agent,side,mint,reserved_cents,state,created_at) "

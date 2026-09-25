@@ -336,62 +336,52 @@ def _open_fresh_position(book, *, mint, decision):
                      origin="fresh", decision=decision)
 
 
-def test_decide_hunter_entry_momentum_and_normal_buys_have_separate_open_position_caps(
+def test_decide_hunter_entry_stops_at_the_ledger_ceiling_before_calling_the_model(
     tmp_path, monkeypatch,
 ):
-    """Confirmed live 2026-09-24: MOMENTUM BUY and every other decision kind
-    used to share one 2-position fresh-discovery cap, so two open MOMENTUM
-    BUY positions could block a completely unrelated BUY NOW/BUY ZONE/EARLY
-    BUY candidate (and vice versa) even though the two kinds are sized and
-    risk-managed independently (MOMENTUM BUY capped at $2, the rest at $5).
-    Each kind now gets its own separate cap."""
+    """MOMENTUM BUY and the other kinds have their own runner caps (2 each),
+    but the ledger holds every agent to MAX_POSITIONS_PER_AGENT (2) across all
+    kinds. The runner used to pass a third buy through its per-kind cap, pay
+    for model approval and Jupiter quotes, and then have reserve_buy refuse
+    it - every cycle. It now stops at the ledger's ceiling first."""
     monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    monkeypatch.setattr("solana_launch_guard.live_trial_runner.MOMENTUM_BUY_PAUSED", False)
     book = LiveTrialLedger(tmp_path / "trial.sqlite")
     book.start()
     _open_fresh_position(book, mint="B" * 44, decision="MOMENTUM BUY")
     _open_fresh_position(book, mint="C" * 44, decision="MOMENTUM BUY")
-    monkeypatch.setattr("solana_launch_guard.live_trial_runner.MOMENTUM_BUY_PAUSED", False)
     model = Model()
-    # Both MOMENTUM BUY slots are already taken - a third is blocked...
     assert asyncio.run(decide_hunter_entry(
-        # buys_m5/sells_m5 bumped above snapshot()'s default so this
-        # candidate genuinely clears MOMENTUM BUY's own evidence bar and
-        # the block below is proven to be the capacity cap, not an
-        # unrelated readiness gate (see test_momentum_buy_confirmed...).
         snapshot(decision="MOMENTUM BUY", buys_m5=40, sells_m5=20), model=model, ledger=book,
     )) is None
-    assert model.calls == 0
-    # ...but a BUY NOW candidate draws from its own, still-empty pool.
-    decision = asyncio.run(decide_hunter_entry(
+    # A BUY NOW has room under its own kind cap, but not under the ledger's.
+    assert asyncio.run(decide_hunter_entry(
         snapshot(decision="BUY NOW"), model=model, ledger=book,
-    ))
-    assert decision is not None
-    assert model.calls == 1
+    )) is None
+    assert model.calls == 0
+    with pytest.raises(ValueError, match="maximum two live positions"):
+        book.reserve_buy(intent="third", agent="hunter-v1", mint=MINT,
+                         requested_cents=500, approved_cents=500)
     book.close()
 
 
-def test_decide_hunter_entry_normal_buy_cap_does_not_block_momentum_buys(tmp_path, monkeypatch):
-    """The reverse of the above: two open BUY NOW/BUY ZONE positions filling
-    the normal-buy cap must not block a MOMENTUM BUY candidate."""
+def test_decide_hunter_entry_other_kind_still_buys_below_the_ceiling(tmp_path, monkeypatch):
+    """Below the ledger ceiling the per-kind caps are independent: one open
+    BUY NOW does not stop a MOMENTUM BUY, and its reservation is accepted."""
     monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
     monkeypatch.setattr("solana_launch_guard.live_trial_runner.MOMENTUM_BUY_PAUSED", False)
     book = LiveTrialLedger(tmp_path / "trial.sqlite")
     book.start()
     _open_fresh_position(book, mint="B" * 44, decision="BUY NOW")
-    _open_fresh_position(book, mint="C" * 44, decision="BUY ZONE")
     model = Model()
-    assert asyncio.run(decide_hunter_entry(
-        snapshot(decision="BUY NOW"), model=model, ledger=book,
-    )) is None
-    assert model.calls == 0
     decision = asyncio.run(decide_hunter_entry(
         snapshot(decision="MOMENTUM BUY", buys_m5=40, sells_m5=20), model=model, ledger=book,
     ))
-    assert decision is not None
-    assert model.calls == 1
+    assert decision is not None and model.calls == 1
+    book.reserve_buy(intent="second", agent="hunter-v1", mint=decision.mint,
+                     requested_cents=decision.requested_cents,
+                     approved_cents=decision.approved_cents)
     book.close()
-
-
 def test_decide_hunter_entry_skips_the_model_once_the_daily_loss_limit_is_breached(tmp_path, monkeypatch):
     """The daily loss limit (10% of the $30 equity used for live trading,
     i.e. -$3.00) is a hard deterministic gate that doesn't depend on
