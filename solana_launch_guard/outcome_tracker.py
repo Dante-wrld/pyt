@@ -177,6 +177,38 @@ def read_launch_decisions(path: str | Path, after_id: int) -> list[NewDecision]:
     return decisions
 
 
+def read_buy_signals(path: str | Path, after_id: int) -> list[NewDecision]:
+    """Each move into a buy decision (BUY ZONE, MOMENTUM BUY, ...) from the
+    board, labelled by decision so signals can be compared head to head.
+    Solana only: the quote source is DEX Screener's Solana endpoint."""
+    connection = _open_read_only(path)
+    if connection is None:
+        return []
+    try:
+        rows = connection.execute(
+            "SELECT id, signaled_at, mint, decision, reason, live_blocked_reason "
+            "FROM buy_signals WHERE id > ? AND chain = 'solana' "
+            "ORDER BY id LIMIT 5000",
+            (after_id,),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return []
+    finally:
+        connection.close()
+    decisions: list[NewDecision] = []
+    for row_id, signaled_at, mint, decision, reason, blocked in rows:
+        try:
+            at = _iso_to_epoch(signaled_at)
+        except (ValueError, TypeError):
+            continue
+        live = f"live: {blocked}" if blocked else "live: allowed"
+        reasons = tuple(r for r in (reason, live) if r)
+        decisions.append(
+            NewDecision("signal", row_id, mint, at, decision, None, reasons)
+        )
+    return decisions
+
+
 def read_scored_candidates(path: str | Path, after_id: int) -> list[NewDecision]:
     """Candidates the intelligence layer accepted onto the board (read-only).
 
@@ -417,6 +449,10 @@ class OutcomeTracker:
                 ("scored", read_scored_candidates(
                     self.launch_db, self.store.cursor("scored")))
             )
+            sources.append(
+                ("signal", read_buy_signals(
+                    self.launch_db, self.store.cursor("signal")))
+            )
         if self.ledger_db:
             sources.append(
                 ("ledger", read_ledger_decisions(
@@ -432,8 +468,10 @@ class OutcomeTracker:
                     decision.mint, self.config.reject_sample_rate
                 ):
                     continue
-                already = decision.mint in seen or self.store.is_scheduled_mint(
-                    decision.mint
+                # A signal is measured from the moment it fired, so it always
+                # gets its own samples even if the mint is already tracked.
+                already = decision.source != "signal" and (
+                    decision.mint in seen or self.store.is_scheduled_mint(decision.mint)
                 )
                 dense = decision.accepted is not False
                 samples = [] if already else plan_samples(

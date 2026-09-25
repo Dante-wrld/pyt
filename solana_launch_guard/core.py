@@ -403,6 +403,22 @@ class SQLiteStore:
                 reasons_json TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS buy_signals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                signaled_at TEXT NOT NULL,
+                mint TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                chain TEXT NOT NULL,
+                decision TEXT NOT NULL,
+                price REAL,
+                price_currency TEXT,
+                liquidity_usd REAL,
+                signal_score INTEGER,
+                pair_created_at_ms INTEGER,
+                reason TEXT,
+                live_blocked_reason TEXT
+            );
+
             CREATE TABLE IF NOT EXISTS wallet_trades (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 seen_at TEXT NOT NULL,
@@ -801,6 +817,39 @@ class SQLiteStore:
             ) VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (utc_now(), mint, side, price_sol, quantity, amount_sol, reason),
+        )
+        self.connection.commit()
+
+    def save_buy_signal(
+        self,
+        *,
+        mint: str,
+        symbol: str,
+        chain: str,
+        decision: str,
+        price: float | None,
+        price_currency: str | None,
+        liquidity_usd: float | None,
+        signal_score: int | None,
+        pair_created_at_ms: int | None,
+        reason: str | None,
+        live_blocked_reason: str | None,
+    ) -> None:
+        """One row each time a candidate moves into a buy decision. Written
+        for evaluation only; nothing on a trading path reads it."""
+        self.connection.execute(
+            """
+            INSERT INTO buy_signals(
+                signaled_at, mint, symbol, chain, decision, price,
+                price_currency, liquidity_usd, signal_score,
+                pair_created_at_ms, reason, live_blocked_reason
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                utc_now(), mint, symbol, chain, decision, price, price_currency,
+                liquidity_usd, signal_score, pair_created_at_ms, reason,
+                live_blocked_reason,
+            ),
         )
         self.connection.commit()
 

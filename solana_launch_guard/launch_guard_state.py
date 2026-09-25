@@ -74,6 +74,7 @@ class LaunchGuardState(Protocol):
     auto_buyer: SolanaAutoBuyer | None
     strategy_profile: StrategyProfile
     entry_block_logged: dict[str, str]
+    buy_signal_last_decision: dict[str, str]
 
     async def _maybe_auto_buy(
         self, candidate: RecommendationCandidate

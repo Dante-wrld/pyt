@@ -56,3 +56,22 @@ Honest-by-default conventions:
 3. Look at test once per idea. If you keep tweaking until test looks good,
    test has become train.
 4. Only change live settings after test agrees.
+
+## Comparing buy signals (MOMENTUM BUY vs BUY ZONE)
+
+The bot records every move into a buy decision in `buy_signals`: time, mint,
+price, reason, and whether the live entry gate would have blocked it. It logs
+the change, not every poll the candidate stays there. The tracker gives each
+signal its own price samples starting at the moment it fired, even when the
+token is already being tracked, so a MOMENTUM BUY that fires 40 minutes after
+a token appeared is measured from that moment.
+
+```bash
+launch-guard-eval report --group signal:
+launch-guard-eval report --group "signal:MOMENTUM BUY" --take-profit-pct 20 --stop-loss-pct 10
+```
+
+When both groups have data, the report prints them side by side on the test
+set and applies the promotion rule agreed before any results: MOMENTUM BUY
+goes live only with 100+ test signals, a 95% interval above zero, and an
+average no worse than BUY ZONE's. Until then it stays shadow-only.

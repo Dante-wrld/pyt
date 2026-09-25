@@ -142,6 +142,7 @@ class LaunchGuard(
         self.gecko_client = GeckoTerminalClient()
         self.strategy_profile = StrategyProfile.from_env()
         self.entry_block_logged: dict[str, str] = {}
+        self.buy_signal_last_decision: dict[str, str] = {}
         self.solana_momentum_last_result: dict[str, tuple[str, int]] = {}
         self.recommendation_console_output = True
         self.portfolio_monitor_enabled = False

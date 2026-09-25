@@ -81,6 +81,10 @@ def _parser() -> argparse.ArgumentParser:
     report.add_argument("--max-entry-lag", type=float, default=300.0)
     report.add_argument("--train-fraction", type=float, default=0.7)
     report.add_argument("--min-category-size", type=int, default=20)
+    report.add_argument(
+        "--group", default="",
+        help="only groups starting with this, e.g. 'signal:' or 'signal:MOMENTUM BUY'",
+    )
     report.add_argument("--json", action="store_true")
 
     copyfomo = sub.add_parser(
@@ -153,7 +157,7 @@ def build_report(
     for decision in decisions:
         groups[f"{decision.source}:{decision.label}"].append(decision)
 
-    group_reports = {}
+    group_reports: dict[str, dict] = {}
     for name, members in sorted(groups.items()):
         train, test = time_split(members, train_fraction)
         group_reports[name] = {
@@ -192,7 +196,18 @@ def build_report(
         )
     filters.sort(key=lambda f: f["if_bought"]["expectancy_usd"] or 0.0, reverse=True)
 
+    momentum = group_reports.get("signal:MOMENTUM BUY", {}).get("test")
+    pullback = group_reports.get("signal:BUY ZONE", {}).get("test")
+    head_to_head = None
+    if momentum and pullback:
+        head_to_head = {
+            "momentum_test": momentum,
+            "buy_zone_test": pullback,
+            "verdict": _promotion_verdict(Summary(**momentum), Summary(**pullback)),
+        }
+
     return {
+        "momentum_vs_buy_zone": head_to_head,
         "costs": {
             "position_usd": costs.position_usd,
             "slippage_bps_per_side": costs.slippage_bps_per_side,
@@ -211,6 +226,29 @@ def build_report(
         "groups": group_reports,
         "rejection_filters": filters,
     }
+
+
+def _promotion_verdict(momentum: Summary, buy_zone: Summary) -> str:
+    """The rule agreed before any data: MOMENTUM BUY goes live only with 100+
+    test signals, a 95% CI above zero, and no worse than BUY ZONE."""
+    if momentum.trades < MIN_TRADES_FOR_A_VERDICT:
+        return (
+            f"keep MOMENTUM BUY shadow-only: {momentum.trades} test signals, "
+            f"need {MIN_TRADES_FOR_A_VERDICT}+"
+        )
+    ci = momentum.expectancy_ci95_usd
+    if not ci or ci[0] <= 0:
+        return "keep MOMENTUM BUY shadow-only: its 95% CI is not above zero"
+    if (
+        buy_zone.expectancy_usd is not None
+        and momentum.expectancy_usd is not None
+        and momentum.expectancy_usd < buy_zone.expectancy_usd
+    ):
+        return "keep MOMENTUM BUY shadow-only: positive, but worse than BUY ZONE"
+    return (
+        "MOMENTUM BUY meets the promotion rule: consider adding it to "
+        "ENTRY_ALLOWED_DECISIONS"
+    )
 
 
 def _filter_verdict(
@@ -273,6 +311,13 @@ def _render(report: dict) -> str:
         if horizon_bits:
             lines.append("  " + " | ".join(horizon_bits))
         lines.append("")
+
+    if report.get("momentum_vs_buy_zone"):
+        h2h = report["momentum_vs_buy_zone"]
+        lines.append("MOMENTUM BUY vs BUY ZONE (test set, same costs and exits):")
+        lines.append(_summary_line("momentum", Summary(**h2h["momentum_test"])))
+        lines.append(_summary_line("buy zone", Summary(**h2h["buy_zone_test"])))
+        lines.append(f"  -> {h2h['verdict']}\n")
 
     if report["rejection_filters"]:
         lines.append(
@@ -341,8 +386,12 @@ def main(argv: Sequence[str] | None = None) -> None:
             dead_exit_fraction=args.dead_exit_fraction,
             max_entry_lag_seconds=args.max_entry_lag,
         )
+        loaded = [
+            d for d in store.load()
+            if f"{d.source}:{d.label}".startswith(args.group)
+        ]
         report = build_report(
-            store.load(), rules, costs,
+            loaded, rules, costs,
             train_fraction=args.train_fraction,
             min_category_size=args.min_category_size,
         )

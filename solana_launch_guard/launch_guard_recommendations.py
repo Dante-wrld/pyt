@@ -7,6 +7,7 @@ import time
 
 from .launch_guard_state import LaunchGuardState
 from .recommendations import (
+    ACTIONABLE_BUY_DECISIONS,
     build_snapshot,
     format_recommendations,
     write_snapshot,
@@ -17,6 +18,39 @@ LOGGER = logging.getLogger("solana_launch_guard")
 
 class RecommendationMonitorMixin(LaunchGuardState):
     """The recommendation dashboard refresh loop."""
+
+    def _record_buy_signals(self) -> None:
+        """Log each move INTO a buy decision (not every poll it stays there),
+        so the outcome tracker can measure each signal from the moment it
+        fired. Evaluation only: failures are logged and never block trading."""
+        current = self.recommendations.candidates
+        for key in [k for k in self.buy_signal_last_decision if k not in current]:
+            del self.buy_signal_last_decision[key]
+        for key, candidate in current.items():
+            decision = candidate.decision
+            previous = self.buy_signal_last_decision.get(key)
+            self.buy_signal_last_decision[key] = decision
+            if decision not in ACTIONABLE_BUY_DECISIONS or decision == previous:
+                continue
+            try:
+                self.store.save_buy_signal(
+                    mint=candidate.mint,
+                    symbol=candidate.symbol,
+                    chain=candidate.chain,
+                    decision=decision,
+                    price=candidate.current_price,
+                    price_currency=candidate.price_currency,
+                    liquidity_usd=candidate.liquidity_usd,
+                    signal_score=candidate.signal_score,
+                    pair_created_at_ms=candidate.pair_created_at_ms,
+                    reason=candidate.decision_reason,
+                    live_blocked_reason=self.strategy_profile.entry_block_reason(
+                        decision, candidate.pair_created_at_ms
+                    ),
+                )
+            except Exception as exc:  # noqa: BLE001 - evaluation must not break the loop
+                LOGGER.warning("Could not record %s signal for %s: %s",
+                               decision, candidate.symbol, exc)
 
     async def run_recommendation_monitor(self) -> None:
         LOGGER.info(
@@ -76,6 +110,8 @@ class RecommendationMonitorMixin(LaunchGuardState):
                 if ranked and self.recommendation_console_output:
                     use_color = self.settings.color_output and sys.stderr.isatty()
                     LOGGER.info("\n%s", format_recommendations(ranked, color=use_color))
+
+            self._record_buy_signals()
 
             if self.notifier is not None:
                 notification_candidates = list(
