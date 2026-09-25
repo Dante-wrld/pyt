@@ -334,3 +334,67 @@ def assess_dynamic_exit(
         "failed_retest_bearish_engulfing": failed_retest,
         "note": "Unvalidated evidence; no automatic trade or net-profit inference."
     }
+
+
+def classify_candle_pattern(
+    candles: list[Candle], *, now: float, period: int = 60, trend_bars: int = 5,
+) -> dict:
+    """Name the latest closed candle's shape, for research tagging only.
+
+    Shape thresholds (fractions of the candle's full range): doji body <= 10%,
+    marubozu body >= 90%, hammer-type lower wick >= 2x body with upper wick
+    <= 25%, inverted-type the mirror image, spinning top body <= 30% with both
+    wicks >= 25%. Hammer vs hanging man and inverted hammer vs shooting star
+    are the same shapes; the prior trend (close trend_bars back vs this open)
+    decides which. Always returns a label, so a signal whose candle could not
+    be read is counted as 'unavailable' instead of silently dropping out of
+    the comparison.
+    """
+    def result(pattern: str, **extra: object) -> dict:
+        return {"pattern": pattern, **extra}
+
+    if not candles or period <= 0 or not math.isfinite(now):
+        return result("unavailable")
+    latest = candles[-1]
+    if not 0 <= now - (latest.start + period) <= 2 * period:
+        return result("unavailable")
+    o, h, low, c = latest.open, latest.high, latest.low, latest.close
+    if (not all(math.isfinite(v) for v in (o, h, low, c)) or low <= 0
+            or low > min(o, c) or h < max(o, c)):
+        return result("unavailable")
+    span = h - low
+    if span <= 0:
+        return result("flat")
+    body = abs(c - o)
+    upper = h - max(o, c)
+    lower = min(o, c) - low
+    b, u, lo = body / span, upper / span, lower / span
+
+    prior = candles[-1 - trend_bars] if len(candles) > trend_bars else None
+    trend = (
+        "unknown" if prior is None
+        else "up" if o > prior.close else "down" if o < prior.close else "flat"
+    )
+    shape = dict(body_ratio=b, upper_wick_ratio=u, lower_wick_ratio=lo, trend=trend)
+
+    if b <= 0.10:
+        if u <= 0.10 and lo >= 0.60:
+            return result("dragonfly_doji", **shape)
+        if lo <= 0.10 and u >= 0.60:
+            return result("gravestone_doji", **shape)
+        if u >= 0.30 and lo >= 0.30:
+            return result("long_legged_doji", **shape)
+        return result("doji", **shape)
+    if b >= 0.90:
+        return result("bullish_marubozu" if c > o else "bearish_marubozu", **shape)
+    if lower >= 2 * body and u <= 0.25:
+        name = {"down": "hammer", "up": "hanging_man"}.get(trend, "hammer_shape")
+        return result(name, **shape)
+    if upper >= 2 * body and lo <= 0.25:
+        name = {"down": "inverted_hammer", "up": "shooting_star"}.get(
+            trend, "inverted_hammer_shape"
+        )
+        return result(name, **shape)
+    if b <= 0.30 and u >= 0.25 and lo >= 0.25:
+        return result("spinning_top", **shape)
+    return result("bullish" if c > o else "bearish", **shape)

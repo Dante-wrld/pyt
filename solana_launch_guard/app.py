@@ -143,6 +143,9 @@ class LaunchGuard(
         self.strategy_profile = StrategyProfile.from_env()
         self.entry_block_logged: dict[str, str] = {}
         self.buy_signal_last_decision: dict[str, str] = {}
+        # Separate from structure_scanner so tagging never spends its budget.
+        self.signal_candle_scanner = MarketStructureScanner()
+        self.signal_tag_tasks: set[asyncio.Task[None]] = set()
         self.solana_momentum_last_result: dict[str, tuple[str, int]] = {}
         self.recommendation_console_output = True
         self.portfolio_monitor_enabled = False

@@ -416,7 +416,9 @@ class SQLiteStore:
                 signal_score INTEGER,
                 pair_created_at_ms INTEGER,
                 reason TEXT,
-                live_blocked_reason TEXT
+                live_blocked_reason TEXT,
+                candle_pattern TEXT,
+                candle_trend TEXT
             );
 
             CREATE TABLE IF NOT EXISTS wallet_trades (
@@ -709,6 +711,15 @@ class SQLiteStore:
                 "ALTER TABLE auto_sell_batches "
                 "ADD COLUMN proceeds_usdc_raw INTEGER NOT NULL DEFAULT 0"
             )
+        signal_columns = {
+            str(row["name"])
+            for row in self.connection.execute("PRAGMA table_info(buy_signals)")
+        }
+        for column in ("candle_pattern", "candle_trend"):
+            if column not in signal_columns:
+                self.connection.execute(
+                    f"ALTER TABLE buy_signals ADD COLUMN {column} TEXT"
+                )
         portfolio_columns = {
             str(row["name"])
             for row in self.connection.execute("PRAGMA table_info(portfolio_states)")
@@ -834,10 +845,10 @@ class SQLiteStore:
         pair_created_at_ms: int | None,
         reason: str | None,
         live_blocked_reason: str | None,
-    ) -> None:
+    ) -> int:
         """One row each time a candidate moves into a buy decision. Written
         for evaluation only; nothing on a trading path reads it."""
-        self.connection.execute(
+        cursor = self.connection.execute(
             """
             INSERT INTO buy_signals(
                 signaled_at, mint, symbol, chain, decision, price,
@@ -850,6 +861,15 @@ class SQLiteStore:
                 liquidity_usd, signal_score, pair_created_at_ms, reason,
                 live_blocked_reason,
             ),
+        )
+        self.connection.commit()
+        return int(cursor.lastrowid or 0)
+
+    def tag_buy_signal(self, signal_id: int, pattern: str, trend: str | None) -> None:
+        """Candle shape at the moment a signal fired (research only)."""
+        self.connection.execute(
+            "UPDATE buy_signals SET candle_pattern = ?, candle_trend = ? WHERE id = ?",
+            (pattern, trend, signal_id),
         )
         self.connection.commit()
 

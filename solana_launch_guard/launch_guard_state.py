@@ -75,6 +75,8 @@ class LaunchGuardState(Protocol):
     strategy_profile: StrategyProfile
     entry_block_logged: dict[str, str]
     buy_signal_last_decision: dict[str, str]
+    signal_candle_scanner: MarketStructureScanner
+    signal_tag_tasks: set[asyncio.Task[None]]
 
     async def _maybe_auto_buy(
         self, candidate: RecommendationCandidate

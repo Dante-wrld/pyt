@@ -209,6 +209,27 @@ def read_buy_signals(path: str | Path, after_id: int) -> list[NewDecision]:
     return decisions
 
 
+def read_signal_tags(path: str | Path, ids: Sequence[int]) -> dict[int, str]:
+    """Candle patterns for the given buy_signals ids that have been tagged."""
+    connection = _open_read_only(path)
+    if connection is None or not ids:
+        if connection is not None:
+            connection.close()
+        return {}
+    try:
+        marks = ",".join("?" * len(ids))
+        rows = connection.execute(
+            f"SELECT id, candle_pattern FROM buy_signals WHERE id IN ({marks}) "
+            "AND candle_pattern IS NOT NULL",
+            tuple(ids),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return {}
+    finally:
+        connection.close()
+    return {int(row_id): str(pattern) for row_id, pattern in rows}
+
+
 def read_scored_candidates(path: str | Path, after_id: int) -> list[NewDecision]:
     """Candidates the intelligence layer accepted onto the board (read-only).
 
@@ -315,6 +336,32 @@ class OutcomeStore:
             "SELECT last_id FROM cursors WHERE source = ?", (source,)
         ).fetchone()
         return int(row[0]) if row else 0
+
+    def untagged_signal_ids(self, limit: int = 500) -> list[int]:
+        rows = self.connection.execute(
+            "SELECT source_id FROM tracked_decisions WHERE source = 'signal' "
+            "AND reasons_json NOT LIKE '%candle: %' "
+            "ORDER BY source_id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [int(row[0]) for row in rows]
+
+    def add_signal_tags(self, tags: dict[int, str]) -> None:
+        with self.connection:
+            for source_id, pattern in tags.items():
+                row = self.connection.execute(
+                    "SELECT reasons_json FROM tracked_decisions "
+                    "WHERE source = 'signal' AND source_id = ?",
+                    (source_id,),
+                ).fetchone()
+                if row is None:
+                    continue
+                reasons = [*json.loads(row[0]), f"candle: {pattern}"]
+                self.connection.execute(
+                    "UPDATE tracked_decisions SET reasons_json = ? "
+                    "WHERE source = 'signal' AND source_id = ?",
+                    (json.dumps(reasons), source_id),
+                )
 
     def is_scheduled_mint(self, mint: str) -> bool:
         return (
@@ -481,6 +528,12 @@ class OutcomeTracker:
                 seen.add(decision.mint)
                 added += 0 if already else 1
             self.store.record(source, decisions, tracked)
+        if self.launch_db:
+            # Tags arrive a few seconds after a signal row is written, often
+            # after this tracker already copied the row; fill them in later.
+            untagged = self.store.untagged_signal_ids()
+            if untagged:
+                self.store.add_signal_tags(read_signal_tags(self.launch_db, untagged))
         return added
 
     async def sample_once(self) -> int:

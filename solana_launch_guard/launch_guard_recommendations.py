@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-import logging
 import asyncio
+import logging
 import sys
 import time
 
 from .launch_guard_state import LaunchGuardState
+from .market_structure import classify_candle_pattern
 from .recommendations import (
     ACTIONABLE_BUY_DECISIONS,
     build_snapshot,
@@ -33,7 +34,7 @@ class RecommendationMonitorMixin(LaunchGuardState):
             if decision not in ACTIONABLE_BUY_DECISIONS or decision == previous:
                 continue
             try:
-                self.store.save_buy_signal(
+                signal_id = self.store.save_buy_signal(
                     mint=candidate.mint,
                     symbol=candidate.symbol,
                     chain=candidate.chain,
@@ -51,6 +52,31 @@ class RecommendationMonitorMixin(LaunchGuardState):
             except Exception as exc:  # noqa: BLE001 - evaluation must not break the loop
                 LOGGER.warning("Could not record %s signal for %s: %s",
                                decision, candidate.symbol, exc)
+                continue
+            if candidate.chain != "solana":
+                continue
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:  # called outside the monitor loop
+                self.store.tag_buy_signal(signal_id, "unavailable", None)
+                continue
+            task = loop.create_task(self._tag_signal_candle(
+                signal_id, pool=candidate.pair_address or "", mint=candidate.mint
+            ))
+            self.signal_tag_tasks.add(task)
+            task.add_done_callback(self.signal_tag_tasks.discard)
+
+    async def _tag_signal_candle(self, signal_id: int, *, pool: str, mint: str) -> None:
+        """Record the latest closed 1-minute candle's shape for a signal that
+        just fired. Research only; never delays or blocks the monitor."""
+        try:
+            candles = await self.signal_candle_scanner._closed_minute_candles(
+                pool=pool, mint=mint
+            )
+            tag = classify_candle_pattern(candles or [], now=time.time())
+            self.store.tag_buy_signal(signal_id, str(tag["pattern"]), tag.get("trend"))
+        except Exception as exc:  # noqa: BLE001 - evaluation must not break the loop
+            LOGGER.warning("Could not tag candle for signal %s: %s", signal_id, exc)
 
     async def run_recommendation_monitor(self) -> None:
         LOGGER.info(

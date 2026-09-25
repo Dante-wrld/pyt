@@ -103,3 +103,19 @@ and shows how the top ones did on test next to your current live settings.
 The top train row nearly always looks better than it will perform; a setting
 earns trust only if its test result holds up. Change live settings once, after
 the freeze, not after every sweep.
+
+## Candle patterns at signal time
+
+Each buy signal is tagged in the background with the shape of the latest
+closed 1-minute candle (GeckoTerminal OHLCV), using the classic definitions:
+marubozu, hammer / hanging man, inverted hammer / shooting star, doji
+variants, spinning top. Hammer vs hanging man and inverted hammer vs shooting
+star are the same shapes; the prior trend decides which. A candle that could
+not be read is tagged `unavailable`, never skipped, so it cannot bias the
+comparison. Tagging uses its own request budget and never delays the monitor.
+
+`report` then splits each signal type by pattern, e.g. MOMENTUM BUY on a
+bullish marubozu vs on a shooting star, with the same costs and exits.
+Signals from before tagging existed show as `untagged`. Compare patterns
+within one signal type only, and treat a pattern as worth a rule only when
+its interval clears the others'.
