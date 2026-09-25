@@ -10,12 +10,15 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import itertools
 import json
 import logging
 import os
 from collections import defaultdict
 from collections.abc import Sequence
+from dataclasses import replace
 
+from .config import _load_dotenv
 from .copyfomo_report import (
     build_copyfomo_report,
     load_trades,
@@ -25,11 +28,13 @@ from .copyfomo_report import (
 from .evaluation import (
     CostModel,
     ExitRules,
+    LadderRules,
     Summary,
     TrackedDecision,
     TradeResult,
     horizon_stats,
     reason_category,
+    simulate_ladder_trade,
     simulate_trade,
     summarize,
     time_split,
@@ -44,6 +49,81 @@ from .outcome_tracker import (
 
 DEFAULT_OUTCOMES_DB = "launch_guard_outcomes.db"
 MIN_TRADES_FOR_A_VERDICT = 100
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+def _add_ladder_args(parser: argparse.ArgumentParser) -> None:
+    """Ladder settings default to the live .env values (same names)."""
+    add = parser.add_argument
+    add("--ladder-stop-loss-pct", type=float,
+        default=_env_float("STOP_LOSS_PCT", 20.0),
+        help="price-only stand-in for the live reversal exits")
+    add("--principal-multiple", type=float,
+        default=_env_float("AUTO_SELL_PRINCIPAL_MULTIPLE", 2.0))
+    add("--half-profit-multiple", type=float,
+        default=_env_float("AUTO_SELL_HALF_PROFIT_MULTIPLE", 3.0))
+    add("--second-stage-fraction", type=float,
+        default=_env_float("AUTO_SELL_SECOND_STAGE_FRACTION", 0.5))
+    add("--trailing-activation-pct", type=float,
+        default=_env_float("TRAILING_ACTIVATION_PCT", 20.0))
+    add("--trailing-stop-pct", type=float,
+        default=_env_float("TRAILING_STOP_PCT", 12.0))
+    add("--principal-trailing-stop-pct", type=float,
+        default=_env_float("PRINCIPAL_RECOVERED_TRAILING_STOP_PCT", 25.0))
+    add("--stagnation-window", type=float,
+        default=_env_float("STAGNATION_WINDOW_SECONDS", 300.0),
+        help="seconds; 0 turns the stagnation exit off")
+    add("--stagnation-min-gain-pct", type=float,
+        default=_env_float("STAGNATION_MIN_GAIN_PCT", 3.0))
+    add("--ladder-max-hold-seconds", type=float, default=24 * 3600.0)
+
+
+def _add_cost_args(parser: argparse.ArgumentParser) -> None:
+    add = parser.add_argument
+    add("--position-usd", type=float, default=5.0)
+    add("--slippage-bps", type=float, default=300.0)
+    add("--fee-bps", type=float, default=10.0)
+    add("--fixed-fee-usd", type=float, default=0.02)
+    add("--min-exit-liquidity-usd", type=float, default=1000.0)
+    add("--dead-exit-fraction", type=float, default=0.0)
+    add("--max-entry-lag", type=float, default=300.0)
+
+
+def _costs(args: argparse.Namespace) -> CostModel:
+    return CostModel(
+        position_usd=args.position_usd,
+        slippage_bps_per_side=args.slippage_bps,
+        fee_bps_per_side=args.fee_bps,
+        fixed_fee_usd_per_side=args.fixed_fee_usd,
+    )
+
+
+def _ladder(args: argparse.Namespace) -> LadderRules:
+    return LadderRules(
+        stop_loss_pct=args.ladder_stop_loss_pct,
+        principal_multiple=args.principal_multiple,
+        half_profit_multiple=args.half_profit_multiple,
+        second_stage_fraction=args.second_stage_fraction,
+        trailing_activation_pct=args.trailing_activation_pct,
+        trailing_stop_pct=args.trailing_stop_pct,
+        principal_recovered_trailing_stop_pct=args.principal_trailing_stop_pct,
+        stagnation_window_seconds=args.stagnation_window,
+        stagnation_min_gain_pct=args.stagnation_min_gain_pct,
+        stagnation_enabled=args.stagnation_window > 0,
+        max_hold_seconds=args.ladder_max_hold_seconds,
+        min_exit_liquidity_usd=args.min_exit_liquidity_usd,
+        dead_exit_fraction=args.dead_exit_fraction,
+        max_entry_lag_seconds=args.max_entry_lag,
+    )
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -69,16 +149,15 @@ def _parser() -> argparse.ArgumentParser:
     track.add_argument("--poll-seconds", type=float, default=20.0)
 
     report = sub.add_parser("report", help="simulate trades after costs")
-    report.add_argument("--position-usd", type=float, default=5.0)
-    report.add_argument("--slippage-bps", type=float, default=300.0)
-    report.add_argument("--fee-bps", type=float, default=10.0)
-    report.add_argument("--fixed-fee-usd", type=float, default=0.02)
+    _add_cost_args(report)
+    report.add_argument(
+        "--exit-model", choices=("simple", "ladder"), default="simple",
+        help="simple: one TP/SL/time exit; ladder: the live-style profit ladder",
+    )
     report.add_argument("--take-profit-pct", type=float, default=30.0)
     report.add_argument("--stop-loss-pct", type=float, default=20.0)
     report.add_argument("--max-hold-seconds", type=float, default=3600.0)
-    report.add_argument("--min-exit-liquidity-usd", type=float, default=1000.0)
-    report.add_argument("--dead-exit-fraction", type=float, default=0.0)
-    report.add_argument("--max-entry-lag", type=float, default=300.0)
+    _add_ladder_args(report)
     report.add_argument("--train-fraction", type=float, default=0.7)
     report.add_argument("--min-category-size", type=int, default=20)
     report.add_argument(
@@ -86,6 +165,22 @@ def _parser() -> argparse.ArgumentParser:
         help="only groups starting with this, e.g. 'signal:' or 'signal:MOMENTUM BUY'",
     )
     report.add_argument("--json", action="store_true")
+
+    sweep = sub.add_parser(
+        "sweep", help="try many ladder exit settings: rank on train, show test"
+    )
+    _add_cost_args(sweep)
+    _add_ladder_args(sweep)
+    sweep.add_argument("--group", default="signal:MOMENTUM BUY")
+    sweep.add_argument("--train-fraction", type=float, default=0.7)
+    sweep.add_argument("--stops", default="10,15,20,30")
+    sweep.add_argument("--trails", default="8,12,20")
+    sweep.add_argument("--activations", default="10,20,40")
+    sweep.add_argument("--principal-multiples", default="1.5,2,3")
+    sweep.add_argument("--stagnation-windows", default="0,300,900")
+    sweep.add_argument("--min-train-trades", type=int, default=30)
+    sweep.add_argument("--top", type=int, default=10)
+    sweep.add_argument("--json", action="store_true")
 
     copyfomo = sub.add_parser(
         "copyfomo", help="CopyFomo's realized P&L from its recorded wallet trades"
@@ -136,18 +231,29 @@ def _verdict(summary: Summary) -> str:
 
 
 def _simulate(
-    decisions: Sequence[TrackedDecision], rules: ExitRules, costs: CostModel
+    decisions: Sequence[TrackedDecision],
+    rules: ExitRules | LadderRules,
+    costs: CostModel,
 ) -> list[TradeResult]:
-    return [
-        result
-        for decision in decisions
-        if (result := simulate_trade(decision, rules, costs)) is not None
-    ]
+    results: list[TradeResult] = []
+    for decision in decisions:
+        result = (
+            simulate_ladder_trade(decision, rules, costs)
+            if isinstance(rules, LadderRules)
+            else simulate_trade(decision, rules, costs)
+        )
+        if result is not None:
+            results.append(result)
+    return results
+
+
+def _entry_rules(rules: ExitRules | LadderRules) -> ExitRules:
+    return rules.entry_rules() if isinstance(rules, LadderRules) else rules
 
 
 def build_report(
     decisions: Sequence[TrackedDecision],
-    rules: ExitRules,
+    rules: ExitRules | LadderRules,
     costs: CostModel,
     *,
     train_fraction: float,
@@ -166,7 +272,7 @@ def build_report(
             "train": summarize(_simulate(train, rules, costs)).as_dict(),
             "test": summarize(_simulate(test, rules, costs)).as_dict(),
             "horizons": [
-                _horizon_dict(horizon_stats(members, h, rules))
+                _horizon_dict(horizon_stats(members, h, _entry_rules(rules)))
                 for h in DEFAULT_HORIZONS
             ],
         }
@@ -215,12 +321,9 @@ def build_report(
             "fixed_fee_usd_per_side": costs.fixed_fee_usd_per_side,
             "breakeven_move_pct": costs.breakeven_move_pct(),
         },
+        "exit_model": "ladder" if isinstance(rules, LadderRules) else "simple",
         "rules": {
-            "take_profit_pct": rules.take_profit_pct,
-            "stop_loss_pct": rules.stop_loss_pct,
-            "max_hold_seconds": rules.max_hold_seconds,
-            "min_exit_liquidity_usd": rules.min_exit_liquidity_usd,
-            "dead_exit_fraction": rules.dead_exit_fraction,
+            name: getattr(rules, name) for name in rules.__dataclass_fields__
         },
         "accepted_ci95_usd": accepted.expectancy_ci95_usd,
         "groups": group_reports,
@@ -342,7 +445,98 @@ def _render(report: dict) -> str:
     return "\n".join(lines)
 
 
+def _floats(raw: str) -> list[float]:
+    return [float(x) for x in raw.split(",") if x.strip()]
+
+
+def run_sweep(
+    members: Sequence[TrackedDecision],
+    live: LadderRules,
+    costs: CostModel,
+    args: argparse.Namespace,
+) -> dict:
+    """Grid-search the ladder on the TRAIN part only, then show how the best
+    settings did on TEST. Picking by test would make test meaningless."""
+    train, test = time_split(members, args.train_fraction)
+    rows: list[dict] = []
+    grid = itertools.product(
+        _floats(args.stops), _floats(args.trails), _floats(args.activations),
+        _floats(args.principal_multiples), _floats(args.stagnation_windows),
+    )
+    for stop, trail, activation, principal, stagnation in grid:
+        rules = replace(
+            live, stop_loss_pct=stop, trailing_stop_pct=trail,
+            trailing_activation_pct=activation, principal_multiple=principal,
+            half_profit_multiple=max(live.half_profit_multiple, principal + 0.5),
+            stagnation_window_seconds=stagnation,
+            stagnation_enabled=stagnation > 0,
+        )
+        tr = summarize(_simulate(train, rules, costs))
+        if tr.trades < args.min_train_trades:
+            continue
+        rows.append({
+            "stop_loss_pct": stop, "trailing_stop_pct": trail,
+            "trailing_activation_pct": activation, "principal_multiple": principal,
+            "stagnation_window_seconds": stagnation,
+            "train": tr.as_dict(),
+            "test": summarize(_simulate(test, rules, costs)).as_dict(),
+        })
+    rows.sort(key=lambda r: r["train"]["expectancy_usd"] or 0.0, reverse=True)
+    return {
+        "group": args.group,
+        "tracked": len(members),
+        "train_tracked": len(train),
+        "test_tracked": len(test),
+        "combinations_kept": len(rows),
+        "live_settings": {
+            "train": summarize(_simulate(train, live, costs)).as_dict(),
+            "test": summarize(_simulate(test, live, costs)).as_dict(),
+        },
+        "best": rows[: args.top],
+    }
+
+
+def _render_sweep(result: dict) -> str:
+    lines = [
+        f"Sweep over {result['group']}: {result['tracked']} tracked "
+        f"({result['train_tracked']} train / {result['test_tracked']} test), "
+        f"{result['combinations_kept']} settings with enough train trades",
+    ]
+    live = result["live_settings"]
+    lines.append(_summary_line("live/train", Summary(**live["train"])))
+    lines.append(_summary_line("live/test", Summary(**live["test"])))
+    if not result["best"]:
+        lines.append(
+            "\nNot enough data yet. Keep `launch-guard-eval track` running; "
+            "a sweep needs a few hundred signals to mean anything."
+        )
+        return "\n".join(lines)
+    lines.append(
+        "\nTop settings ranked by TRAIN (stop/trail/activation/principal/stag):"
+    )
+    for row in result["best"]:
+        name = (
+            f"{row['stop_loss_pct']:g}/{row['trailing_stop_pct']:g}/"
+            f"{row['trailing_activation_pct']:g}/{row['principal_multiple']:g}x/"
+            f"{row['stagnation_window_seconds']:g}s"
+        )
+        tr, te = Summary(**row["train"]), Summary(**row["test"])
+        ci = te.expectancy_ci95_usd
+        lines.append(
+            f"  {name:<22} train {_fmt_money(tr.expectancy_usd)} (n={tr.trades})"
+            f" | test {_fmt_money(te.expectancy_usd)} (n={te.trades})"
+            + (f" CI {ci[0]:+.3f}..{ci[1]:+.3f}" if ci else "")
+        )
+    lines.append(
+        "\nThe best train row usually looks better than it is. Trust a setting "
+        "only if its test result holds up, and change live settings once, "
+        "not after every sweep."
+    )
+    return "\n".join(lines)
+
+
 def main(argv: Sequence[str] | None = None) -> None:
+    _load_dotenv()  # same settings the bot runs with, so defaults match live
     args = _parser().parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
     if args.command == "copyfomo":
@@ -372,20 +566,24 @@ def main(argv: Sequence[str] | None = None) -> None:
             with contextlib.suppress(KeyboardInterrupt):
                 asyncio.run(tracker.run(args.poll_seconds))
             return
-        costs = CostModel(
-            position_usd=args.position_usd,
-            slippage_bps_per_side=args.slippage_bps,
-            fee_bps_per_side=args.fee_bps,
-            fixed_fee_usd_per_side=args.fixed_fee_usd,
-        )
-        rules = ExitRules(
+        costs = _costs(args)
+        if args.command == "sweep":
+            members = [
+                d for d in store.load()
+                if f"{d.source}:{d.label}".startswith(args.group)
+            ]
+            result = run_sweep(members, _ladder(args), costs, args)
+            print(json.dumps(result, indent=2) if args.json else _render_sweep(result))
+            return
+        rules: ExitRules | LadderRules = (
+            _ladder(args) if args.exit_model == "ladder" else ExitRules(
             take_profit_pct=args.take_profit_pct,
             stop_loss_pct=args.stop_loss_pct,
             max_hold_seconds=args.max_hold_seconds,
             min_exit_liquidity_usd=args.min_exit_liquidity_usd,
             dead_exit_fraction=args.dead_exit_fraction,
             max_entry_lag_seconds=args.max_entry_lag,
-        )
+        ))
         loaded = [
             d for d in store.load()
             if f"{d.source}:{d.label}".startswith(args.group)

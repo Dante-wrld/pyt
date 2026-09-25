@@ -75,3 +75,31 @@ When both groups have data, the report prints them side by side on the test
 set and applies the promotion rule agreed before any results: MOMENTUM BUY
 goes live only with 100+ test signals, a 95% interval above zero, and an
 average no worse than BUY ZONE's. Until then it stays shadow-only.
+
+## The live-style exit ladder and overnight sweeps
+
+`--exit-model ladder` replays each entry through a price-only model of the
+live exit: principal recovery at `AUTO_SELL_PRINCIPAL_MULTIPLE`, the second
+stage at `AUTO_SELL_HALF_PROFIT_MULTIPLE`, a trailing stop that widens to
+`PRINCIPAL_RECOVERED_TRAILING_STOP_PCT` once the principal is back, the
+stagnation exit, and a max hold. Settings default to your `.env`, so the
+simulation matches what the bot runs. Each sell leg pays its own slippage,
+fees and network fee.
+
+What it cannot model: the live reversal exits also use momentum and buy/sell
+counts, which the tracker does not record. `--ladder-stop-loss-pct` is the
+price-only stand-in, and the live trailing stop waits for selling pressure
+where the simulated one fires on price alone.
+
+```bash
+launch-guard-eval report --exit-model ladder --group signal:
+launch-guard-eval sweep --group "signal:MOMENTUM BUY"
+launch-guard-eval sweep --group "signal:BUY ZONE" --stops 15,20,25 --trails 10,12,15
+```
+
+`sweep` tries every combination of stop, trailing stop, trailing activation,
+principal multiple and stagnation window, ranks them on the train part only,
+and shows how the top ones did on test next to your current live settings.
+The top train row nearly always looks better than it will perform; a setting
+earns trust only if its test result holds up. Change live settings once, after
+the freeze, not after every sweep.

@@ -186,6 +186,145 @@ def simulate_trade(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class LadderRules:
+    """Price-only model of the live exit (hunter_shadow_strategy.assess_exit
+    plus the auto-sell profit ladder), using the same settings names.
+
+    Modelled exactly: principal recovery at ``principal_multiple``, the second
+    stage at ``half_profit_multiple``, the trailing stop that widens once the
+    principal is back, the stagnation exit, and max hold.
+
+    Approximated: the live bot's reversal exits also need momentum and
+    buy/sell evidence that the tracker does not record. ``stop_loss_pct`` is
+    the price-only stand-in for those, and the live trailing stop waits for
+    selling pressure where this one fires on price alone.
+    """
+
+    stop_loss_pct: float = 20.0
+    principal_multiple: float = 2.0
+    half_profit_multiple: float = 3.0
+    second_stage_fraction: float = 0.5
+    trailing_activation_pct: float = 20.0
+    trailing_stop_pct: float = 12.0
+    principal_recovered_trailing_stop_pct: float = 25.0
+    stagnation_window_seconds: float = 300.0
+    stagnation_min_gain_pct: float = 3.0
+    stagnation_enabled: bool = True
+    max_hold_seconds: float = 24 * 3600.0
+    min_exit_liquidity_usd: float = 1000.0
+    dead_exit_fraction: float = 0.0
+    max_entry_lag_seconds: float = 300.0
+
+    def entry_rules(self) -> ExitRules:
+        return ExitRules(
+            min_exit_liquidity_usd=self.min_exit_liquidity_usd,
+            max_entry_lag_seconds=self.max_entry_lag_seconds,
+        )
+
+
+def simulate_ladder_trade(
+    decision: TrackedDecision, rules: LadderRules, costs: CostModel
+) -> TradeResult | None:
+    """Replay one buy through the live-style exit ladder, selling in legs.
+    Each leg pays slippage, fees and the fixed network fee separately."""
+    entry = entry_observation(decision, rules.entry_rules())
+    if entry is None:
+        return None
+    start, entry_obs = entry
+    entry_price = float(entry_obs.price_usd or 0.0)
+    side = (costs.slippage_bps_per_side + costs.fee_bps_per_side) / 10_000
+    invested = costs.position_usd - costs.fixed_fee_usd_per_side
+    remaining = invested * (1 - side) / entry_price if invested > 0 else 0.0
+    proceeds = 0.0
+    sold_value = sold_tokens = 0.0
+    legs: list[str] = []
+
+    def sell(tokens: float, price: float, label: str) -> None:
+        nonlocal remaining, proceeds, sold_value, sold_tokens
+        tokens = min(tokens, remaining)
+        if tokens <= 0:
+            return
+        leg = tokens * price * (1 - side) - costs.fixed_fee_usd_per_side
+        proceeds += max(leg, 0.0)
+        sold_value += tokens * price
+        sold_tokens += tokens
+        remaining -= tokens
+        legs.append(label)
+
+    after = decision.observations[start + 1 :]
+    usable = [o for o in after if o.usable(rules.min_exit_liquidity_usd)]
+    trailing_dead = bool(after) and not after[-1].usable(rules.min_exit_liquidity_usd)
+    peak = entry_price
+    principal_done = second_done = False
+    exit_at = entry_obs.observed_at
+    for obs in usable:
+        price = float(obs.price_usd or 0.0)
+        exit_at = obs.observed_at
+        age = obs.observed_at - entry_obs.observed_at
+        peak = max(peak, price)
+        multiple = price / entry_price
+        gain_pct = (multiple - 1) * 100
+        peak_gain_pct = (peak / entry_price - 1) * 100
+        drawdown_pct = (1 - price / peak) * 100
+        trail = (
+            rules.principal_recovered_trailing_stop_pct
+            if principal_done else rules.trailing_stop_pct
+        )
+        stop_price = entry_price * (1 - rules.stop_loss_pct / 100)
+        if not principal_done and price <= stop_price:
+            sell(remaining, price, "STOP_LOSS")
+        elif peak_gain_pct >= rules.trailing_activation_pct and drawdown_pct >= trail:
+            sell(remaining, price, "TRAILING")
+        elif (
+            rules.stagnation_enabled
+            and not principal_done
+            and age >= rules.stagnation_window_seconds
+            and gain_pct < rules.stagnation_min_gain_pct
+        ):
+            sell(remaining, price, "STAGNANT")
+        elif age >= rules.max_hold_seconds:
+            sell(remaining, price, "TIME_EXIT")
+        elif not principal_done and multiple >= rules.principal_multiple:
+            # Sell just enough to get the stake back after costs.
+            needed = costs.position_usd + costs.fixed_fee_usd_per_side
+            sell(needed / (price * (1 - side)), price, "PRINCIPAL")
+            principal_done = True
+        elif (
+            principal_done
+            and not second_done
+            and multiple >= rules.half_profit_multiple
+        ):
+            sell(remaining * rules.second_stage_fraction, price, "SECOND_STAGE")
+            second_done = True
+        if remaining <= 0:
+            break
+
+    if remaining > 0:
+        if trailing_dead:
+            dead_price = entry_price * rules.dead_exit_fraction
+            if dead_price > 0:
+                sell(remaining, dead_price, "DIED")
+            else:
+                legs.append("DIED")
+                remaining = 0.0
+            exit_at = after[-1].observed_at
+        else:
+            last = float(usable[-1].price_usd or 0.0) if usable else entry_price
+            sell(remaining, last, "DATA_END")
+
+    return TradeResult(
+        mint=decision.mint,
+        label=decision.label,
+        entered_at=entry_obs.observed_at,
+        entry_price=entry_price,
+        exit_price=sold_value / sold_tokens if sold_tokens else 0.0,
+        exit_reason="+".join(dict.fromkeys(legs)) or "DATA_END",
+        held_seconds=max(0.0, exit_at - entry_obs.observed_at),
+        pnl_usd=proceeds - costs.position_usd,
+    )
+
+
 @dataclass(slots=True)
 class Summary:
     trades: int
