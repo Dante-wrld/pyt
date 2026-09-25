@@ -34,6 +34,7 @@ import json
 import logging
 import math
 import os
+import re
 import statistics
 import time
 from collections import deque
@@ -41,6 +42,13 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from solana_launch_guard.market import DexScreenerOracle, MarketQuote
+
+# 2026-09-24 20:32 local: the $50-position/dip-buy era ended here (position
+# size dropped to $5, dip-buys turned off - see CONFIG below). Trades from
+# before this still count toward total_pnl, but status/monitoring reports
+# before/after separately so those old losses don't dominate the headline
+# number for weeks.
+PNL_SPLIT_AT = 1790307124.0  # 2026-09-24 20:32:04 local
 
 # --------------------------------------------------------------------------
 # Config
@@ -79,6 +87,12 @@ CONFIG = {
     "max_total_usd_per_token": 150.0,
     "entry_min_health": 60,           # 0-100
     "reentry_cooldown_min": 30,       # wait after an exit before re-entering
+    # A token that loses this many times within the window (e.g. Fartcoin's
+    # liquidity-danger flag, three losses in a row before this fix, only a
+    # 30-minute cooldown apart each time) stops being re-entered for the
+    # rest of the window instead of paying to re-learn the same lesson.
+    "repeat_loss_block_count": 2,
+    "repeat_loss_window_hours": 24.0,
     "auto_enter": True,
     "history_hours": 6,
     "state_file": "tracker_state.json",
@@ -362,6 +376,8 @@ class Bot:
         self.watchlist = list(cfg["pinned"])
         self.hist = {t: TokenHistory(self.maxlen) for t in self.watchlist}
         self.positions, self.cooldown, self.total_pnl = {}, {}, 0.0
+        self.loss_history: dict[str, list[float]] = {}
+        self.pnl_before_split, self.pnl_since_split = 0.0, 0.0
         self.last_board_refresh = 0.0
         self._load()
         for t in self.watchlist:
@@ -376,6 +392,12 @@ class Bot:
         self.positions = {t: Position(**d) for t, d in st.get("positions", {}).items()}
         self.cooldown = st.get("cooldown", {})
         self.total_pnl = st.get("total_pnl", 0.0)
+        self.loss_history = {t: list(v) for t, v in st.get("loss_history", {}).items()}
+        if "pnl_before_split" in st and "pnl_since_split" in st:
+            self.pnl_before_split = st["pnl_before_split"]
+            self.pnl_since_split = st["pnl_since_split"]
+        else:
+            self.pnl_before_split, self.pnl_since_split = self._backfill_pnl_split()
         saved = st.get("watchlist") or []
         self.watchlist = list(dict.fromkeys([*self.watchlist, *saved, *self.positions]))
         for t, snaps in st.get("history", {}).items():
@@ -385,12 +407,40 @@ class Bot:
                     h.add(Snapshot(**s))
         log.info("Loaded state: %d open positions", len(self.positions))
 
+    def _backfill_pnl_split(self):
+        """One-time reconstruction from tracker.log's own CLOSED lines, for
+        a state file saved before the before/after split existed. Runs once;
+        afterward pnl_before_split/pnl_since_split are persisted and updated
+        incrementally in _close() instead."""
+        before = after = 0.0
+        log_path = Path(self.cfg["log_file"])
+        if not log_path.exists():
+            return before, after
+        pattern = re.compile(
+            r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}),\d+ \S+: CLOSED\. "
+            r"Trade P&L \$([+-]?\d+\.\d+) \|"
+        )
+        for line in log_path.read_text(errors="ignore").splitlines():
+            m = pattern.match(line)
+            if not m:
+                continue
+            ts = time.mktime(time.strptime(m.group(1), "%Y-%m-%d %H:%M:%S"))
+            pnl = float(m.group(2))
+            if ts >= PNL_SPLIT_AT:
+                after += pnl
+            else:
+                before += pnl
+        return before, after
+
     def save(self):
         st = {
             "watchlist": self.watchlist,
             "positions": {t: asdict(p) for t, p in self.positions.items()},
             "cooldown": self.cooldown,
             "total_pnl": self.total_pnl,
+            "loss_history": self.loss_history,
+            "pnl_before_split": self.pnl_before_split,
+            "pnl_since_split": self.pnl_since_split,
             "history": {t: [asdict(s) for s in h.snaps][-240:] for t, h in self.hist.items()},
         }
         tmp = Path(self.cfg["state_file"] + ".tmp")
@@ -464,6 +514,16 @@ class Bot:
         else:
             self._manage(token, pos, h, snap, score, info, prof)
 
+    def _is_repeat_offender(self, token, now):
+        """True once a token has lost this many times within the window -
+        it stops being re-entered for the rest of that window instead of
+        paying to re-learn the same lesson (e.g. Fartcoin's liquidity-
+        danger flag: three losses in a row, 30-minute cooldowns apart,
+        before this fix)."""
+        cutoff = now - self.cfg["repeat_loss_window_hours"] * 3600
+        recent = [t for t in self.loss_history.get(token, []) if t >= cutoff]
+        return len(recent) >= self.cfg["repeat_loss_block_count"]
+
     def _maybe_enter(self, token, h, snap, score, info):
         if not self.cfg["auto_enter"]:
             return
@@ -476,6 +536,7 @@ class Bot:
             "liq_stable": info["liq_trend_1h"] >= -0.05,
             "no_danger": not danger_signals(h),
             "cooldown": since_exit >= self.cfg["reentry_cooldown_min"],
+            "not_repeat_offender": not self._is_repeat_offender(token, snap.ts),
         }
         log.info("%s: price $%.8g health %.0f | entry checks failing: %s",
                  token[:6], snap.price, score,
@@ -564,19 +625,38 @@ class Bot:
     def _close(self, token, pos, snap, reason):
         self._sell(token, pos, snap, 1.0, reason)
         self.total_pnl += pos.realized_usd
+        if snap.ts >= PNL_SPLIT_AT:
+            self.pnl_since_split += pos.realized_usd
+        else:
+            self.pnl_before_split += pos.realized_usd
         log.info("%s: CLOSED. Trade P&L $%+.2f | total $%+.2f",
                  token[:6], pos.realized_usd, self.total_pnl)
         del self.positions[token]
         self.cooldown[token] = snap.ts
+        if pos.realized_usd < 0:
+            losses = self.loss_history.setdefault(token, [])
+            losses.append(snap.ts)
+            cutoff = snap.ts - self.cfg["repeat_loss_window_hours"] * 3600
+            self.loss_history[token] = [t for t in losses if t >= cutoff]
 
 
 async def run():
     bot = Bot(CONFIG, PaperExecutor())
     log.info("Tracking %d pinned tokens%s (paper mode)", len(CONFIG["pinned"]),
              " + board tokens" if CONFIG["dynamic_watchlist"] else "")
+    cycle = 0
     while True:
         await bot.poll_all()
         bot.save()
+        cycle += 1
+        # Every ~10 minutes: the $50/dip-buy era (before 20:32) dominates the
+        # raw total, so status reports it split instead of one misleading
+        # headline number.
+        if cycle % max(1, round(600 / CONFIG["poll_seconds"])) == 0:
+            log.info(
+                "PNL split: before 20:32 $%+.2f | since 20:32 $%+.2f | total $%+.2f | open %d",
+                bot.pnl_before_split, bot.pnl_since_split, bot.total_pnl, len(bot.positions),
+            )
         await asyncio.sleep(CONFIG["poll_seconds"])
 
 

@@ -124,3 +124,70 @@ def test_static_mode_never_reads_the_board(tmp_path, monkeypatch):
 
 def test_dip_buys_are_off_by_default():
     assert coin_tracker.CONFIG["dip_buys_enabled"] is False
+
+
+def make_snap(ts, price=0.1):
+    return coin_tracker.Snapshot(
+        ts=ts, price=price, liquidity=100_000, mcap=0, vol_m5=0, vol_h1=0,
+        vol_h24=0, buys_m5=0, sells_m5=0, buys_h1=0, sells_h1=0, pair_created_ms=0,
+    )
+
+
+def losing_position(ts):
+    return coin_tracker.Position(qty=10.0, cost_usd=100.0, peak=1.0, opened=ts, last_high=ts)
+
+
+def test_repeat_loss_blocks_only_after_the_threshold(bot):
+    token = "RISKY"
+    bot.positions[token] = losing_position(NOW)
+    bot._close(token, bot.positions[token], make_snap(NOW), "loss 1")
+    assert not bot._is_repeat_offender(token, NOW)  # one loss: not yet blocked
+
+    bot.positions[token] = losing_position(NOW + 100)
+    bot._close(token, bot.positions[token], make_snap(NOW + 100), "loss 2")
+    assert bot._is_repeat_offender(token, NOW + 200)
+
+
+def test_repeat_loss_block_expires_after_the_window(bot):
+    token = "RISKY"
+    window_seconds = bot.cfg["repeat_loss_window_hours"] * 3600
+    for ts in (NOW, NOW + 100):
+        bot.positions[token] = losing_position(ts)
+        bot._close(token, bot.positions[token], make_snap(ts), "loss")
+    assert bot._is_repeat_offender(token, NOW + 200)
+    assert not bot._is_repeat_offender(token, NOW + window_seconds + 200)
+
+
+def test_a_winning_close_never_counts_as_a_loss(bot):
+    token = "WINNER"
+    pos = coin_tracker.Position(qty=100.0, cost_usd=1.0, peak=1.0, opened=NOW, last_high=NOW)
+    bot.positions[token] = pos
+    bot._close(token, pos, make_snap(NOW, price=1.0), "big win")
+    assert not bot._is_repeat_offender(token, NOW)
+    assert bot.loss_history.get(token, []) == []
+
+
+def test_pnl_splits_by_close_time_around_the_freeze(bot):
+    before_ts = coin_tracker.PNL_SPLIT_AT - 3600
+    after_ts = coin_tracker.PNL_SPLIT_AT + 3600
+    bot.positions["A"] = losing_position(before_ts)
+    bot._close("A", bot.positions["A"], make_snap(before_ts), "old era loss")
+    bot.positions["B"] = losing_position(after_ts)
+    bot._close("B", bot.positions["B"], make_snap(after_ts), "new era loss")
+    assert bot.pnl_before_split < 0
+    assert bot.pnl_since_split < 0
+    assert bot.total_pnl == pytest.approx(bot.pnl_before_split + bot.pnl_since_split)
+
+
+def test_backfill_reconstructs_the_split_from_a_pre_existing_log(tmp_path, monkeypatch):
+    monkeypatch.setattr(coin_tracker, "DexScreenerOracle", lambda: None)
+    c = cfg(tmp_path, log_file=str(tmp_path / "tracker.log"))
+    (tmp_path / "tracker.log").write_text(
+        "2020-01-01 00:00:00,000 OLD: CLOSED. Trade P&L $-1.00 | total $-1.00\n"
+        "2030-01-01 00:00:00,000 NEW: CLOSED. Trade P&L $+2.00 | total $+1.00\n"
+    )
+    # A state file saved before the split existed has neither key.
+    (tmp_path / "state.json").write_text(json.dumps({"positions": {}, "total_pnl": 1.0}))
+    b = coin_tracker.Bot(c, coin_tracker.PaperExecutor())
+    assert b.pnl_before_split == pytest.approx(-1.0)
+    assert b.pnl_since_split == pytest.approx(2.0)
