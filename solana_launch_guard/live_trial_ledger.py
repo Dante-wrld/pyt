@@ -28,25 +28,31 @@ class TrialHalted(ValueError):
     """A trial guard blocks further orders."""
 
 
-# The PRINCIPAL sale is sized as cost / current value, so fees and slippage
-# leave it a few cents short almost every time. Up to this fraction short
-# still counts as the stake being back; a materially short fill does not.
-PRINCIPAL_SHORTFALL_TOLERANCE = 0.02
+# The PRINCIPAL-stage sale targets the stake plus this much, so fees and
+# slippage on the sale itself still leave the full stake recovered. Recovery
+# is then judged strictly: proceeds must reach the full cost.
+PRINCIPAL_SALE_BUFFER = 0.03
+
+
+def principal_sale_fraction(cost_usd: float, current_value_usd: float) -> float:
+    """Share of a position to sell at the principal stage: the stake plus
+    PRINCIPAL_SALE_BUFFER, as a fraction of what the position is worth."""
+    if current_value_usd <= 0:
+        return 1.0
+    return min(1.0, cost_usd * (1 + PRINCIPAL_SALE_BUFFER) / current_value_usd)
 
 
 def principal_secured(position: dict) -> bool:
-    """True once sales of this position have returned what it cost (within
-    PRINCIPAL_SHORTFALL_TOLERANCE).
+    """True once sales of this position have returned at least its full cost.
 
     Only this - not the PRINCIPAL stage label - lifts the hard stop and the
     lock rule: a principal sale that filled short leaves real money at risk.
-    A row from before entry costs were recorded falls back to the stage flag.
+    A row whose cost could not be reconstructed falls back to the stage flag.
     """
     entry_cost = position.get("entry_cost_cents")
     if entry_cost is None:
         return bool(position.get("principal_recovered"))
-    proceeds = int(position.get("proceeds_cents") or 0)
-    return proceeds >= int(entry_cost) * (1 - PRINCIPAL_SHORTFALL_TOLERANCE)
+    return int(position.get("proceeds_cents") or 0) >= int(entry_cost)
 
 
 class LiveTrialLedger:
@@ -120,8 +126,39 @@ class LiveTrialLedger:
             self.db.execute(
                 "ALTER TABLE positions ADD COLUMN proceeds_cents INTEGER NOT NULL DEFAULT 0"
             )
+        self._backfill_recovery_accounting()
         if "decision" not in {row[1] for row in self.db.execute("PRAGMA table_info(orders)")}:
             self.db.execute("ALTER TABLE orders ADD COLUMN decision TEXT")
+
+    def _backfill_recovery_accounting(self) -> None:
+        """Reconstruct entry cost and sale proceeds for positions recorded
+        before those were tracked, from the orders table: the cost is the
+        CONFIRMED BUY that opened the position (the latest one for the mint),
+        the proceeds are the CONFIRMED SELLs after it. Without this, such a
+        position would keep trusting the PRINCIPAL stage label."""
+        rows = self.db.execute(
+            "SELECT agent, mint FROM positions WHERE entry_cost_cents IS NULL"
+        ).fetchall()
+        for agent, mint in rows:
+            buy = self.db.execute(
+                "SELECT executed_cents, created_at FROM orders "
+                "WHERE agent=? AND mint=? AND side='BUY' AND state='CONFIRMED' "
+                "AND executed_cents IS NOT NULL "
+                "ORDER BY created_at DESC LIMIT 1",
+                (agent, mint),
+            ).fetchone()
+            if buy is None:
+                continue  # no record of the buy: principal_secured falls back
+            proceeds = self.db.execute(
+                "SELECT COALESCE(SUM(proceeds_cents), 0) FROM orders WHERE agent=? "
+                "AND mint=? AND side='SELL' AND state='CONFIRMED' AND created_at >= ?",
+                (agent, mint, buy[1]),
+            ).fetchone()[0]
+            self.db.execute(
+                "UPDATE positions SET entry_cost_cents=?, proceeds_cents=? "
+                "WHERE agent=? AND mint=?",
+                (int(buy[0]), int(proceeds), agent, mint),
+            )
 
     def close(self) -> None:
         self.db.close()

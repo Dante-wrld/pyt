@@ -23,6 +23,7 @@ from .agents import (
 )
 from .config import _dotenv_value
 from .hunter_shadow_strategy import ShadowRecoveryPolicy, assess_entry, assess_exit
+from .live_trial_ledger import principal_sale_fraction
 from .openai_agents import OpenAIProposalModel, connection_test
 
 
@@ -403,7 +404,10 @@ def shadow_once(model: OpenAIProposalModel | None, book: CapitalBook, *, portfol
                 stage = state
                 if state == "TAKE_PARTIAL":
                     if not marked.get("principal_recovered"):
-                        fraction = min(1.0, float(marked["allocated_usd"]) / float(marked["current_value_usd"]))
+                        fraction = principal_sale_fraction(
+                            float(marked["allocated_usd"]),
+                            float(marked["current_value_usd"]),
+                        )
                         stage = "PRINCIPAL_RECOVERY"
                     else:
                         fraction = recovery_policy.second_stage_fraction

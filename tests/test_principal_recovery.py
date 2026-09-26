@@ -9,7 +9,11 @@ import time
 import pytest
 from solana_launch_guard.agent_capital import CapitalBook
 from solana_launch_guard.hunter_shadow_strategy import ShadowRecoveryPolicy, assess_exit
-from solana_launch_guard.live_trial_ledger import LiveTrialLedger, principal_secured
+from solana_launch_guard.live_trial_ledger import (
+    LiveTrialLedger,
+    principal_sale_fraction,
+    principal_secured,
+)
 
 MINT = "M" * 44
 
@@ -55,11 +59,41 @@ def test_later_sales_that_cover_the_stake_secure_it(tmp_path, monkeypatch):
     book.close()
 
 
-def test_a_few_cents_short_from_fees_still_counts(tmp_path, monkeypatch):
+def test_even_a_few_cents_short_is_not_secured(tmp_path, monkeypatch):
     book = _ledger_with_position(tmp_path, monkeypatch)
     position = _sell(book, stage="PRINCIPAL", quantity_raw=500_000, proceeds_cents=492)
-    assert position["principal_secured"] is True        # within the 2% tolerance
+    assert position["principal_secured"] is False       # no shortfall tolerance
     book.close()
+
+
+def test_exactly_the_stake_back_is_secured(tmp_path, monkeypatch):
+    book = _ledger_with_position(tmp_path, monkeypatch)
+    position = _sell(book, stage="PRINCIPAL", quantity_raw=500_000, proceeds_cents=500)
+    assert position["principal_secured"] is True
+    book.close()
+
+
+def test_principal_sale_targets_the_stake_plus_a_buffer():
+    # $5 stake worth $10: sell 51.5% so fees and slippage still leave $5 back.
+    assert principal_sale_fraction(5, 10) == pytest.approx(0.515)
+    assert principal_sale_fraction(5, 5) == 1.0         # capped at the whole bag
+    assert principal_sale_fraction(5, 0) == 1.0
+
+
+def test_positions_from_before_the_migration_are_backfilled(tmp_path, monkeypatch):
+    book = _ledger_with_position(tmp_path, monkeypatch)
+    _sell(book, stage="PRINCIPAL", quantity_raw=500_000, proceeds_cents=450)
+    # Simulate a row written before entry cost and proceeds were tracked.
+    book.db.execute("UPDATE positions SET entry_cost_cents=NULL, proceeds_cents=0")
+    book.db.commit()
+    book.close()
+    reopened = LiveTrialLedger(tmp_path / "trial.sqlite")
+    [position] = reopened.positions("hunter-v1")
+    assert position["entry_cost_cents"] == 500
+    assert position["proceeds_cents"] == 450
+    assert position["principal_recovered"] == 1
+    assert position["principal_secured"] is False       # not trusting the label
+    reopened.close()
 
 
 def test_rows_from_before_the_migration_fall_back_to_the_stage_flag():

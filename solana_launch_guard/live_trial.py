@@ -17,15 +17,26 @@ from .agents import AgentRole, TradeAction
 from .config import Settings, _load_dotenv
 from .core import SQLiteStore
 from .execution import (
-    AdditionalSignerError, BuyIntent, JupiterSwapClient, KeyringSolanaSigner, SolanaAutoBuyer,
-    SolanaAutoSeller, USDC_MINT, WRAPPED_SOL_MINT,
+    USDC_MINT,
+    WRAPPED_SOL_MINT,
+    AdditionalSignerError,
+    BuyIntent,
+    JupiterSwapClient,
+    KeyringSolanaSigner,
+    SolanaAutoBuyer,
+    SolanaAutoSeller,
 )
 from .hunter_shadow_strategy import ShadowRecoveryPolicy, assess_exit
-from .live_trial_ledger import LiveTrialLedger, TrialHalted
+from .live_trial_ledger import LiveTrialLedger, TrialHalted, principal_sale_fraction
 from .live_trial_runner import (
-    HUNTER_MOMENTUM_MAX_OPEN_POSITIONS, HUNTER_NORMAL_MAX_OPEN_POSITIONS,
-    LiveEntryDecision, _regrowth_bar_clears, decide_hunter_entry, decide_regrowth_rebuy,
-    execute_hunter_entry, execute_live_exit,
+    HUNTER_MOMENTUM_MAX_OPEN_POSITIONS,
+    HUNTER_NORMAL_MAX_OPEN_POSITIONS,
+    LiveEntryDecision,
+    _regrowth_bar_clears,
+    decide_hunter_entry,
+    decide_regrowth_rebuy,
+    execute_hunter_entry,
+    execute_live_exit,
 )
 from .market import DexScreenerOracle
 from .market_structure import MarketStructureScanner
@@ -727,7 +738,9 @@ async def cycle(*, ledger: LiveTrialLedger, settings: Settings, rpc: SolanaRpc,
         if review["state"] == "TAKE_PARTIAL":
             if not marked["principal_recovered"]:
                 stage_key = "PRINCIPAL"
-                partial_limit = min(1.0, marked["cost_cents"] / 100 / current_value)
+                partial_limit = principal_sale_fraction(
+                    marked["cost_cents"] / 100, current_value
+                )
             elif not marked["second_stage_taken"]:
                 stage_key = "SECOND_STAGE"
                 partial_limit = ShadowRecoveryPolicy.from_env().second_stage_fraction

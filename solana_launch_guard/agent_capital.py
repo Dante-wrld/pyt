@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Any
 
 from .agents import AgentRole
-from .live_trial_ledger import PRINCIPAL_SHORTFALL_TOLERANCE
 
 
 DEFAULT_AGENT_CAPITAL_USD = 30.0
@@ -243,9 +242,7 @@ class CapitalBook:
             recovered = float(position.get("recovered_usd", 0.0)) + proceeds
             position["recovered_usd"] = round(recovered, 8)
             entry_value = float(position.get("entry_value_usd") or 0.0)
-            position["principal_secured"] = entry_value > 0 and recovered >= (
-                entry_value * (1 - PRINCIPAL_SHORTFALL_TOLERANCE)
-            )
+            position["principal_secured"] = entry_value > 0 and recovered >= entry_value
         self._record_equity_drawdown(payload, agent_id)
         payload["updated_at"] = closed_at.isoformat()
         self._write(payload)
