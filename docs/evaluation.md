@@ -87,9 +87,10 @@ simulation matches what the bot runs. Each sell leg pays its own slippage,
 fees and network fee.
 
 What it cannot model: the live reversal exits also use momentum and buy/sell
-counts, which the tracker does not record. `--ladder-stop-loss-pct` is the
-price-only stand-in, and the live trailing stop waits for selling pressure
-where the simulated one fires on price alone.
+counts, which the tracker does not record, and the live trailing stop waits
+for selling pressure where the simulated one fires on price alone. The hard
+stop is modelled exactly: the live bot applies `STOP_LOSS_PCT` on price
+alone while principal is outstanding, the same as `--ladder-stop-loss-pct`.
 
 ```bash
 launch-guard-eval report --exit-model ladder --group signal:
@@ -135,16 +136,34 @@ launch-guard-eval report --exit-model ladder --group "signal:MOMENTUM BUY" \
 Prefer the full date over a bare `HH:MM` once a day has passed, so the window
 does not silently move.
 
-## Candidate exit rules (simulation only)
+## Candidate exit rules
 
-The live ladder protects nothing between break-even and the trailing-stop
-activation (+20%), so a signal that peaks at +12% can still end at the stop.
-Two candidate rules exist only in the simulator, off by default:
+By default the live ladder protects nothing between break-even and the
+trailing-stop activation (+20%), so a signal that peaks at +12% can still end
+at the stop. Two candidate rules exist, off by default:
 
 - `--lock-after-gain-pct X --lock-stop-pct Y`: once up X%, the stop rises to
   Y% above entry. With the default costs a Y of about 8 locks in a small win.
+  The live bot runs the same rule from `LOCK_AFTER_GAIN_PCT` /
+  `LOCK_STOP_PCT`, and these flags default to those values, so once a sweep
+  result holds up on test you switch it on in `.env` with no code change.
 - `--early-take-pct X --early-take-fraction F`: sell F of the position once,
-  at +X%.
+  at +X% (simulation only).
+
+## Settings to measure before touching
+
+Two live defaults are guesses that decide most outcomes and have never been
+tested against recorded data. Sweep them before changing either:
+
+- `STAGNATION_WINDOW_SECONDS=300` sells anything not up 3% five minutes
+  after entry when the 5-minute change is flat or down. On a token that is
+  three days old and was bought on a 4-6% pullback, five minutes is noise,
+  and each such exit pays the full round trip. `sweep
+  --stagnation-windows 0,300,900,1800` answers whether it earns its keep.
+- `AUTO_SELL_PRINCIPAL_MULTIPLE=2.0` waits for a double before recovering
+  principal. Most winners in this universe top out well short of that, so
+  the ladder rarely engages. `sweep --principal-multiples 1.3,1.5,2` shows
+  what an earlier first take would have done.
 
 ```bash
 launch-guard-eval report --exit-model ladder --group signal: --since "2026-09-25 12:07" \
