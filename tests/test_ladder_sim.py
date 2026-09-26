@@ -202,3 +202,17 @@ def test_sweep_tries_lock_levels(tmp_path, capsys, monkeypatch):
     out = capsys.readouterr().out
     best = out.split("Top settings ranked by TRAIN")[1].splitlines()[1]
     assert best.strip().startswith("20/12/20/2x/0s/10/0")
+
+
+def test_stagnation_keeps_a_flat_token_that_is_still_ticking_up():
+    # Under +3% after 5 minutes, but the 5-minute change is positive: live keeps it.
+    creeping = path(1.0, 0.99, 0.995, 1.0, 1.005, 1.01, 1.015, 1.02)
+    rules = LadderRules(stagnation_window_seconds=300, stagnation_min_gain_pct=3)
+    assert simulate_ladder_trade(creeping, rules, FREE).exit_reason == "DATA_END"
+
+
+def test_stagnation_needs_known_momentum():
+    # Samples 20 minutes apart: no 5-minute change exists, so no stagnation exit.
+    sparse = path(1.0, 1.0, 0.99, 1.0, step=1200.0)
+    rules = LadderRules(stagnation_window_seconds=300, stagnation_min_gain_pct=3)
+    assert simulate_ladder_trade(sparse, rules, FREE).exit_reason == "DATA_END"

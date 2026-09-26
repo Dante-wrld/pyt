@@ -193,7 +193,9 @@ class LadderRules:
 
     Modelled exactly: principal recovery at ``principal_multiple``, the second
     stage at ``half_profit_multiple``, the trailing stop that widens once the
-    principal is back, the stagnation exit, and max hold.
+    principal is back, max hold, and the stagnation exit including its live
+    condition that the 5-minute price change is known and not positive
+    (computed from the tracked price path).
 
     Approximated: the live bot's reversal exits also need momentum and
     buy/sell evidence that the tracker does not record. ``stop_loss_pct`` is
@@ -235,6 +237,24 @@ class LadderRules:
         )
 
 
+def _five_minute_change(path: Sequence[Observation], index: int) -> float | None:
+    """Percent change over the last ~5 minutes, like DEX Screener's m5 figure
+    the live exit reads. None when no sample sits 4-6 minutes back, which
+    the live rule treats as unknown momentum (no stagnation exit)."""
+    now = path[index]
+    for earlier in reversed(path[:index]):
+        age = now.observed_at - earlier.observed_at
+        if age < 240:
+            continue
+        if age > 360:
+            return None
+        base = float(earlier.price_usd or 0.0)
+        if base <= 0:
+            return None
+        return (float(now.price_usd or 0.0) / base - 1) * 100
+    return None
+
+
 def simulate_ladder_trade(
     decision: TrackedDecision, rules: LadderRules, costs: CostModel
 ) -> TradeResult | None:
@@ -271,7 +291,7 @@ def simulate_ladder_trade(
     principal_done = second_done = early_done = locked = False
     lock_price = entry_price * (1 + rules.lock_stop_pct / 100)
     exit_at = entry_obs.observed_at
-    for obs in usable:
+    for index, obs in enumerate(usable):
         price = float(obs.price_usd or 0.0)
         exit_at = obs.observed_at
         age = obs.observed_at - entry_obs.observed_at
@@ -298,7 +318,11 @@ def simulate_ladder_trade(
             and not principal_done
             and age >= rules.stagnation_window_seconds
             and gain_pct < rules.stagnation_min_gain_pct
+            and (momentum := _five_minute_change(usable, index)) is not None
+            and momentum <= 0
         ):
+            # Live (assess_exit) also requires a known, non-positive 5-minute
+            # price change: a flat token that is still ticking up is kept.
             sell(remaining, price, "STAGNANT")
         elif age >= rules.max_hold_seconds:
             sell(remaining, price, "TIME_EXIT")
