@@ -403,11 +403,12 @@ def test_decide_hunter_entry_skips_the_model_once_the_daily_loss_limit_is_breach
 
 def test_momentum_buy_pause_blocks_it_before_the_model_when_engaged(tmp_path, monkeypatch):
     """Paused 2026-09-23 after a full session showed 17 losses vs 1 win,
-    concentrated almost entirely in MOMENTUM BUY entries; re-enabled the
-    same night with a tighter confirmation bar and a $2 size cap (see
-    MOMENTUM_BUY_PAUSED's own comment), so False is the default now - this
-    still proves the pause mechanism itself works whenever it's engaged,
-    by explicitly re-enabling it rather than relying on the default."""
+    concentrated almost entirely in MOMENTUM BUY entries, briefly re-enabled
+    with a tighter confirmation bar and a $2 size cap, then paused again on
+    2026-09-26 until the docs/evaluation.md promotion rule passes (see
+    MOMENTUM_BUY_PAUSED's own comment). Set explicitly rather than relying
+    on the default so this keeps proving the mechanism whichever way the
+    default is flipped."""
     monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
     monkeypatch.setattr("solana_launch_guard.live_trial_runner.MOMENTUM_BUY_PAUSED", True)
     book = LiveTrialLedger(tmp_path / "trial.sqlite")
@@ -418,6 +419,12 @@ def test_momentum_buy_pause_blocks_it_before_the_model_when_engaged(tmp_path, mo
     assert book.status()["recent_decisions"][0]["state"] == "BUY_ZONE_SKIPPED"
     assert "paused" in book.status()["recent_decisions"][0]["reason"].lower()
     book.close()
+
+
+def test_momentum_buy_is_paused_by_default_until_the_promotion_rule_passes():
+    from solana_launch_guard import live_trial_runner
+
+    assert live_trial_runner.MOMENTUM_BUY_PAUSED is True
 
 
 def test_pullback_entries_still_run_while_momentum_buy_is_paused(tmp_path, monkeypatch):

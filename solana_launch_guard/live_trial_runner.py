@@ -67,9 +67,21 @@ HUNTER_EQUITY_USD = 30
 # normal $5, so the strategy change is tested with tightly bounded
 # downside rather than at full size on unproven results. Pullback and
 # EARLY BUY entries never showed this loss pattern and were never
-# paused. If losses concentrate here again even at this smaller size,
-# pause again and revisit the confirmation-poll count, not just the size.
-MOMENTUM_BUY_PAUSED = False
+# paused.
+#
+# Paused again 2026-09-26, this time until the promotion rule in
+# docs/evaluation.md ("Comparing buy signals") passes on recorded data:
+# 100+ MOMENTUM BUY signals in the test split, a 95% interval above zero,
+# and an average no worse than BUY ZONE's (`launch-guard-eval report
+# --group signal:` prints the verdict). The 17-of-18 loss pattern is a
+# property of the entry - buying the top of a bimodal population - not
+# of the confirmation count, so a second poll and a smaller size bound
+# the damage without changing the expectancy. Shadow tracking continues
+# unchanged: every MOMENTUM BUY still reaches the board, the ledger
+# (BUY_ZONE_SKIPPED, reason PAUSED) and the outcome tracker, which is
+# exactly the data the promotion rule needs. Flip this back to False
+# only when `report` prints "meets the promotion rule".
+MOMENTUM_BUY_PAUSED = True
 
 # A mint hunter-v1 fully exits doesn't just get forgotten - the shared
 # recommendation engine evicts a crashed, low-scoring candidate from its own
