@@ -91,12 +91,14 @@ def _add_ladder_args(parser: argparse.ArgumentParser) -> None:
     add("--stagnation-min-gain-pct", type=float,
         default=_env_float("STAGNATION_MIN_GAIN_PCT", 3.0))
     add("--ladder-max-hold-seconds", type=float, default=24 * 3600.0)
-    add("--lock-after-gain-pct", type=float, default=0.0,
-        help="candidate rule (not live): once up this much, raise the stop "
-        "to --lock-stop-pct above entry; 0 = off")
-    add("--lock-stop-pct", type=float, default=8.0,
+    add("--lock-after-gain-pct", type=float,
+        default=_env_float("LOCK_AFTER_GAIN_PCT", 0.0),
+        help="once up this much, raise the stop to --lock-stop-pct above "
+        "entry; 0 = off. Defaults to LOCK_AFTER_GAIN_PCT, the live setting")
+    add("--lock-stop-pct", type=float,
+        default=_env_float("LOCK_STOP_PCT", 8.0),
         help="where the locked stop sits, %% above entry (8 ~ break-even "
-        "at default costs)")
+        "at default costs). Defaults to LOCK_STOP_PCT, the live setting")
     add("--early-take-pct", type=float, default=0.0,
         help="candidate rule (not live): sell part once up this much; 0 = off")
     add("--early-take-fraction", type=float, default=0.5)

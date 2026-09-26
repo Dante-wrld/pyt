@@ -73,6 +73,17 @@ class ShadowRecoveryPolicy:
     # paper trader uses; ignored once principal is recovered (house money
     # is bounded by the widened trailing stop instead, as in the simulator).
     stop_loss_pct: float = 20.0
+    # Lock-in rule, the live twin of evaluation.LadderRules.lock_after_gain_pct
+    # so a setting the sweep validates can be switched on without a code
+    # change. Off (0) by default: nothing is protected between break-even and
+    # the +20% trailing activation, so a +12% move can still round-trip to
+    # the hard stop. Once the post-entry peak gain reaches lock_after_gain_pct
+    # the stop rises to lock_stop_pct above entry (8 ~ break-even at the
+    # default cost model) and, like the hard stop, applies only while
+    # principal is outstanding. Enable only after `launch-guard-eval sweep
+    # --locks ...` holds up on the test split for more than one signal type.
+    lock_after_gain_pct: float = 0.0
+    lock_stop_pct: float = 8.0
     momentum_exit_pct: float = -8.0
     sell_pressure_ratio: float = 1.5
     liquidity_drop_pct: float = 30.0
@@ -108,6 +119,8 @@ class ShadowRecoveryPolicy:
                 "PRINCIPAL_RECOVERED_TRAILING_STOP_PCT", 25
             ),
             stop_loss_pct=get("STOP_LOSS_PCT", 20),
+            lock_after_gain_pct=get("LOCK_AFTER_GAIN_PCT", 0),
+            lock_stop_pct=get("LOCK_STOP_PCT", 8),
             momentum_exit_pct=get("MOMENTUM_EXIT_PCT", -8),
             sell_pressure_ratio=get("SELL_PRESSURE_RATIO", 1.5),
             liquidity_drop_pct=get("LIQUIDITY_DROP_PCT", 30),
@@ -133,11 +146,15 @@ class ShadowRecoveryPolicy:
                 or not 0 < policy.trailing_stop_pct < 100
                 or not policy.trailing_stop_pct < policy.principal_recovered_trailing_stop_pct < 100
                 or not 0 < policy.stop_loss_pct < 100
+                or policy.lock_after_gain_pct < 0
+                or (policy.lock_after_gain_pct > 0
+                    and not 0 <= policy.lock_stop_pct < policy.lock_after_gain_pct)
                 or policy.stagnation_window_seconds <= 0):
             raise ValueError("invalid shadow recovery configuration: pullback, "
                              "trailing stop (with the principal-recovered variant exceeding it), "
-                             "a hard stop loss between 0 and 100 percent and a "
-                             "stagnation window are required")
+                             "a hard stop loss between 0 and 100 percent, a lock stop below "
+                             "its activation gain when enabled, and a stagnation window "
+                             "are required")
         return policy
 
 
@@ -309,6 +326,14 @@ def assess_exit(
     trailing_break = peak_gain >= policy.trailing_activation_pct and drawdown >= effective_trailing_stop_pct
     # Price-only, no corroboration required: see ShadowRecoveryPolicy.stop_loss_pct.
     hard_stop = not principal_recovered and gain <= -policy.stop_loss_pct
+    # See ShadowRecoveryPolicy.lock_after_gain_pct; peak is the persisted
+    # post-entry high, so the lock survives the poll that triggered it.
+    locked = (
+        policy.lock_after_gain_pct > 0
+        and not principal_recovered
+        and peak_gain >= policy.lock_after_gain_pct
+        and gain <= policy.lock_stop_pct
+    )
     # Bought expecting a bounce; gave it the configured grace window, and
     # there's still no rise (gain below the bar) and no sign of one forming
     # (momentum non-positive) - exit proactively rather than wait for a
@@ -337,6 +362,13 @@ def assess_exit(
         reasons.append(
             f"hard stop: {gain:+.2f}% breaches the -{policy.stop_loss_pct:.0f}% "
             "loss limit; no flow confirmation required"
+        )
+    elif locked:
+        state = "EXIT"
+        reasons.append(
+            f"locked stop: peaked {peak_gain:+.2f}% "
+            f"(>= +{policy.lock_after_gain_pct:.0f}%), now {gain:+.2f}% "
+            f"at or below the +{policy.lock_stop_pct:.0f}% lock"
         )
     elif trend_break and (trailing_break or drawdown >= policy.trailing_stop_pct or quote.get("decision") == "EXIT WARNING"):
         state = "EXIT"

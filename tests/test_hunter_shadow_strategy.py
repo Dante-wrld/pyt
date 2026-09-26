@@ -287,6 +287,57 @@ def test_hard_stop_is_not_applied_once_principal_is_recovered():
     assert "hard stop" not in " ".join(review["reasons"]).lower()
 
 
+def test_lock_rule_is_off_by_default():
+    position = {"entry_price": 1.0, "highest_price_since_entry": 1.15,
+                "opened_at": 1_000}
+    row = candidate(price=1.02, price_change_m5_pct=-3, buys_m5=12, sells_m5=10)
+    review = assess_exit(position, row, ShadowRecoveryPolicy(), now=1_000 + 60)
+    assert review["state"] == "PROFIT_RUNNING"
+
+
+def test_lock_rule_exits_once_a_locked_gain_gives_back_to_the_lock_level():
+    """Mirrors evaluation.LadderRules: peak reached +12% (>= lock 10), price
+    is now back at +5% (<= lock stop 8) -> sell, even with no selling
+    pressure and no trailing activation (+20% never reached)."""
+    policy = ShadowRecoveryPolicy(lock_after_gain_pct=10, lock_stop_pct=8)
+    position = {"entry_price": 1.0, "highest_price_since_entry": 1.12,
+                "opened_at": 1_000}
+    row = candidate(price=1.05, price_change_m5_pct=-3, buys_m5=12, sells_m5=10)
+    review = assess_exit(position, row, policy, now=1_000 + 60)
+    assert review["state"] == "EXIT"
+    assert "locked stop" in " ".join(review["reasons"]).lower()
+    # Still above the lock level: keep running.
+    above = assess_exit(position, {**row, "price": 1.09}, policy, now=1_000 + 60)
+    assert above["state"] == "PROFIT_RUNNING"
+    # Peak never reached the activation gain: the lock is not armed.
+    unarmed = assess_exit({**position, "highest_price_since_entry": 1.09},
+                          row, policy, now=1_000 + 60)
+    assert unarmed["state"] == "PROFIT_RUNNING"
+
+
+def test_lock_rule_is_ignored_once_principal_is_recovered():
+    policy = ShadowRecoveryPolicy(lock_after_gain_pct=10, lock_stop_pct=8)
+    position = {"entry_price": 1.0, "highest_price_since_entry": 2.1,
+                "principal_recovered": True, "opened_at": 1_000}
+    row = candidate(price=1.05, price_change_m5_pct=-3, buys_m5=12, sells_m5=10)
+    review = assess_exit(position, row, policy, now=1_000 + 60)
+    assert "locked stop" not in " ".join(review["reasons"]).lower()
+
+
+def test_lock_rule_env_wiring_and_validation(monkeypatch):
+    monkeypatch.setenv("LOCK_AFTER_GAIN_PCT", "10")
+    monkeypatch.setenv("LOCK_STOP_PCT", "6")
+    policy = ShadowRecoveryPolicy.from_env()
+    assert (policy.lock_after_gain_pct, policy.lock_stop_pct) == (10, 6)
+    monkeypatch.setenv("LOCK_STOP_PCT", "12")  # lock above its own activation
+    try:
+        ShadowRecoveryPolicy.from_env()
+    except ValueError as exc:
+        assert "lock stop" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("a lock stop above its activation must be rejected")
+
+
 def test_hard_stop_reads_stop_loss_pct_from_env_and_rejects_nonsense(monkeypatch):
     monkeypatch.setenv("STOP_LOSS_PCT", "15")
     assert ShadowRecoveryPolicy.from_env().stop_loss_pct == 15
