@@ -254,6 +254,15 @@ class Settings:
     # many bps short of the position's literal breakeven point, so a fill
     # is still required to leave real profit, not just avoid an exact loss.
     profit_protecting_slippage_margin_bps: int = 200
+    # Live-trial exits are sized deterministically from the signal itself
+    # (EXIT / EXIT WARNING -> full sell; TAKE PARTIAL / PROTECT PROFIT ->
+    # the configured stage fraction) instead of asking the model how much
+    # to sell. The model added latency and failure modes with no edge on
+    # this path: live 2026-09-23/24 it returned requested_usd=0 for a
+    # correct SELL, burned 43 of 100 requests re-proposing the same exit on
+    # dust, and its round-trip pushed a quote past the freshness bound so
+    # a real exit failed. Set false to restore model-sized exits.
+    live_exit_deterministic: bool = True
     auto_sell_adaptive_chunks: bool = False
     auto_sell_min_chunk_fraction: float = 0.01
     auto_sell_max_chunk_attempts: int = 8
@@ -598,6 +607,7 @@ class Settings:
             profit_protecting_slippage_margin_bps=_int(
                 "PROFIT_PROTECTING_SLIPPAGE_MARGIN_BPS", 200
             ),
+            live_exit_deterministic=_bool("LIVE_EXIT_DETERMINISTIC", True),
             auto_sell_adaptive_chunks=_bool(
                 "AUTO_SELL_ADAPTIVE_CHUNKS", False
             ),

@@ -341,6 +341,30 @@ def _sell_choice(raw: dict, mint: str, value: float, signal: str,
     return None
 
 
+def _deterministic_sell_choice(
+    signal: str, value: float, max_partial_fraction: float = 1.0,
+) -> tuple[str, float] | None:
+    """Size an exit from the signal alone (Settings.live_exit_deterministic).
+
+    Same shape and the same floors as _sell_choice, minus the model: a full
+    liquidation goes through at any value above the dust line, a partial
+    takes exactly the fraction the stage permits and keeps the $2 floor a
+    discretionary sale has no reason to go under. Unknown signals return
+    None, exactly as a rejected model proposal would.
+    """
+    if not math.isfinite(value) or value <= 0:
+        return None
+    normalized = signal.replace("_", " ")
+    if normalized in {"EXIT WARNING", "EXIT", "EMERGENCY EXIT"}:
+        return ("SELL", 1.0) if value >= 0.01 else None
+    if normalized in {"TAKE PARTIAL", "PROTECT PROFIT"}:
+        fraction = min(1.0, max_partial_fraction)
+        if fraction <= 0 or value * fraction < 2:
+            return None
+        return "TAKE_PARTIAL", fraction
+    return None
+
+
 def _profit_protecting_slippage_bps(
     *, gain_pct: float | None, base_slippage_bps: int,
     ceiling_bps: int, margin_bps: int,
@@ -593,19 +617,30 @@ async def cycle(*, ledger: LiveTrialLedger, settings: Settings, rpc: SolanaRpc,
                     margin_bps=settings.profit_protecting_slippage_margin_bps,
                 )
             else:
-                raw = model.propose(role=AgentRole.PORTFOLIO_MANAGER,
-                    context={"mode": "live_trial", "owned_position": row,
-                             "constraint": "Decide only a full SELL for EXIT WARNING or a TAKE_PARTIAL for TAKE PARTIAL / PROTECT PROFIT; HOLD is permitted. Never buy."})
-                thesis = str(raw.get("thesis") or "HOLD")
-                ledger.log(agent="portfolio-v1", mint=mint, state="PROPOSAL", reason=thesis)
                 permitted_fraction = (settings.auto_sell_take_partial_fraction if signal == "TAKE PARTIAL"
                                       else settings.auto_sell_protect_profit_fraction)
-                sell_choice = _sell_choice(raw, mint, value, signal, permitted_fraction)
-                if sell_choice is None and is_partial_signal:
-                    ledger.log(agent="portfolio-v1", mint=mint, state="TAKE_PARTIAL_BLOCKED",
-                               reason=f"model proposal did not resolve to an executable partial "
-                                      f"sell (action={raw.get('action')!r} confidence={raw.get('confidence')!r} "
-                                      f"requested_usd={raw.get('requested_usd')!r})")
+                if settings.live_exit_deterministic:
+                    sell_choice = _deterministic_sell_choice(signal, value, permitted_fraction)
+                    sized = ("no executable size" if sell_choice is None
+                             else f"{sell_choice[0]} {sell_choice[1]:.0%}")
+                    thesis = f"deterministic exit sizing from {signal}: {sized}"
+                    ledger.log(agent="portfolio-v1", mint=mint, state="PROPOSAL", reason=thesis)
+                    if sell_choice is None and is_partial_signal:
+                        ledger.log(agent="portfolio-v1", mint=mint, state="TAKE_PARTIAL_BLOCKED",
+                                   reason=f"{signal} partial of {permitted_fraction:.0%} on "
+                                          f"${value:.2f} is below the $2 minimum sale")
+                else:
+                    raw = model.propose(role=AgentRole.PORTFOLIO_MANAGER,
+                        context={"mode": "live_trial", "owned_position": row,
+                                 "constraint": "Decide only a full SELL for EXIT WARNING or a TAKE_PARTIAL for TAKE PARTIAL / PROTECT PROFIT; HOLD is permitted. Never buy."})
+                    thesis = str(raw.get("thesis") or "HOLD")
+                    ledger.log(agent="portfolio-v1", mint=mint, state="PROPOSAL", reason=thesis)
+                    sell_choice = _sell_choice(raw, mint, value, signal, permitted_fraction)
+                    if sell_choice is None and is_partial_signal:
+                        ledger.log(agent="portfolio-v1", mint=mint, state="TAKE_PARTIAL_BLOCKED",
+                                   reason=f"model proposal did not resolve to an executable partial "
+                                          f"sell (action={raw.get('action')!r} confidence={raw.get('confidence')!r} "
+                                          f"requested_usd={raw.get('requested_usd')!r})")
                 sell_choice = _resolve_take_partial_decision(
                     ledger=ledger, agent="portfolio-v1", mint=mint, sell_choice=sell_choice,
                     is_partial_signal=is_partial_signal, streaks=take_partial_stuck_streaks,
@@ -722,17 +757,26 @@ async def cycle(*, ledger: LiveTrialLedger, settings: Settings, rpc: SolanaRpc,
             # real losing position, with nothing in the logs to explain
             # why. current_value_usd here closes that gap the same way
             # the other call site already avoids it.
-            raw = model.propose(role=AgentRole.PORTFOLIO_MANAGER,
-                context={"mode": "live_trial",
-                         "owned_position": {**marked, "current_value_usd": current_value},
-                         "fresh_quote": market, "reversal_review": review,
-                         "constraint": "Choose SELL for EXIT/EMERGENCY_EXIT or TAKE_PARTIAL for TAKE_PARTIAL, or HOLD. No buys."})
-            sell_choice = _sell_choice(raw, position["mint"], current_value, review["state"], partial_limit)
-            if sell_choice is None and is_partial_signal:
-                ledger.log(agent=position["agent"], mint=position["mint"], state="TAKE_PARTIAL_BLOCKED",
-                           reason=f"model proposal did not resolve to an executable partial "
-                                  f"sell (action={raw.get('action')!r} confidence={raw.get('confidence')!r} "
-                                  f"requested_usd={raw.get('requested_usd')!r})")
+            if settings.live_exit_deterministic:
+                # assess_exit already decided; the stage fraction is fixed by
+                # the ladder. Nothing here needs judgment.
+                sell_choice = _deterministic_sell_choice(review["state"], current_value, partial_limit)
+                if sell_choice is None and is_partial_signal:
+                    ledger.log(agent=position["agent"], mint=position["mint"], state="TAKE_PARTIAL_BLOCKED",
+                               reason=f"{stage_key} partial of {partial_limit:.0%} on "
+                                      f"${current_value:.2f} is below the $2 minimum sale")
+            else:
+                raw = model.propose(role=AgentRole.PORTFOLIO_MANAGER,
+                    context={"mode": "live_trial",
+                             "owned_position": {**marked, "current_value_usd": current_value},
+                             "fresh_quote": market, "reversal_review": review,
+                             "constraint": "Choose SELL for EXIT/EMERGENCY_EXIT or TAKE_PARTIAL for TAKE_PARTIAL, or HOLD. No buys."})
+                sell_choice = _sell_choice(raw, position["mint"], current_value, review["state"], partial_limit)
+                if sell_choice is None and is_partial_signal:
+                    ledger.log(agent=position["agent"], mint=position["mint"], state="TAKE_PARTIAL_BLOCKED",
+                               reason=f"model proposal did not resolve to an executable partial "
+                                      f"sell (action={raw.get('action')!r} confidence={raw.get('confidence')!r} "
+                                      f"requested_usd={raw.get('requested_usd')!r})")
             sell_choice = _resolve_take_partial_decision(
                 ledger=ledger, agent=position["agent"], mint=position["mint"],
                 sell_choice=sell_choice, is_partial_signal=is_partial_signal,

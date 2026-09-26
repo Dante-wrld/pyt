@@ -17,6 +17,7 @@ from solana_launch_guard.live_trial import (
     _guarded_exit,
     _profit_protecting_slippage_bps,
     _resolve_take_partial_decision,
+    _deterministic_sell_choice,
     _sell_choice,
     _should_escalate_to_emergency,
     _track_exit_block_streak,
@@ -60,6 +61,33 @@ def test_exit_choice_requires_matched_signal_mint_confidence_and_amount():
     assert _sell_choice(partial, "mint", 12, "TAKE_PARTIAL") == ("TAKE_PARTIAL", 1 / 3)
     assert _sell_choice(partial, "mint", 12, "TAKE_PARTIAL", .25) is None
     assert _sell_choice(partial, "mint", 12, "TAKE_PARTIAL", .5) == ("TAKE_PARTIAL", 1 / 3)
+
+
+def test_deterministic_exit_sizing_mirrors_sell_choice_without_a_model():
+    """Settings.live_exit_deterministic (default on): the signal fixes the
+    size. Same floors as _sell_choice - a full exit clears at any value
+    above dust, a partial keeps the $2 minimum - and unknown signals
+    resolve to None exactly as a rejected proposal would."""
+    assert _deterministic_sell_choice("EXIT_WARNING", 12) == ("SELL", 1.0)
+    assert _deterministic_sell_choice("EXIT", 0.12) == ("SELL", 1.0)
+    assert _deterministic_sell_choice("EMERGENCY_EXIT", 0.001) is None
+    assert _deterministic_sell_choice("TAKE_PARTIAL", 12, 0.5) == ("TAKE_PARTIAL", 0.5)
+    assert _deterministic_sell_choice("PROTECT PROFIT", 12, 1.0) == ("TAKE_PARTIAL", 1.0)
+    # PRINCIPAL stage passes cost/current_value as the limit; take exactly that.
+    assert _deterministic_sell_choice("TAKE_PARTIAL", 12, 5 / 12) == ("TAKE_PARTIAL", 5 / 12)
+    assert _deterministic_sell_choice("TAKE_PARTIAL", 3, 0.5) is None  # $1.50 < $2 floor
+    assert _deterministic_sell_choice("TAKE_PARTIAL", 12, 0) is None
+    assert _deterministic_sell_choice("HOLD", 12) is None
+    assert _deterministic_sell_choice("EXIT", float("nan")) is None
+
+
+def test_deterministic_exit_sizing_is_the_default_setting(monkeypatch):
+    from solana_launch_guard.config import Settings
+
+    monkeypatch.delenv("LIVE_EXIT_DETERMINISTIC", raising=False)
+    assert Settings.from_env().live_exit_deterministic is True
+    monkeypatch.setenv("LIVE_EXIT_DETERMINISTIC", "false")
+    assert Settings.from_env().live_exit_deterministic is False
 
 
 def test_profit_protecting_slippage_never_widens_a_loss_or_unknown_gain():
