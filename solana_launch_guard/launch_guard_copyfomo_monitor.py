@@ -133,4 +133,36 @@ class CopyFomoMonitorMixin(LaunchGuardState):
                 "No COPYFOMO_EVM_WALLET configured; CopyFomo EVM monitoring "
                 "inactive"
             )
+        tasks.extend(self._leader_evm_tasks(exclude=evm_wallet))
         return tasks
+
+    def _leader_evm_tasks(self, *, exclude: str | None) -> list[asyncio.Task[Any]]:
+        """Record the leaders' EVM transfers read-only (wallet_events), so
+        the history exists if CopyFomo starts copying them on that chain."""
+        leaders = [
+            (name, address)
+            for name, address in self.settings.copyfomo_leader_evm_wallets
+            if address.lower() != (exclude or "").lower()
+        ]
+        if not leaders:
+            return []
+        chain = self.settings.copyfomo_evm_chain
+        rpc_url = self.settings.evm_rpc_urls.get(chain, "")
+        if not rpc_url:
+            LOGGER.warning(
+                "COPYFOMO_LEADER_EVM_WALLETS is set but no RPC URL is configured "
+                "for COPYFOMO_EVM_CHAIN=%s; leader EVM recording inactive",
+                chain,
+            )
+            return []
+        rpc = EvmRpc(rpc_url)
+        return [
+            asyncio.create_task(EvmWalletWatcher(
+                chain=chain,
+                rpc=rpc,
+                wallet=address,
+                callback=self.handle_copyfomo_evm_transfer,
+                poll_seconds=self.settings.copyfomo_evm_poll_seconds,
+            ).run_forever())
+            for _, address in leaders
+        ]

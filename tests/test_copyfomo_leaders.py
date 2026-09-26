@@ -127,3 +127,58 @@ def test_tracker_follows_copyfomo_and_leader_buys_once_each(tmp_path):
     assert sorted(d.label for d in store.load()) == ["COPYFOMO", "leader:ryantrost"]
     assert tracker.ingest() == 0
     store.close()
+
+
+def _guard(tmp_path, **overrides):
+    from solana_launch_guard.app import LaunchGuard
+
+    from test_core import settings
+
+    database = tmp_path / "g.db"
+    store = SQLiteStore(str(database))
+    return store, LaunchGuard(settings(database, **overrides), store)
+
+
+def test_leader_evm_wallets_get_one_read_only_watcher_each(tmp_path, monkeypatch):
+    import asyncio
+
+    from solana_launch_guard import launch_guard_copyfomo_monitor as monitor
+
+    made = []
+
+    class FakeWatcher:
+        def __init__(self, **kwargs):
+            made.append(kwargs["wallet"])
+
+        async def run_forever(self):
+            return None
+
+    monkeypatch.setattr(monitor, "EvmWalletWatcher", FakeWatcher)
+    leaders = (("ryantrost", "0x" + "a" * 40), ("Unipcs", "0x" + "b" * 40))
+    store, guard = _guard(
+        tmp_path, copyfomo_leader_evm_wallets=leaders,
+        base_rpc_url="https://rpc.example", copyfomo_evm_chain="base",
+    )
+
+    async def run():
+        tasks = guard._leader_evm_tasks(exclude=None)
+        await asyncio.gather(*tasks)
+        return tasks
+
+    assert len(asyncio.run(run())) == 2
+    assert made == [a for _, a in leaders]
+    store.close()
+
+
+def test_leader_evm_recording_needs_an_rpc_url(tmp_path):
+    store, guard = _guard(
+        tmp_path, copyfomo_leader_evm_wallets=(("x", "0x" + "a" * 40),),
+        base_rpc_url="", copyfomo_evm_chain="base",
+    )
+    assert guard._leader_evm_tasks(exclude=None) == []
+    store.close()
+
+
+def test_bad_evm_leader_address_is_rejected(tmp_path):
+    with pytest.raises(ValueError, match="COPYFOMO_LEADER_EVM_WALLETS"):
+        _guard(tmp_path, copyfomo_leader_evm_wallets=(("x", "0xnothex"),))

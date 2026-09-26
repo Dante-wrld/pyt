@@ -402,6 +402,9 @@ class Settings:
     # Wallets of the traders CopyFomo copies, watched read-only so each
     # CopyFomo buy can be attributed by mint and timing (never by name).
     copyfomo_leader_wallets: tuple[tuple[str, str], ...] = ()
+    # The same leaders' EVM wallets (name:0x...), recorded read-only on
+    # COPYFOMO_EVM_CHAIN in case CopyFomo copies them there too.
+    copyfomo_leader_evm_wallets: tuple[tuple[str, str], ...] = ()
     copyfomo_evm_wallet: str | None = None
     copyfomo_evm_chain: str = "base"
     copyfomo_evm_poll_seconds: float = 15.0
@@ -788,6 +791,9 @@ class Settings:
             copyfomo_solana_wallet=(os.getenv("COPYFOMO_SOLANA_WALLET") or None),
             copyfomo_leader_wallets=parse_leader_wallets(
                 os.getenv("COPYFOMO_LEADER_WALLETS", "")
+            ),
+            copyfomo_leader_evm_wallets=parse_leader_wallets(
+                os.getenv("COPYFOMO_LEADER_EVM_WALLETS", "")
             ),
             copyfomo_evm_wallet=(os.getenv("COPYFOMO_EVM_WALLET") or None),
             copyfomo_evm_chain=os.getenv("COPYFOMO_EVM_CHAIN", "base"),
@@ -1246,6 +1252,11 @@ class Settings:
             if not 32 <= len(address) <= 44 or not address.isalnum():
                 raise ValueError(
                     f"invalid COPYFOMO_LEADER_WALLETS address for {name}: {address}"
+                )
+        for name, address in self.copyfomo_leader_evm_wallets:
+            if re.fullmatch(evm_address_pattern, address) is None:
+                raise ValueError(
+                    f"invalid COPYFOMO_LEADER_EVM_WALLETS address for {name}: {address}"
                 )
         if self.copyfomo_evm_poll_seconds < 5:
             raise ValueError("COPYFOMO_EVM_POLL_SECONDS must be at least 5")
