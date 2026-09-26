@@ -65,11 +65,25 @@ launch-guard-eval copyfomo          # realized SOL P&L per position and per week
 launch-guard-eval copyfomo --json
 ```
 
-Results come from the SOL that actually moved in CopyFomo's wallet, so they
+Results come from what actually moved in CopyFomo's wallet (USDC, or SOL), so they
 include every fee and all slippage. Tokens are identified by the mint in the
-on-chain trade, never by name. Legs that cannot be priced from SOL flow
-(token-to-token swaps, WSOL/USDC routes, airdrops, sells of positions opened
-before monitoring began) are listed as UNPRICED and left out of the totals
-rather than guessed. The wallet shows what CopyFomo traded, not which leader
-it copied; per-leader results need CopyFomo's own history.
+on-chain trade, never by name. Legs that cannot be priced from USDC or SOL
+flow (token-to-token swaps, airdrops, positions paid in both currencies,
+sells of positions opened before monitoring began) are listed as UNPRICED
+and left out of the totals rather than guessed.
+
+To see results per leader, list the wallets CopyFomo copies in
+`COPYFOMO_LEADER_WALLETS` (`name:ADDRESS,...`). They are watched read-only,
+like CopyFomo's own wallet. A CopyFomo position is attributed to the leader
+whose buy of the same mint came within 10 minutes before it; when two
+leaders bought the same mint in that window it is marked ambiguous instead
+of guessed. A leader buy CopyFomo did not copy within the window is counted
+as skipped, and the report compares how the leaders' own copied and skipped
+trades did. `launch-guard-eval track` also follows CopyFomo's and the
+leaders' buys as entries (`wallet:COPYFOMO`, `wallet:leader:<name>`), so
+`report --exit-model ladder --group wallet:` shows how your exits would have
+done on the same trades.
+
+CopyFomo trades in USDC. Each leg is priced from the wallet's USDC change in
+the same transaction, falling back to SOL, so results come out in USDC.
 

@@ -34,7 +34,7 @@ def test_closed_position_realizes_exact_sol_flow():
         trade("s3", "WIN", "SELL", 400, 0.07, t=120),
     ])
     assert token.status == "CLOSED"
-    assert token.realized_sol == pytest.approx(0.06)
+    assert token.realized == pytest.approx(0.06)
 
 
 def test_partly_sold_position_is_open_and_not_realized():
@@ -43,7 +43,7 @@ def test_partly_sold_position_is_open_and_not_realized():
         trade("s2", "HOLD", "SELL", 500, 0.08, t=60),
     ])
     assert token.status == "OPEN"
-    assert token.realized_sol is None
+    assert token.realized is None
 
 
 def test_unpriceable_legs_are_set_aside_not_guessed():
@@ -57,7 +57,7 @@ def test_unpriceable_legs_are_set_aside_not_guessed():
     assert "token-to-token swap" in tokens["A"].problems
     assert "sold before any recorded buy" in tokens["PRE"].problems
     report = build_copyfomo_report(list(tokens.values()))
-    assert report["realized_sol"] == 0 and report["unpriced_tokens"] == 4
+    assert report["currencies"] == {} and report["unpriced_tokens"] == 4
 
 
 def test_report_totals_weeks_and_verdict():
@@ -69,9 +69,10 @@ def test_report_totals_weeks_and_verdict():
         ]
     report = build_copyfomo_report(per_token(trades))
     assert report["closed_positions"] == 3
-    assert report["realized_sol"] == pytest.approx(0.09 - 0.1)
-    assert report["win_rate"] == pytest.approx(2 / 3)
-    assert list(report["weeks"]) == ["2026-W39", "2026-W40"]  # days 0,4 | 8
+    sol = report["currencies"]["SOL"]
+    assert sol["realized"] == pytest.approx(0.09 - 0.1)
+    assert sol["win_rate"] == pytest.approx(2 / 3)
+    assert list(report["weeks"]) == ["2026-W39 SOL", "2026-W40 SOL"]  # days 0,4 | 8
     assert "too early for a verdict" in render_copyfomo_report(report, WALLET)
 
 
@@ -116,7 +117,7 @@ def test_end_to_end_from_recorded_trades_to_cli(tmp_path, capsys, monkeypatch):
         )))
     store.close()
     [token] = per_token(load_trades(database, WALLET))
-    assert token.realized_sol == pytest.approx(0.03)
+    assert token.realized == pytest.approx(0.03)
     main(["copyfomo", "--db", str(database), "--wallet", WALLET])
     out = capsys.readouterr().out
     assert "Realized +0.0300 SOL" in out and "CLOSED" in out
@@ -184,3 +185,85 @@ def test_unreadable_token_balance_is_skipped_not_read_as_a_full_sell():
     assert "BAD" not in trades  # unreadable: skipped, not a phantom full sell
     # the raw integer amount is used when the display string is unreadable
     assert trades["OK"].side == "BUY" and trades["OK"].token_delta == 2.5
+
+
+# --- USDC-routed trades (CopyFomo's normal route) ---------------------------
+
+def utrade(sig, mint, side, tokens, usdc, t=0.0, sol=-0.000005):
+    return WalletTradeRow(T0 + t, sig, mint, mint, side, tokens, sol, usdc)
+
+
+def test_usdc_trades_are_priced_in_usdc():
+    [token] = per_token([
+        utrade("b", "WEED", "BUY", 1000, -5.47),
+        utrade("s", "WEED", "SELL", 1000, 3.10, t=600),
+    ])
+    assert token.currency == "USDC" and token.status == "CLOSED"
+    assert token.realized == pytest.approx(3.10 - 5.47)
+    report = build_copyfomo_report([token])
+    assert report["currencies"]["USDC"]["realized"] == pytest.approx(-2.37)
+    assert "-2.37 USDC" in render_copyfomo_report(report, WALLET)
+
+
+def test_mixed_currency_position_is_unpriced():
+    [token] = per_token([
+        utrade("b", "X", "BUY", 1000, -5.0),
+        trade("s", "X", "SELL", 1000, 0.05, t=60),
+    ])
+    assert token.status == "UNPRICED"
+    assert "mixed SOL and USDC legs" in token.problems
+
+
+def test_a_rebuy_after_closing_is_a_new_position():
+    positions = per_token([
+        utrade("b1", "R", "BUY", 100, -5.0),
+        utrade("s1", "R", "SELL", 100, 6.0, t=60),
+        utrade("b2", "R", "BUY", 100, -5.0, t=120),
+        utrade("s2", "R", "SELL", 100, 4.0, t=180),
+    ])
+    assert [p.realized for p in positions] == [pytest.approx(1.0), pytest.approx(-1.0)]
+
+
+def test_parser_records_the_usdc_side_of_a_swap():
+    from solana_launch_guard.wallet import USDC_MINT, parse_wallet_trades
+
+    wallet = "W" * 44
+    tx = {
+        "transaction": {"message": {"accountKeys": [wallet]}},
+        "meta": {
+            "preBalances": [1_000_000_000], "postBalances": [999_995_000],
+            "preTokenBalances": [
+                {"owner": wallet, "mint": USDC_MINT,
+                 "uiTokenAmount": {"uiAmountString": "12.71"}},
+            ],
+            "postTokenBalances": [
+                {"owner": wallet, "mint": USDC_MINT,
+                 "uiTokenAmount": {"uiAmountString": "7.24"}},
+                {"owner": wallet, "mint": "WEED",
+                 "uiTokenAmount": {"uiAmountString": "1000"}},
+            ],
+        },
+    }
+    [weed] = parse_wallet_trades(tx, wallet, "sig", 1)
+    assert weed.mint == "WEED" and weed.side == "BUY"
+    assert weed.usdc_delta == pytest.approx(-5.47)
+
+
+def test_old_wallet_trades_table_gets_the_usdc_column(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "old.db"
+    db = sqlite3.connect(path)
+    db.execute(
+        "CREATE TABLE wallet_trades (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "seen_at TEXT NOT NULL, wallet TEXT NOT NULL, signature TEXT NOT NULL, "
+        "slot INTEGER NOT NULL, mint TEXT NOT NULL, symbol TEXT, side TEXT NOT NULL, "
+        "token_delta REAL NOT NULL, native_sol_delta REAL, observed_price_sol REAL, "
+        "UNIQUE(wallet, signature, mint))"
+    )
+    db.commit()
+    db.close()
+    store = SQLiteStore(str(path))
+    cols = {r[1] for r in store.connection.execute("PRAGMA table_info(wallet_trades)")}
+    assert "usdc_delta" in cols
+    store.close()

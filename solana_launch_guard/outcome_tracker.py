@@ -230,6 +230,41 @@ def read_signal_tags(path: str | Path, ids: Sequence[int]) -> dict[int, str]:
     return {int(row_id): str(pattern) for row_id, pattern in rows}
 
 
+def read_wallet_buys(
+    path: str | Path, after_id: int, wallet_labels: dict[str, str]
+) -> list[NewDecision]:
+    """Buys recorded for CopyFomo's wallet and its leaders' wallets, so their
+    real entries can be replayed through the same exit simulations.
+    Labelled 'COPYFOMO' or 'leader:<name>'."""
+    if not wallet_labels:
+        return []
+    connection = _open_read_only(path)
+    if connection is None:
+        return []
+    try:
+        marks = ",".join("?" * len(wallet_labels))
+        rows = connection.execute(
+            "SELECT id, seen_at, wallet, mint FROM wallet_trades "
+            f"WHERE id > ? AND side = 'BUY' AND wallet IN ({marks}) "
+            "ORDER BY id LIMIT 5000",
+            (after_id, *wallet_labels),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return []
+    finally:
+        connection.close()
+    decisions: list[NewDecision] = []
+    for row_id, seen_at, wallet, mint in rows:
+        try:
+            at = _iso_to_epoch(seen_at)
+        except (ValueError, TypeError):
+            continue
+        decisions.append(
+            NewDecision("wallet", row_id, mint, at, wallet_labels[wallet], None, ())
+        )
+    return decisions
+
+
 def read_scored_candidates(path: str | Path, after_id: int) -> list[NewDecision]:
     """Candidates the intelligence layer accepted onto the board (read-only).
 
@@ -363,6 +398,15 @@ class OutcomeStore:
                     (json.dumps(reasons), source_id),
                 )
 
+    def recently_tracked(
+        self, source: str, label: str, mint: str, since: float
+    ) -> bool:
+        return self.connection.execute(
+            "SELECT 1 FROM tracked_decisions WHERE source = ? AND label = ? "
+            "AND mint = ? AND decided_at >= ? LIMIT 1",
+            (source, label, mint, since),
+        ).fetchone() is not None
+
     def is_scheduled_mint(self, mint: str) -> bool:
         return (
             self.connection.execute(
@@ -474,6 +518,7 @@ class OutcomeTracker:
         *,
         launch_db: str | Path | None,
         ledger_db: str | Path | None,
+        wallet_labels: dict[str, str] | None = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
         self.store = store
@@ -481,6 +526,7 @@ class OutcomeTracker:
         self.config = config
         self.launch_db = launch_db
         self.ledger_db = ledger_db
+        self.wallet_labels = dict(wallet_labels or {})
         self.clock = clock
 
     def ingest(self) -> int:
@@ -500,6 +546,10 @@ class OutcomeTracker:
                 ("signal", read_buy_signals(
                     self.launch_db, self.store.cursor("signal")))
             )
+            sources.append(
+                ("wallet", read_wallet_buys(
+                    self.launch_db, self.store.cursor("wallet"), self.wallet_labels))
+            )
         if self.ledger_db:
             sources.append(
                 ("ledger", read_ledger_decisions(
@@ -508,6 +558,7 @@ class OutcomeTracker:
         for source, decisions in sources:
             tracked: list[tuple[NewDecision, Sequence[float]]] = []
             seen: set[str] = set()
+            seen_wallet: set[tuple[str, str]] = set()
             for decision in decisions:
                 if now - decision.decided_at > self.config.max_decision_lag_seconds:
                     continue  # too stale for a realistic entry quote
@@ -515,9 +566,18 @@ class OutcomeTracker:
                     decision.mint, self.config.reject_sample_rate
                 ):
                     continue
-                # A signal is measured from the moment it fired, so it always
-                # gets its own samples even if the mint is already tracked.
-                already = decision.source != "signal" and (
+                if decision.source == "wallet" and (
+                    (decision.label, decision.mint) in seen_wallet
+                    or self.store.recently_tracked(
+                        "wallet", decision.label, decision.mint,
+                        decision.decided_at - 24 * 3600,
+                    )
+                ):
+                    continue  # a top-up of a position already being tracked
+                seen_wallet.add((decision.label, decision.mint))
+                # Signals and real wallet buys are measured from their own
+                # moment, so they get their own samples even for a tracked mint.
+                already = decision.source not in ("signal", "wallet") and (
                     decision.mint in seen or self.store.is_scheduled_mint(decision.mint)
                 )
                 dense = decision.accepted is not False

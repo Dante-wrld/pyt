@@ -88,6 +88,20 @@ def _addresses(name: str) -> tuple[str, ...]:
     return tuple(unique.values())
 
 
+def parse_leader_wallets(raw: str) -> tuple[tuple[str, str], ...]:
+    """COPYFOMO_LEADER_WALLETS: 'name:ADDRESS,name2:ADDRESS2' (a bare address
+    is named by its first 6 characters). A repeated address keeps its first name."""
+    leaders: dict[str, str] = {}
+    for item in raw.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        name, _, address = item.rpartition(":")
+        address = address.strip()
+        leaders.setdefault(address, name.strip() or address[:6])
+    return tuple((name, address) for address, name in leaders.items())
+
+
 def _csv_upper(name: str, default: str = "") -> tuple[str, ...]:
     raw = os.getenv(name, default)
     return tuple(
@@ -385,6 +399,9 @@ class Settings:
     # Which chain the EVM wallet is watched on comes from evm_rpc_urls, so
     # only that chain's own *_RPC_URL needs to be configured.
     copyfomo_solana_wallet: str | None = None
+    # Wallets of the traders CopyFomo copies, watched read-only so each
+    # CopyFomo buy can be attributed by mint and timing (never by name).
+    copyfomo_leader_wallets: tuple[tuple[str, str], ...] = ()
     copyfomo_evm_wallet: str | None = None
     copyfomo_evm_chain: str = "base"
     copyfomo_evm_poll_seconds: float = 15.0
@@ -769,6 +786,9 @@ class Settings:
             ),
             evm_wallet_poll_seconds=_float("EVM_WALLET_POLL_SECONDS", 10.0),
             copyfomo_solana_wallet=(os.getenv("COPYFOMO_SOLANA_WALLET") or None),
+            copyfomo_leader_wallets=parse_leader_wallets(
+                os.getenv("COPYFOMO_LEADER_WALLETS", "")
+            ),
             copyfomo_evm_wallet=(os.getenv("COPYFOMO_EVM_WALLET") or None),
             copyfomo_evm_chain=os.getenv("COPYFOMO_EVM_CHAIN", "base"),
             copyfomo_evm_poll_seconds=_float("COPYFOMO_EVM_POLL_SECONDS", 15.0),
@@ -1222,6 +1242,11 @@ class Settings:
                 raise ValueError(f"invalid EVM public address: {address}")
         if self.copyfomo_solana_wallet and not 32 <= len(self.copyfomo_solana_wallet) <= 44:
             raise ValueError(f"invalid COPYFOMO_SOLANA_WALLET: {self.copyfomo_solana_wallet}")
+        for name, address in self.copyfomo_leader_wallets:
+            if not 32 <= len(address) <= 44 or not address.isalnum():
+                raise ValueError(
+                    f"invalid COPYFOMO_LEADER_WALLETS address for {name}: {address}"
+                )
         if self.copyfomo_evm_poll_seconds < 5:
             raise ValueError("COPYFOMO_EVM_POLL_SECONDS must be at least 5")
         token_groups = (

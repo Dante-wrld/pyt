@@ -21,8 +21,9 @@ from collections.abc import Sequence
 from dataclasses import replace
 from datetime import datetime, timedelta
 
-from .config import _load_dotenv
+from .config import _load_dotenv, parse_leader_wallets
 from .copyfomo_report import (
+    attribute_leaders,
     build_copyfomo_report,
     load_trades,
     per_token,
@@ -145,6 +146,14 @@ def _parser() -> argparse.ArgumentParser:
             "AGENT_LIVE_TRIAL_LEDGER_PATH", "launch_guard_live_trial.sqlite"
         ),
     )
+    track.add_argument(
+        "--copyfomo-wallet", default=os.getenv("COPYFOMO_SOLANA_WALLET", ""),
+        help="also track CopyFomo's real buys as entries",
+    )
+    track.add_argument(
+        "--leaders", default=os.getenv("COPYFOMO_LEADER_WALLETS", ""),
+        help="also track leaders' buys (name:ADDRESS,...)",
+    )
     track.add_argument("--reject-sample-rate", type=float, default=0.10)
     track.add_argument("--dense-interval", type=float, default=60.0)
     track.add_argument("--dense-window", type=float, default=3600.0)
@@ -204,6 +213,10 @@ def _parser() -> argparse.ArgumentParser:
     )
     copyfomo.add_argument(
         "--wallet", default=os.getenv("COPYFOMO_SOLANA_WALLET", "")
+    )
+    copyfomo.add_argument(
+        "--leaders", default=os.getenv("COPYFOMO_LEADER_WALLETS", ""),
+        help="name:ADDRESS,... of the wallets CopyFomo copies",
     )
     copyfomo.add_argument("--json", action="store_true")
     return parser
@@ -670,7 +683,13 @@ def main(argv: Sequence[str] | None = None) -> None:
     if args.command == "copyfomo":
         if not args.wallet:
             raise SystemExit("Set COPYFOMO_SOLANA_WALLET or pass --wallet.")
-        cf_report = build_copyfomo_report(per_token(load_trades(args.db, args.wallet)))
+        positions = per_token(load_trades(args.db, args.wallet))
+        leaders = parse_leader_wallets(args.leaders)
+        leader_rows = attribute_leaders(
+            positions,
+            {name: load_trades(args.db, address) for name, address in leaders},
+        ) if leaders else []
+        cf_report = build_copyfomo_report(positions, leader_rows)
         print(
             json.dumps(cf_report, indent=2)
             if args.json
@@ -687,9 +706,16 @@ def main(argv: Sequence[str] | None = None) -> None:
                 max_decision_lag_seconds=args.max_decision_lag,
                 requests_per_cycle=args.requests_per_cycle,
             )
+            wallet_labels = {
+                address: f"leader:{name}"
+                for name, address in parse_leader_wallets(args.leaders)
+            }
+            if args.copyfomo_wallet:
+                wallet_labels[args.copyfomo_wallet] = "COPYFOMO"
             tracker = OutcomeTracker(
                 store, DexScreenerBatchClient(), config,
                 launch_db=args.launch_db, ledger_db=args.ledger_db,
+                wallet_labels=wallet_labels,
             )
             with contextlib.suppress(KeyboardInterrupt):
                 asyncio.run(tracker.run(args.poll_seconds))

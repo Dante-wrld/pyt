@@ -26,6 +26,7 @@ class WalletCopyMixin(LaunchGuardState):
             token_delta=trade.token_delta,
             native_sol_delta=trade.native_sol_delta,
             observed_price_sol=price,
+            usdc_delta=trade.usdc_delta,
         )
         if not inserted:
             return

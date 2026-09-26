@@ -433,6 +433,7 @@ class SQLiteStore:
                 token_delta REAL NOT NULL,
                 native_sol_delta REAL,
                 observed_price_sol REAL,
+                usdc_delta REAL,
                 UNIQUE(wallet, signature, mint)
             );
 
@@ -710,6 +711,14 @@ class SQLiteStore:
             self.connection.execute(
                 "ALTER TABLE auto_sell_batches "
                 "ADD COLUMN proceeds_usdc_raw INTEGER NOT NULL DEFAULT 0"
+            )
+        wallet_trade_columns = {
+            str(row["name"])
+            for row in self.connection.execute("PRAGMA table_info(wallet_trades)")
+        }
+        if "usdc_delta" not in wallet_trade_columns:
+            self.connection.execute(
+                "ALTER TABLE wallet_trades ADD COLUMN usdc_delta REAL"
             )
         signal_columns = {
             str(row["name"])
@@ -2720,13 +2729,14 @@ class SQLiteStore:
         token_delta: float,
         native_sol_delta: float | None,
         observed_price_sol: float | None,
+        usdc_delta: float | None = None,
     ) -> bool:
         cursor = self.connection.execute(
             """
             INSERT OR IGNORE INTO wallet_trades(
                 seen_at, wallet, signature, slot, mint, symbol, side,
-                token_delta, native_sol_delta, observed_price_sol
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                token_delta, native_sol_delta, observed_price_sol, usdc_delta
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 utc_now(),
@@ -2739,6 +2749,7 @@ class SQLiteStore:
                 token_delta,
                 native_sol_delta,
                 observed_price_sol,
+                usdc_delta,
             ),
         )
         self.connection.commit()

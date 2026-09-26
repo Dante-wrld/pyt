@@ -28,6 +28,7 @@ class TransactionSimulationFailed(RuntimeError):
     ValueError: skip this attempt, retry next cycle, never halt the
     trial over it."""
 
+USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 IGNORED_MINTS = {
     "So11111111111111111111111111111111111111112",  # wrapped SOL
     "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",  # USDC
@@ -48,6 +49,10 @@ class WalletTrade:
     side: str
     token_delta: float
     native_sol_delta: float | None
+    # Net USDC the wallet gained (+) or spent (-) in the same transaction.
+    # CopyFomo trades in USDC, so this - not SOL - is its cost and proceeds.
+    # None when the wallet's USDC balance entry could not be read.
+    usdc_delta: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -321,6 +326,11 @@ def parse_wallet_trades(
                 continue
             balances[mint] = balances.get(mint, Decimal(0)) + amount
 
+    usdc_delta: float | None = (
+        None if USDC_MINT in unreadable
+        else float(after.get(USDC_MINT, Decimal(0)) - before.get(USDC_MINT, Decimal(0)))
+    )
+
     trades: list[WalletTrade] = []
     for mint in sorted(set(before) | set(after)):
         if mint in IGNORED_MINTS or mint in unreadable:
@@ -337,6 +347,7 @@ def parse_wallet_trades(
                 side="BUY" if delta > 0 else "SELL",
                 token_delta=float(abs(delta)),
                 native_sol_delta=native_delta,
+                usdc_delta=usdc_delta,
             )
         )
     return trades

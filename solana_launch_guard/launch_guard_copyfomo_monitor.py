@@ -41,11 +41,16 @@ class CopyFomoMonitorMixin(LaunchGuardState):
             token_delta=trade.token_delta,
             native_sol_delta=trade.native_sol_delta,
             observed_price_sol=price,
+            usdc_delta=trade.usdc_delta,
         )
         if not inserted:
             return
+        leader = dict(
+            (address, name) for name, address in self.settings.copyfomo_leader_wallets
+        ).get(trade.wallet)
         LOGGER.info(
-            "COPYFOMO %-4s chain=solana token=%s mint=%s amount=%.8g signature=%s",
+            "%s %-4s chain=solana token=%s mint=%s amount=%.8g signature=%s",
+            f"COPYFOMO-LEADER {leader}" if leader else "COPYFOMO",
             trade.side,
             symbol,
             trade.mint,
@@ -84,10 +89,16 @@ class CopyFomoMonitorMixin(LaunchGuardState):
         tasks: list[asyncio.Task[Any]] = []
         solana_wallet = self.settings.copyfomo_solana_wallet
         if solana_wallet:
+            # CopyFomo's own wallet plus its leaders' wallets, all read-only:
+            # trades are recorded to wallet_trades and nothing is bought.
+            leader_addresses = tuple(
+                address for _, address in self.settings.copyfomo_leader_wallets
+                if address != solana_wallet
+            )
             solana_watcher = WalletWatcher(
                 ws_url=self.settings.solana_rpc_ws_url,
                 rpc=SolanaRpc(self.settings.solana_rpc_http_url),
-                wallets=(solana_wallet,),
+                wallets=(solana_wallet, *leader_addresses),
                 callback=self.handle_copyfomo_solana_trade,
             )
             tasks.append(asyncio.create_task(solana_watcher.run_forever()))
