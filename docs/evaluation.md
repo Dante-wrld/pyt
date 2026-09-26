@@ -157,3 +157,19 @@ launch-guard-eval sweep --group "signal:EARLY BUY" --since "2026-09-25 12:07" \
 Keep the grid small: the more combinations a sweep tries, the better its best
 row looks by luck. A rule earns a place in the live bot only if it holds up
 on test data for more than one signal type.
+
+## Measuring real costs
+
+The cost model's defaults (300 bps slippage per side, a 7.4% break-even) are
+deliberately harsh guesses. `launch-guard-eval costs` measures instead:
+
+- For the most recently signalled tokens (or `--mints`), a Jupiter quote for
+  buying `--position-usd` of the token and a quote for selling exactly those
+  tokens back. The gap is the full round-trip cost at that size, pool fees
+  and price impact included. Quotes only: nothing is signed or sent.
+- For the bot's own confirmed buys, the tokens received versus the quote.
+
+It prints a suggested `--slippage-bps` (half the median round trip plus the
+median realized slippage) to pass to `report` and `sweep` with `--fee-bps 0`.
+It needs `JUPITER_API_KEY` for the quotes and pauses about a second between
+tokens. Re-measure now and then; costs move with liquidity and token mix.

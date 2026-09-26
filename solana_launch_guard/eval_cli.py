@@ -4,6 +4,7 @@
     launch-guard-eval report           # offline; no network
     launch-guard-eval report --json    # machine-readable
     launch-guard-eval copyfomo         # CopyFomo's realized SOL P&L, offline
+    launch-guard-eval costs            # real round-trip costs (quotes only)
 """
 from __future__ import annotations
 
@@ -225,6 +226,16 @@ def _parser() -> argparse.ArgumentParser:
         help="only decisions from this local time on: HH:MM, YYYY-MM-DD[ HH:MM], "
         "or epoch seconds",
     )
+
+    costs = sub.add_parser(
+        "costs", help="measure real round-trip costs (Jupiter quotes, read-only)"
+    )
+    costs.add_argument("--db", default=os.getenv("DATABASE_PATH", "launch_guard.db"))
+    costs.add_argument("--mints", default="",
+                       help="comma-separated mints; default: recently signalled")
+    costs.add_argument("--limit", type=int, default=20)
+    costs.add_argument("--position-usd", type=float, default=5.0)
+    costs.add_argument("--json", action="store_true")
 
     copyfomo = sub.add_parser(
         "copyfomo", help="CopyFomo's realized P&L from its recorded wallet trades"
@@ -720,10 +731,37 @@ def _render_sweep(result: dict) -> str:
     return "\n".join(lines)
 
 
+def run_costs(args: argparse.Namespace) -> None:
+    from .cost_measurement import (
+        measure_costs,
+        realized_buy_slippage,
+        recent_signal_mints,
+        render_costs,
+        summarize_costs,
+    )
+    from .execution import JupiterSwapClient
+
+    mints = (
+        [(m.strip(), m.strip()[:6]) for m in args.mints.split(",") if m.strip()]
+        if args.mints else recent_signal_mints(args.db, args.limit)
+    )
+    api_key = os.getenv("JUPITER_API_KEY") or ""
+    client = JupiterSwapClient(api_key=api_key) if api_key else None
+    if client is None:
+        print("JUPITER_API_KEY is not set: skipping round-trip quotes.")
+    trips = asyncio.run(measure_costs(client, mints, usd=args.position_usd))
+    summary = summarize_costs(trips, realized_buy_slippage(args.db))
+    print(json.dumps(summary, indent=2) if args.json
+          else render_costs(summary, usd=args.position_usd))
+
+
 def main(argv: Sequence[str] | None = None) -> None:
     _load_dotenv()  # same settings the bot runs with, so defaults match live
     args = _parser().parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
+    if args.command == "costs":
+        run_costs(args)
+        return
     if args.command == "copyfomo":
         if not args.wallet:
             raise SystemExit("Set COPYFOMO_SOLANA_WALLET or pass --wallet.")
