@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .agents import AgentRole
+from .live_trial_ledger import PRINCIPAL_SHORTFALL_TOLERANCE
 
 
 DEFAULT_AGENT_CAPITAL_USD = 30.0
@@ -163,6 +164,8 @@ class CapitalBook:
             "drawdown_from_post_entry_peak_pct": 0.0,
             "entry_liquidity_usd": entry_liquidity_usd,
             "principal_recovered": False,
+            "principal_secured": False,
+            "recovered_usd": 0.0,
             "second_stage_taken": False,
             "status": "SHADOW_OPEN",
         }
@@ -232,9 +235,17 @@ class CapitalBook:
             position["allocated_usd"] = round(float(position["allocated_usd"]) - cost, 8)
             position["current_value_usd"] = round(float(position["current_value_usd"]) - gross, 8)
             if stage == "PRINCIPAL_RECOVERY":
-                position["principal_recovered"] = True
+                position["principal_recovered"] = True  # the stage ran
             elif stage == "SECOND_STAGE":
                 position["second_stage_taken"] = True
+            # The stake is only back when proceeds cover what the position
+            # cost; a principal sale that filled short keeps protections on.
+            recovered = float(position.get("recovered_usd", 0.0)) + proceeds
+            position["recovered_usd"] = round(recovered, 8)
+            entry_value = float(position.get("entry_value_usd") or 0.0)
+            position["principal_secured"] = entry_value > 0 and recovered >= (
+                entry_value * (1 - PRINCIPAL_SHORTFALL_TOLERANCE)
+            )
         self._record_equity_drawdown(payload, agent_id)
         payload["updated_at"] = closed_at.isoformat()
         self._write(payload)

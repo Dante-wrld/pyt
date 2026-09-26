@@ -311,7 +311,15 @@ def assess_exit(
     # grounds for an exit, same principle as the rest of this module).
     age_seconds = ((now if now is not None else time.time()) - opened_at) if opened_at > 0 else 0.0
     liquidity_failure = liquidity > 0 and (liquidity < policy.min_liquidity_usd or baseline > 0 and liquidity < baseline * (1 - policy.liquidity_drop_pct / 100))
-    principal_recovered = bool(position.get("principal_recovered"))
+    # Protections (hard stop, lock, stagnation, the tighter trailing stop)
+    # stay on until the stake is actually back. principal_secured says so
+    # from proceeds; principal_recovered only says the PRINCIPAL stage sale
+    # ran, and a short fill leaves money at risk. Callers that do not track
+    # proceeds fall back to the stage flag. The ladder's stage choice below
+    # still reads principal_recovered.
+    principal_recovered = bool(
+        position.get("principal_secured", position.get("principal_recovered"))
+    )
     # trend_break (momentum + confirmed selling pressure) deliberately keeps
     # the unchanged, tight trailing_stop_pct wherever it's referenced below -
     # a fast, violent drop is far more likely to be a rug heading toward

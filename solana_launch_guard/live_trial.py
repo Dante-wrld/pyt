@@ -709,6 +709,7 @@ async def cycle(*, ledger: LiveTrialLedger, settings: Settings, rpc: SolanaRpc,
                               "highest_price_since_entry": marked["peak_price"],
                               "entry_liquidity_usd": marked["entry_liquidity_usd"],
                               "principal_recovered": bool(marked["principal_recovered"]),
+                              "principal_secured": bool(marked["principal_secured"]),
                               "second_stage_taken": bool(marked["second_stage_taken"]),
                               "opened_at": marked["opened_at"]},
                              market, ShadowRecoveryPolicy.from_env())

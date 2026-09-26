@@ -28,6 +28,27 @@ class TrialHalted(ValueError):
     """A trial guard blocks further orders."""
 
 
+# The PRINCIPAL sale is sized as cost / current value, so fees and slippage
+# leave it a few cents short almost every time. Up to this fraction short
+# still counts as the stake being back; a materially short fill does not.
+PRINCIPAL_SHORTFALL_TOLERANCE = 0.02
+
+
+def principal_secured(position: dict) -> bool:
+    """True once sales of this position have returned what it cost (within
+    PRINCIPAL_SHORTFALL_TOLERANCE).
+
+    Only this - not the PRINCIPAL stage label - lifts the hard stop and the
+    lock rule: a principal sale that filled short leaves real money at risk.
+    A row from before entry costs were recorded falls back to the stage flag.
+    """
+    entry_cost = position.get("entry_cost_cents")
+    if entry_cost is None:
+        return bool(position.get("principal_recovered"))
+    proceeds = int(position.get("proceeds_cents") or 0)
+    return proceeds >= int(entry_cost) * (1 - PRINCIPAL_SHORTFALL_TOLERANCE)
+
+
 class LiveTrialLedger:
     """One persistent eight-hour session. A brand new session is never
     automatic - it always needs a fresh ledger file - but resuming the
@@ -88,6 +109,17 @@ class LiveTrialLedger:
                 self.db.execute(f"ALTER TABLE positions ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0")
         if "origin" not in position_columns:
             self.db.execute("ALTER TABLE positions ADD COLUMN origin TEXT NOT NULL DEFAULT 'fresh'")
+        # principal_recovered only records that the PRINCIPAL stage sale ran
+        # (it drives the stage order and each stage's unique sell intent).
+        # Whether the stake actually came back is proceeds vs the cost the
+        # position opened with; a pre-migration row has no entry cost and
+        # falls back to the stage flag (see positions()).
+        if "entry_cost_cents" not in position_columns:
+            self.db.execute("ALTER TABLE positions ADD COLUMN entry_cost_cents INTEGER")
+        if "proceeds_cents" not in position_columns:
+            self.db.execute(
+                "ALTER TABLE positions ADD COLUMN proceeds_cents INTEGER NOT NULL DEFAULT 0"
+            )
         if "decision" not in {row[1] for row in self.db.execute("PRAGMA table_info(orders)")}:
             self.db.execute("ALTER TABLE orders ADD COLUMN decision TEXT")
 
@@ -340,11 +372,12 @@ class LiveTrialLedger:
                 or not math.isfinite(entry_liquidity_usd) or entry_liquidity_usd <= 0):
                 raise ValueError("buy fill has not been independently verified or exceeds reservation")
             self.db.execute("INSERT INTO positions(agent,mint,quantity_raw,decimals,cost_cents,entry_price,"
-                            "entry_liquidity_usd,peak_price,current_price,opened_at,updated_at,origin) "
-                            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", (
+                            "entry_liquidity_usd,peak_price,current_price,opened_at,updated_at,origin,"
+                            "entry_cost_cents,proceeds_cents) "
+                            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,0)", (
                 row[0], row[1], quantity_raw, decimals, executed_cents,
                 entry_price, entry_liquidity_usd, entry_price, entry_price,
-                time.time(), time.time(), origin,
+                time.time(), time.time(), origin, executed_cents,
             ))
             self.db.execute("UPDATE orders SET state='CONFIRMED',executed_cents=?,decision=? WHERE intent=?",
                            (executed_cents, decision, intent))
@@ -366,9 +399,11 @@ class LiveTrialLedger:
         # on the same mint would have been sold and closed first.
         names = ("agent", "mint", "quantity_raw", "decimals", "cost_cents", "entry_price",
                  "entry_liquidity_usd", "peak_price", "current_price", "opened_at", "updated_at",
-                 "principal_recovered", "second_stage_taken", "origin", "decision")
+                 "principal_recovered", "second_stage_taken", "origin",
+                 "entry_cost_cents", "proceeds_cents", "decision")
+        # Explicit columns: p.* order depends on migration history.
         query = (
-            "SELECT p.*, ("
+            "SELECT " + ",".join(f"p.{n}" for n in names[:-1]) + ", ("
             "  SELECT o.decision FROM orders o"
             "  WHERE o.agent = p.agent AND o.mint = p.mint"
             "    AND o.side = 'BUY' AND o.state = 'CONFIRMED'"
@@ -379,7 +414,10 @@ class LiveTrialLedger:
             rows = self.db.execute(query).fetchall()
         else:
             rows = self.db.execute(query + " WHERE p.agent=?", (agent,)).fetchall()
-        return [dict(zip(names, row)) for row in rows]
+        positions = [dict(zip(names, row)) for row in rows]
+        for position in positions:
+            position["principal_secured"] = principal_secured(position)
+        return positions
 
     def closed_positions_for_regrowth(self, agent: str, *, max_age_seconds: float,
                                       now: float | None = None) -> list[dict]:
@@ -458,13 +496,19 @@ class LiveTrialLedger:
                 realized = proceeds_cents - cost_sold
                 if remaining:
                     cost_remaining = round(pos[1] * remaining / pos[0])
+                    # principal_recovered marks the PRINCIPAL stage as taken
+                    # (so the next partial is SECOND_STAGE and no stage's
+                    # intent is ever reused); proceeds_cents is what decides
+                    # whether the stake is actually back (principal_secured).
                     self.db.execute("UPDATE positions SET quantity_raw=?,cost_cents=?,updated_at=?,"
                                     "principal_recovered=MAX(principal_recovered,?),"
-                                    "second_stage_taken=MAX(second_stage_taken,?) "
+                                    "second_stage_taken=MAX(second_stage_taken,?),"
+                                    "proceeds_cents=proceeds_cents+? "
                                     "WHERE agent=? AND mint=?", (
                                         remaining,cost_remaining,time.time(),
                                         int(intent.endswith(":PRINCIPAL")),
-                                        int(intent.endswith(":SECOND_STAGE")), *order[:2],
+                                        int(intent.endswith(":SECOND_STAGE")),
+                                        proceeds_cents, *order[:2],
                                     ))
                 else:
                     self.db.execute("DELETE FROM positions WHERE agent=? AND mint=?", order[:2])
