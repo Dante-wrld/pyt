@@ -1,5 +1,9 @@
+import json as jsonlib
+import time
+from datetime import datetime
+
 import pytest
-from solana_launch_guard.eval_cli import build_report, main
+from solana_launch_guard.eval_cli import _parse_since, build_report, main
 from solana_launch_guard.evaluation import (
     CostModel,
     ExitRules,
@@ -141,3 +145,29 @@ def test_sweep_on_empty_store_says_not_enough_data(tmp_path, capsys, monkeypatch
     monkeypatch.chdir(tmp_path)
     main(["--outcomes-db", str(tmp_path / "o.db"), "sweep"])
     assert "Not enough data yet" in capsys.readouterr().out
+
+
+def _epoch(text):
+    return time.mktime(datetime.strptime(text, "%Y-%m-%d %H:%M:%S").timetuple())
+
+
+def test_parse_since_accepts_a_bare_time_or_a_full_datetime():
+    fixed_now = datetime(2026, 9, 25)
+    assert _parse_since("12:07", now=fixed_now) == _epoch("2026-09-25 12:07:00")
+    assert _parse_since("2026-09-24 20:32") == _epoch("2026-09-24 20:32:00")
+    assert _parse_since("2026-09-24T20:32:05") == _epoch("2026-09-24 20:32:05")
+    with pytest.raises(SystemExit):
+        _parse_since("not a time")
+
+
+def test_since_excludes_decisions_before_the_cutoff(tmp_path, capsys, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    before = TrackedDecision("signal", "OLD", _epoch("2026-09-25 12:00:00"),
+                             "MOMENTUM BUY", (), path(1.0, 1.3, 1.1).observations)
+    after = TrackedDecision("signal", "NEW", _epoch("2026-09-25 12:10:00"),
+                            "MOMENTUM BUY", (), path(1.0, 1.3, 1.1).observations)
+    _store_with(tmp_path, [before, after])
+    main(["--outcomes-db", str(tmp_path / "o.db"), "report",
+          "--since", "2026-09-25 12:07:00", "--min-category-size", "1", "--json"])
+    report = jsonlib.loads(capsys.readouterr().out)
+    assert report["groups"]["signal:MOMENTUM BUY"]["tracked"] == 1

@@ -14,9 +14,12 @@ import itertools
 import json
 import logging
 import os
+import re
+import time
 from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import replace
+from datetime import datetime
 
 from .config import _load_dotenv
 from .copyfomo_report import (
@@ -99,6 +102,22 @@ def _add_cost_args(parser: argparse.ArgumentParser) -> None:
     add("--max-entry-lag", type=float, default=300.0)
 
 
+def _parse_since(value: str, *, now: datetime | None = None) -> float:
+    """Local time, as an epoch. A bare 'HH:MM[:SS]' means today; otherwise
+    'YYYY-MM-DD HH:MM[:SS]' (space or 'T' between date and time)."""
+    if re.fullmatch(r"\d{1,2}:\d{2}(:\d{2})?", value):
+        value = f"{now or datetime.now():%Y-%m-%d} {value}"
+    value = value.replace("T", " ", 1)
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+        try:
+            return time.mktime(datetime.strptime(value, fmt).timetuple())
+        except ValueError:
+            continue
+    raise SystemExit(
+        f"Could not parse --since {value!r}; use 'HH:MM' or 'YYYY-MM-DD HH:MM[:SS]'"
+    )
+
+
 def _costs(args: argparse.Namespace) -> CostModel:
     return CostModel(
         position_usd=args.position_usd,
@@ -164,6 +183,13 @@ def _parser() -> argparse.ArgumentParser:
     report.add_argument(
         "--group", default="",
         help="only groups starting with this, e.g. 'signal:' or 'signal:MOMENTUM BUY'",
+    )
+    report.add_argument(
+        "--since", default=None,
+        help="only decisions at/after this local time: 'HH:MM' (today) or "
+             "'YYYY-MM-DD HH:MM[:SS]'. Use for a code/config change's own "
+             "restart marker, so older, differently-sampled decisions don't "
+             "mix into the same result.",
     )
     report.add_argument("--json", action="store_true")
 
@@ -650,9 +676,11 @@ def main(argv: Sequence[str] | None = None) -> None:
             dead_exit_fraction=args.dead_exit_fraction,
             max_entry_lag_seconds=args.max_entry_lag,
         ))
+        since = _parse_since(args.since) if args.since else None
         loaded = [
             d for d in store.load()
             if f"{d.source}:{d.label}".startswith(args.group)
+            and (since is None or d.decided_at >= since)
         ]
         report = build_report(
             loaded, rules, costs,
