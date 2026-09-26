@@ -248,7 +248,8 @@ async def decide_hunter_entry(
     gated = []
     for c, review in assessed:
         blocked = profile.entry_block_reason(
-            c.get("decision"), c.get("pair_created_at_ms"), now=at
+            c.get("decision"), c.get("pair_created_at_ms"),
+            sources=c.get("sources"), now=at,
         )
         if blocked is not None and review["state"] == "BUY_READY":
             review = {**review, "state": "PAUSED", "reasons": [blocked]}

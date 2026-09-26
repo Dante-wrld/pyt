@@ -87,7 +87,7 @@ class SolanaMomentumFeedMixin(LaunchGuardState):
                         momentum_score=result.momentum_score,
                         reasons=result.reasons,
                     )
-                    self.recommendations.add(quote, result)
+                    self.recommendations.add(quote, result, source="solana-momentum")
             except (OSError, RuntimeError, ValueError) as exc:
                 LOGGER.warning("Solana momentum feed: poll failed: %s", exc)
 

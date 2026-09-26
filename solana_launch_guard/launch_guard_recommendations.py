@@ -46,8 +46,10 @@ class RecommendationMonitorMixin(LaunchGuardState):
                     pair_created_at_ms=candidate.pair_created_at_ms,
                     reason=candidate.decision_reason,
                     live_blocked_reason=self.strategy_profile.entry_block_reason(
-                        decision, candidate.pair_created_at_ms
+                        decision, candidate.pair_created_at_ms,
+                        sources=candidate.sources,
                     ),
+                    sources=",".join(candidate.sources),
                 )
             except Exception as exc:  # noqa: BLE001 - evaluation must not break the loop
                 LOGGER.warning("Could not record %s signal for %s: %s",

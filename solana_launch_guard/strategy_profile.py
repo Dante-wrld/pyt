@@ -29,8 +29,13 @@ class StrategyProfile:
     feed_solana_momentum: bool = True
     feed_copyfomo_wallets: bool = True
     feed_multichain: bool = True
+    feed_leader_holdings: bool = False
     entry_allowed_decisions: tuple[str, ...] = ALL_BUY_DECISIONS
     entry_min_token_age_days: float = 0.0
+    # A token that ONLY these sources found is never bought live; it is still
+    # scored, signalled and tracked. A token another feed also found is not
+    # affected, since that feed alone would have put it on the board.
+    entry_shadow_only_sources: tuple[str, ...] = ("leader-held",)
 
     @classmethod
     def from_env(cls) -> StrategyProfile:
@@ -48,8 +53,13 @@ class StrategyProfile:
             feed_solana_momentum=_bool("FEED_SOLANA_MOMENTUM", True),
             feed_copyfomo_wallets=_bool("FEED_COPYFOMO_WALLETS", True),
             feed_multichain=_bool("FEED_MULTICHAIN", True),
+            feed_leader_holdings=_bool("FEED_LEADER_HOLDINGS", False),
             entry_allowed_decisions=allowed,
             entry_min_token_age_days=_float("ENTRY_MIN_TOKEN_AGE_DAYS", 0.0),
+            entry_shadow_only_sources=tuple(
+                s.lower()
+                for s in _csv_upper("ENTRY_SHADOW_ONLY_SOURCES", "leader-held")
+            ),
         )
 
     def entry_block_reason(
@@ -57,11 +67,18 @@ class StrategyProfile:
         decision: str | None,
         pair_created_at_ms: float | None,
         *,
+        sources: list[str] | tuple[str, ...] | None = None,
         now: float | None = None,
     ) -> str | None:
         """Why a live order must not be placed for this signal, or None."""
         if decision not in self.entry_allowed_decisions:
             return f"{decision} is shadow-only (not in ENTRY_ALLOWED_DECISIONS)"
+        if sources and set(sources) <= set(self.entry_shadow_only_sources):
+            return (
+                "found only by shadow-only source "
+                + ", ".join(sorted(set(sources)))
+                + " (ENTRY_SHADOW_ONLY_SOURCES)"
+            )
         if self.entry_min_token_age_days > 0:
             if pair_created_at_ms is None or pair_created_at_ms <= 0:
                 return "token age is unknown and ENTRY_MIN_TOKEN_AGE_DAYS is set"
@@ -81,6 +98,7 @@ class StrategyProfile:
             "solana-momentum": self.feed_solana_momentum,
             "copyfomo-wallets": self.feed_copyfomo_wallets,
             "multichain": self.feed_multichain,
+            "leader-holdings": self.feed_leader_holdings,
         }
         on = [name for name, enabled in feeds.items() if enabled] or ["none"]
         off = [name for name, enabled in feeds.items() if not enabled] or ["none"]

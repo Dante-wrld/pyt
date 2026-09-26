@@ -418,7 +418,8 @@ class SQLiteStore:
                 reason TEXT,
                 live_blocked_reason TEXT,
                 candle_pattern TEXT,
-                candle_trend TEXT
+                candle_trend TEXT,
+                sources TEXT
             );
 
             CREATE TABLE IF NOT EXISTS wallet_trades (
@@ -724,7 +725,7 @@ class SQLiteStore:
             str(row["name"])
             for row in self.connection.execute("PRAGMA table_info(buy_signals)")
         }
-        for column in ("candle_pattern", "candle_trend"):
+        for column in ("candle_pattern", "candle_trend", "sources"):
             if column not in signal_columns:
                 self.connection.execute(
                     f"ALTER TABLE buy_signals ADD COLUMN {column} TEXT"
@@ -854,6 +855,7 @@ class SQLiteStore:
         pair_created_at_ms: int | None,
         reason: str | None,
         live_blocked_reason: str | None,
+        sources: str | None = None,
     ) -> int:
         """One row each time a candidate moves into a buy decision. Written
         for evaluation only; nothing on a trading path reads it."""
@@ -862,13 +864,13 @@ class SQLiteStore:
             INSERT INTO buy_signals(
                 signaled_at, mint, symbol, chain, decision, price,
                 price_currency, liquidity_usd, signal_score,
-                pair_created_at_ms, reason, live_blocked_reason
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                pair_created_at_ms, reason, live_blocked_reason, sources
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 utc_now(), mint, symbol, chain, decision, price, price_currency,
                 liquidity_usd, signal_score, pair_created_at_ms, reason,
-                live_blocked_reason,
+                live_blocked_reason, sources,
             ),
         )
         self.connection.commit()
@@ -969,6 +971,14 @@ class SQLiteStore:
             (holding.chain, holding.token_address),
         )
         self.connection.commit()
+
+    def has_open_auto_buy_position(self, chain: str, token_address: str) -> bool:
+        """True while the bot holds an open live position in this mint."""
+        return self.connection.execute(
+            "SELECT 1 FROM auto_buy_positions WHERE chain = ? "
+            "AND token_address = ? AND status = 'OPEN'",
+            (chain, token_address),
+        ).fetchone() is not None
 
     def is_launch_guard_owned(self, *, chain: str, token_address: str) -> bool:
         """True if this ledger's own buy flow has ever recorded a fill for

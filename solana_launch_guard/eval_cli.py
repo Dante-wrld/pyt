@@ -334,30 +334,35 @@ def build_report(
         )
     filters.sort(key=lambda f: f["if_bought"]["expectancy_usd"] or 0.0, reverse=True)
 
-    patterns: dict[str, list[dict]] = {}
-    for name, members in sorted(groups.items()):
-        if not name.startswith("signal:"):
-            continue
-        by_pattern: dict[str, list[TrackedDecision]] = defaultdict(list)
-        for decision in members:
-            tag = next(
-                (r[len("candle: "):] for r in decision.reasons
-                 if r.startswith("candle: ")),
-                "untagged",
-            )
-            by_pattern[tag].append(decision)
-        rows: list[dict] = []
-        for tag, tagged in by_pattern.items():
-            if len(tagged) < min_category_size:
+    def split_signals(prefix: str) -> dict[str, list[dict]]:
+        """Each signal type split by one reason tag ('candle: ', 'source: ')."""
+        out: dict[str, list[dict]] = {}
+        for name, members in sorted(groups.items()):
+            if not name.startswith("signal:"):
                 continue
-            rows.append({
-                "pattern": tag,
-                "tracked": len(tagged),
-                "summary": summarize(_simulate(tagged, rules, costs)).as_dict(),
-            })
-        rows.sort(key=lambda r: r["summary"]["expectancy_usd"] or 0.0, reverse=True)
-        if rows:
-            patterns[name] = rows
+            by_tag: dict[str, list[TrackedDecision]] = defaultdict(list)
+            for decision in members:
+                tag = next(
+                    (r[len(prefix):] for r in decision.reasons if r.startswith(prefix)),
+                    "untagged",
+                )
+                by_tag[tag].append(decision)
+            rows: list[dict] = []
+            for tag, tagged in by_tag.items():
+                if len(tagged) < min_category_size:
+                    continue
+                rows.append({
+                    "pattern": tag,
+                    "tracked": len(tagged),
+                    "summary": summarize(_simulate(tagged, rules, costs)).as_dict(),
+                })
+            rows.sort(key=lambda r: r["summary"]["expectancy_usd"] or 0.0, reverse=True)
+            if len(rows) > 1 or (rows and rows[0]["pattern"] != "untagged"):
+                out[name] = rows
+        return out
+
+    patterns = split_signals("candle: ")
+    signal_sources = split_signals("source: ")
 
     momentum = group_reports.get("signal:MOMENTUM BUY", {}).get("test")
     pullback = group_reports.get("signal:BUY ZONE", {}).get("test")
@@ -372,6 +377,7 @@ def build_report(
     return {
         "momentum_vs_buy_zone": head_to_head,
         "signal_candle_patterns": patterns,
+        "signal_sources": signal_sources,
         "costs": {
             "position_usd": costs.position_usd,
             "slippage_bps_per_side": costs.slippage_bps_per_side,
@@ -515,6 +521,18 @@ def _render(report: dict) -> str:
             "  Compare patterns within one signal type only. A pattern earns a "
             "rule only if its CI clears the others'.\n"
         )
+
+    if report.get("signal_sources"):
+        lines.append(
+            "Signals by the feed that found the token (same costs and exits; "
+            "'untagged' = before source tagging existed):"
+        )
+        for name, rows in report["signal_sources"].items():
+            lines.append(f"  {name}")
+            for row in rows:
+                summary = Summary(**row["summary"])
+                lines.append(_summary_line(row["pattern"][:10], summary))
+        lines.append("")
 
     if report.get("momentum_vs_buy_zone"):
         h2h = report["momentum_vs_buy_zone"]

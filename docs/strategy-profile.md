@@ -87,3 +87,31 @@ done on the same trades.
 CopyFomo trades in USDC. Each leg is priced from the wallet's USDC change in
 the same transaction, falling back to SOL, so results come out in USDC.
 
+## Leader-held feed
+
+`FEED_LEADER_HOLDINGS=true` reads what the wallets in `COPYFOMO_LEADER_WALLETS`
+currently hold every `LEADER_HOLDINGS_POLL_SECONDS` and puts those tokens on
+the board, so the same entry rules as every other feed decide whether and
+when to buy. Nothing waits for a leader to trade.
+
+Holding is a discovery source, not a signal, so it is filtered: holdings
+under `LEADER_HOLDINGS_MIN_USD`, pools under `LEADER_HOLDINGS_MIN_LIQUIDITY_USD`
+and tokenized stocks are skipped, and at most `LEADER_HOLDINGS_MAX_CANDIDATES`
+tokens (largest combined leader value first) are added per poll so they
+cannot crowd the 30-slot board. They can still displace lower-scoring board
+candidates; watch the board if momentum candidates start disappearing.
+
+Board candidates now record which feeds found them (`sources`). A token that
+only `leader-held` found is never bought live while that source is listed in
+`ENTRY_SHADOW_ONLY_SOURCES` (the default); it is still signalled, tagged and
+tracked. A token another feed also found is unaffected. `report --group
+signal:` splits each signal type by source, so leader-held signals can be
+compared with the momentum feed's before the source is released.
+
+When a leader sells at least 25% of a token that is on the board or that the
+bot holds, a `LEADER_SELL` event is recorded and logged as a warning. It is
+record-only, for testing as an exit rule later.
+
+coin_tracker's dynamic watchlist reads the same board, so leader-held tokens
+that pass its age and liquidity floors will appear there too.
+

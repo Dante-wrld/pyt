@@ -22,6 +22,9 @@ from .wallet import SolanaRpc, WalletTrade, WalletWatcher
 
 LOGGER = logging.getLogger("solana_launch_guard")
 
+# A leader selling at least this share of their holding is worth recording.
+LEADER_SELL_WARNING_FRACTION = 0.25
+
 
 class CopyFomoMonitorMixin(LaunchGuardState):
     """Watches CopyFomo's own trading wallet(s); logs only, never acts."""
@@ -48,6 +51,8 @@ class CopyFomoMonitorMixin(LaunchGuardState):
         leader = dict(
             (address, name) for name, address in self.settings.copyfomo_leader_wallets
         ).get(trade.wallet)
+        if leader and trade.side == "SELL":
+            self._record_leader_sell(leader, trade, symbol)
         LOGGER.info(
             "%s %-4s chain=solana token=%s mint=%s amount=%.8g signature=%s",
             f"COPYFOMO-LEADER {leader}" if leader else "COPYFOMO",
@@ -56,6 +61,39 @@ class CopyFomoMonitorMixin(LaunchGuardState):
             trade.mint,
             trade.token_delta,
             trade.signature,
+        )
+
+    def _record_leader_sell(self, leader: str, trade: WalletTrade, symbol: str) -> None:
+        """Record-only exit warning: a leader sold a large part of a token
+        that is on our board or that we hold. Nothing is sold because of it;
+        it is stored as a LEADER_SELL event so it can be tested as an exit
+        rule later."""
+        held = self.leader_holdings.get(trade.mint, {})
+        before = held.get(leader)
+        fraction = trade.token_delta / before if before else None
+        if before is not None:
+            held[leader] = max(0.0, before - trade.token_delta)
+        on_board = f"solana:{trade.mint}" in self.recommendations.candidates
+        owned = self.store.has_open_auto_buy_position(
+            "solana", trade.mint
+        ) or self.broker.has_position(trade.mint)
+        if not (on_board or owned):
+            return
+        if fraction is not None and fraction < LEADER_SELL_WARNING_FRACTION:
+            return
+        self.store.save_event("LEADER_SELL", {
+            "leader": leader, "mint": trade.mint, "symbol": symbol,
+            "tokens_sold": trade.token_delta, "fraction_of_holding": fraction,
+            "usdc_received": trade.usdc_delta, "on_board": on_board,
+            "held_by_us": owned, "signature": trade.signature,
+        }, trade.mint)
+        LOGGER.warning(
+            "LEADER SELL WARNING %s sold %s of %s%s%s (record only)",
+            leader,
+            f"{fraction:.0%}" if fraction is not None else "an unknown share",
+            symbol,
+            " - we hold it" if owned else "",
+            " - on the board" if on_board else "",
         )
 
     async def handle_copyfomo_evm_transfer(self, transfer: EvmTransfer) -> None:

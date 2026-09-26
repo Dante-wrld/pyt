@@ -35,7 +35,8 @@ class AutoBuyMixin(LaunchGuardState):
         ):
             return
         blocked = self.strategy_profile.entry_block_reason(
-            candidate.decision, candidate.pair_created_at_ms
+            candidate.decision, candidate.pair_created_at_ms,
+            sources=candidate.sources,
         )
         if blocked is not None:
             if self.entry_block_logged.get(candidate.mint) != blocked:

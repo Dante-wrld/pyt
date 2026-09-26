@@ -41,6 +41,7 @@ from .launch_guard_auto_sell import AutoSellMixin
 from .launch_guard_copyfomo_monitor import CopyFomoMonitorMixin
 from .launch_guard_ingestion import LaunchIngestionMixin
 from .launch_guard_launchlab import LaunchLabFeedMixin
+from .launch_guard_leader_holdings import LeaderHoldingsFeedMixin
 from .launch_guard_multichain import MultichainMixin
 from .launch_guard_portfolio_monitor import PortfolioMonitorMixin
 from .launch_guard_recommendations import RecommendationMonitorMixin
@@ -100,6 +101,7 @@ class LaunchGuard(
     MultichainMixin,
     LaunchLabFeedMixin,
     SolanaMomentumFeedMixin,
+    LeaderHoldingsFeedMixin,
     CopyFomoMonitorMixin,
 ):
     """Owns shared state (settings, store, broker, risk, oracle, ...) and
@@ -143,6 +145,8 @@ class LaunchGuard(
         self.strategy_profile = StrategyProfile.from_env()
         self.entry_block_logged: dict[str, str] = {}
         self.buy_signal_last_decision: dict[str, str] = {}
+        # mint -> {leader name: token amount}, from the leader-held feed.
+        self.leader_holdings: dict[str, dict[str, float]] = {}
         # Separate from structure_scanner so tagging never spends its budget.
         self.signal_candle_scanner = MarketStructureScanner()
         self.signal_tag_tasks: set[asyncio.Task[None]] = set()
@@ -378,6 +382,14 @@ class LaunchGuard(
                 tasks.append(asyncio.create_task(self.run_solana_momentum_feed()))
             if profile.feed_copyfomo_wallets:
                 tasks.extend(self.build_copyfomo_wallet_tasks())
+            if profile.feed_leader_holdings:
+                if self.settings.copyfomo_leader_wallets:
+                    tasks.append(asyncio.create_task(self.run_leader_holdings_feed()))
+                else:
+                    LOGGER.warning(
+                        "FEED_LEADER_HOLDINGS is on but COPYFOMO_LEADER_WALLETS "
+                        "is empty; leader-held feed inactive"
+                    )
 
         if mode == "robinhood":
             tasks.append(

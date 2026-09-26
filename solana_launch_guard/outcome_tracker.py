@@ -185,9 +185,13 @@ def read_buy_signals(path: str | Path, after_id: int) -> list[NewDecision]:
     if connection is None:
         return []
     try:
+        columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(buy_signals)")
+        }
+        sources = "sources" if "sources" in columns else "NULL"
         rows = connection.execute(
-            "SELECT id, signaled_at, mint, decision, reason, live_blocked_reason "
-            "FROM buy_signals WHERE id > ? AND chain = 'solana' "
+            "SELECT id, signaled_at, mint, decision, reason, live_blocked_reason, "
+            f"{sources} FROM buy_signals WHERE id > ? AND chain = 'solana' "
             "ORDER BY id LIMIT 5000",
             (after_id,),
         ).fetchall()
@@ -196,13 +200,18 @@ def read_buy_signals(path: str | Path, after_id: int) -> list[NewDecision]:
     finally:
         connection.close()
     decisions: list[NewDecision] = []
-    for row_id, signaled_at, mint, decision, reason, blocked in rows:
+    for row_id, signaled_at, mint, decision, reason, blocked, found_by in rows:
         try:
             at = _iso_to_epoch(signaled_at)
         except (ValueError, TypeError):
             continue
         live = f"live: {blocked}" if blocked else "live: allowed"
-        reasons = tuple(r for r in (reason, live) if r)
+        # One sorted tag per signal, so a token two feeds found forms its own
+        # group ("board,leader-held") instead of being counted twice.
+        source = (
+            f"source: {','.join(sorted(found_by.split(',')))}" if found_by else None
+        )
+        reasons = tuple(r for r in (reason, live, source) if r)
         decisions.append(
             NewDecision("signal", row_id, mint, at, decision, None, reasons)
         )

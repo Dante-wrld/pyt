@@ -75,6 +75,7 @@ class LaunchGuardState(Protocol):
     strategy_profile: StrategyProfile
     entry_block_logged: dict[str, str]
     buy_signal_last_decision: dict[str, str]
+    leader_holdings: dict[str, dict[str, float]]
     signal_candle_scanner: MarketStructureScanner
     signal_tag_tasks: set[asyncio.Task[None]]
 

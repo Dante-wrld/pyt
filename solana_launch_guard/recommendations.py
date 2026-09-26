@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -61,6 +61,11 @@ class RecommendationCandidate:
     # established token from a fresh launch. None on snapshots saved before
     # this field existed; the first quote update fills it in.
     pair_created_at_ms: int | None = None
+    # Which feeds put this token on the board ("board" for feeds that do not
+    # say). A token only some shadow-only source found can be gated off live
+    # orders (StrategyProfile.entry_shadow_only_sources) while still being
+    # scored, signalled and tracked.
+    sources: list[str] = field(default_factory=lambda: ["board"])
 
     def to_json(self) -> str:
         """Serialize the complete signal state for restart-safe monitoring."""
@@ -298,6 +303,7 @@ class RecommendationBook:
         result: IntelligenceResult,
         *,
         now: float | None = None,
+        source: str = "board",
     ) -> RecommendationCandidate | None:
         price = quote.recommendation_price
         if not result.accepted or price <= 0:
@@ -305,6 +311,8 @@ class RecommendationBook:
         timestamp = time.time() if now is None else now
         existing = self.candidates.get(quote.recommendation_key)
         if existing is not None:
+            if source not in existing.sources:
+                existing.sources.append(source)
             self.update(quote, now=timestamp)
             return existing
 
@@ -339,6 +347,7 @@ class RecommendationBook:
             updated_at=timestamp,
             pair_address=quote.pair_address or None,
             pair_created_at_ms=quote.pair_created_at_ms,
+            sources=[source],
             peak_price=price,
             entry_confirmation_required=self.entry_confirmation_polls,
             planned_stop_pct=stop_pct,
@@ -933,6 +942,7 @@ def build_snapshot(
                 "chain": candidate.chain,
                 "pair_address": candidate.pair_address,
                 "pair_created_at_ms": candidate.pair_created_at_ms,
+                "sources": list(candidate.sources),
                 "tier": candidate.tier,
                 "signal_score": candidate.signal_score,
                 "rise_pct": candidate.rise_pct,
