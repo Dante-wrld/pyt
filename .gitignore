@@ -35,3 +35,12 @@ launch_guard_live_trial*report.json
 .env.backup*
 .env.save
 env[0-9]*
+
+tracker.log
+tracker_state.json
+tracker_state.json.tmp
+launch_guard_hunter_capacity.json
+
+# Telethon session files - full access to the Telegram account, not just a token
+*.session
+*.session-journal
