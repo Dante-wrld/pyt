@@ -1,6 +1,8 @@
 import json
 import time
 
+import pytest
+
 from solana_launch_guard.agent_capital import CapitalBook
 from solana_launch_guard.agents import AgentRole
 from solana_launch_guard.agent_cli import funnel_report, shadow_once
@@ -528,6 +530,63 @@ def test_shadow_cycle_marks_then_closes_confirmed_reversal_without_live_order(tm
     assert output["hunter_position_reviews"][0]["shadow_fill"]["exit_value_usd"] == 4.6
     assert CapitalBook(path).public_status()["agents"][0]["cash_usd"] == 30.6
     assert CapitalBook(path).performance()["completed_trades"] == 1
+
+
+def test_shadow_cycle_hard_stop_closes_a_deep_loss_with_benign_flow(tmp_path, monkeypatch):
+    """The paper hunter runs the same assess_exit as the live trial, so the
+    hard stop reaches shadow positions too: -35% with buys > sells and a
+    mild m5 (nothing else would fire) now closes the whole position."""
+    path = tmp_path / "capital.json"
+    book = CapitalBook(path)
+    book.initialize(30)
+    book.reserve_shadow_buy(agent_id="hunter-v1", mint=MINT, symbol="A", amount_usd=5,
+                            entry_price=1, price_currency="USD", entry_liquidity_usd=60_000)
+    snapshot = tmp_path / "recommendations.json"
+    row = candidate(price=0.65, liquidity_usd=55_000, price_change_m5_pct=-4,
+                    buys_m5=30, sells_m5=25, decision="WATCH")
+    snapshot.write_text(json.dumps({"generated_at": time.time(), "candidates": [row]}))
+    monkeypatch.setenv("RECOMMENDATION_SNAPSHOT_PATH", str(snapshot))
+    monkeypatch.setenv("PORTFOLIO_SNAPSHOT_PATH", str(tmp_path / "missing.json"))
+    monkeypatch.setenv("AGENT_DECISION_LOG_PATH", str(tmp_path / "decisions.jsonl"))
+    class Model:
+        def propose(self, *, role, context):
+            return {"action": "WATCH", "mint": MINT, "confidence": 0.8, "thesis": "wait"}
+    output = shadow_once(Model(), book, core_only=True)
+    review = output["hunter_position_reviews"][0]
+    assert review["state"] == "EXIT"
+    assert "hard stop" in " ".join(review["reasons"]).lower()
+    assert review["shadow_fill"]["exit_value_usd"] == pytest.approx(3.25)
+    assert CapitalBook(path).performance()["completed_trades"] == 1
+    assert (book.load() or {})["agents"]["hunter-v1"]["positions"] == {}
+
+
+def test_shadow_cycle_lock_rule_closes_a_faded_gain_when_enabled(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCK_AFTER_GAIN_PCT", "10")
+    monkeypatch.setenv("LOCK_STOP_PCT", "8")
+    path = tmp_path / "capital.json"
+    book = CapitalBook(path)
+    book.initialize(30)
+    book.reserve_shadow_buy(agent_id="hunter-v1", mint=MINT, symbol="A", amount_usd=5,
+                            entry_price=1, price_currency="USD", entry_liquidity_usd=60_000)
+    book.mark_shadow_position("hunter-v1", MINT, 1.12)  # peak +12% arms the lock
+    snapshot = tmp_path / "recommendations.json"
+    row = candidate(price=1.05, liquidity_usd=60_000, price_change_m5_pct=-3,
+                    buys_m5=12, sells_m5=10, decision="WATCH")
+    snapshot.write_text(json.dumps({"generated_at": time.time(), "candidates": [row]}))
+    monkeypatch.setenv("RECOMMENDATION_SNAPSHOT_PATH", str(snapshot))
+    monkeypatch.setenv("PORTFOLIO_SNAPSHOT_PATH", str(tmp_path / "missing.json"))
+    monkeypatch.setenv("AGENT_DECISION_LOG_PATH", str(tmp_path / "decisions.jsonl"))
+    class Model:
+        def propose(self, *, role, context):
+            return {"action": "WATCH", "mint": MINT, "confidence": 0.8, "thesis": "wait"}
+    review = shadow_once(Model(), book, core_only=True)["hunter_position_reviews"][0]
+    assert review["state"] == "EXIT"
+    assert "locked stop" in " ".join(review["reasons"]).lower()
+    # The shadow arbiter caps one order at $5, so a $5.25 position leaves in
+    # an EXIT_CHUNK with the remainder still marked for the next cycle.
+    assert review["shadow_fill"]["exit_value_usd"] == pytest.approx(5.0)
+    assert review["shadow_fill"]["stage"] == "EXIT_CHUNK"
+    assert review["remaining_position"] is not None
 
 
 def test_shallow_pullback_without_quote_evidence_never_buys(tmp_path, monkeypatch):
