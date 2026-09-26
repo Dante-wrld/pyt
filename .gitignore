@@ -10,6 +10,7 @@ launch_guard_recommendations.json
 *.pullbacks.jsonl
 .pytest_cache/
 .ruff_cache/
+.mypy_cache/
 .coverage
 dist/
 build/
@@ -26,6 +27,10 @@ launch_guard_live_canary.json
 launch_guard_agent_sell_session.json*
 launch_guard_live_sell_*.json*
 launch_guard_live_canary.json.*
+# One-time extra-sell journal from the overnight canary and its claim file
+# (docs/overnight-solana-trial.md); execution claims must never be shared.
+launch_guard_live_extra_sell.json*
+*.claim
 
 launch_guard_robinhood_trial.*
 
