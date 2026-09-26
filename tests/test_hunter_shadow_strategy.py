@@ -252,6 +252,53 @@ def test_confirmed_reversal_and_liquidity_collapse_take_priority_over_partial():
     assert assess_exit(position, candidate(price=3.5), ShadowRecoveryPolicy())["state"] == "TAKE_PARTIAL"
 
 
+def test_hard_stop_exits_a_deep_loss_even_when_dip_buyers_absorb_the_selling():
+    """Down 35% three minutes in, buys still outnumber sells and m5 is only
+    mildly negative: no trend_break, no trailing_break (never had a +20%
+    peak), stagnation window not reached. Before the hard stop this was HOLD
+    with nothing bounding the loss (live 2026-09-23: -97% and -69% on $5)."""
+    position = {"entry_price": 1.0, "highest_price_since_entry": 1.0,
+                "entry_liquidity_usd": 60_000, "opened_at": 1_000}
+    row = candidate(price=0.65, liquidity_usd=55_000, price_change_m5_pct=-4,
+                    buys_m5=30, sells_m5=25)
+    review = assess_exit(position, row, ShadowRecoveryPolicy(), now=1_000 + 180)
+    assert review["state"] == "EXIT"
+    assert "hard stop" in " ".join(review["reasons"]).lower()
+
+
+def test_hard_stop_respects_the_configured_threshold():
+    position = {"entry_price": 1.0, "highest_price_since_entry": 1.0,
+                "opened_at": 1_000}
+    row = candidate(price=0.85, price_change_m5_pct=-4, buys_m5=30, sells_m5=25)
+    loose = assess_exit(position, row, ShadowRecoveryPolicy(), now=1_000 + 60)
+    assert loose["state"] == "HOLD"
+    tight = ShadowRecoveryPolicy(stop_loss_pct=12)
+    assert assess_exit(position, row, tight, now=1_000 + 60)["state"] == "EXIT"
+
+
+def test_hard_stop_is_not_applied_once_principal_is_recovered():
+    """House money is bounded by the widened trailing stop, not by a stop
+    measured from the original entry - matching the evaluator's LadderRules,
+    which only checks stop_loss_pct while principal is outstanding."""
+    position = {"entry_price": 1.0, "highest_price_since_entry": 2.2,
+                "principal_recovered": True, "opened_at": 1_000}
+    row = candidate(price=0.7, price_change_m5_pct=-4, buys_m5=30, sells_m5=25)
+    review = assess_exit(position, row, ShadowRecoveryPolicy(), now=1_000 + 60)
+    assert "hard stop" not in " ".join(review["reasons"]).lower()
+
+
+def test_hard_stop_reads_stop_loss_pct_from_env_and_rejects_nonsense(monkeypatch):
+    monkeypatch.setenv("STOP_LOSS_PCT", "15")
+    assert ShadowRecoveryPolicy.from_env().stop_loss_pct == 15
+    monkeypatch.setenv("STOP_LOSS_PCT", "0")
+    try:
+        ShadowRecoveryPolicy.from_env()
+    except ValueError as exc:
+        assert "stop loss" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("a zero stop loss must be rejected")
+
+
 def test_trailing_stop_exits_a_considerable_rise_that_reverses_with_selling_pressure():
     """A token that rose considerably (>=20% from entry) and has already
     pulled back >=12% from its peak exits once corroborated by real selling

@@ -61,6 +61,18 @@ class ShadowRecoveryPolicy:
     # volatility, and keeps exiting on the unchanged, tight threshold
     # regardless of principal_recovered.
     principal_recovered_trailing_stop_pct: float = 25.0
+    # Unconditional price stop while the principal is still at risk. Every
+    # other exit below needs corroborating flow evidence (heavy selling, a
+    # collapsed pool, a prior +20% peak, or five quiet minutes), so a fast
+    # drop absorbed by dip-buyers - buys >= sells, m5 only mildly negative -
+    # could sit at -30%, -60%, -97% as HOLD with nothing bounding the loss.
+    # Live 2026-09-23: single losses of -$4.87 and -$3.45 on $5 positions.
+    # The evaluator's LadderRules has always simulated this stop
+    # (stop_loss_pct=20), so without it here every backtest was more
+    # protected than the bot it claimed to model. Same STOP_LOSS_PCT the
+    # paper trader uses; ignored once principal is recovered (house money
+    # is bounded by the widened trailing stop instead, as in the simulator).
+    stop_loss_pct: float = 20.0
     momentum_exit_pct: float = -8.0
     sell_pressure_ratio: float = 1.5
     liquidity_drop_pct: float = 30.0
@@ -95,6 +107,7 @@ class ShadowRecoveryPolicy:
             principal_recovered_trailing_stop_pct=get(
                 "PRINCIPAL_RECOVERED_TRAILING_STOP_PCT", 25
             ),
+            stop_loss_pct=get("STOP_LOSS_PCT", 20),
             momentum_exit_pct=get("MOMENTUM_EXIT_PCT", -8),
             sell_pressure_ratio=get("SELL_PRESSURE_RATIO", 1.5),
             liquidity_drop_pct=get("LIQUIDITY_DROP_PCT", 30),
@@ -119,10 +132,12 @@ class ShadowRecoveryPolicy:
         if (policy.pullback_pct <= 0
                 or not 0 < policy.trailing_stop_pct < 100
                 or not policy.trailing_stop_pct < policy.principal_recovered_trailing_stop_pct < 100
+                or not 0 < policy.stop_loss_pct < 100
                 or policy.stagnation_window_seconds <= 0):
             raise ValueError("invalid shadow recovery configuration: pullback, "
-                             "trailing stop (with the principal-recovered variant exceeding it) and "
-                             "stagnation window required")
+                             "trailing stop (with the principal-recovered variant exceeding it), "
+                             "a hard stop loss between 0 and 100 percent and a "
+                             "stagnation window are required")
         return policy
 
 
@@ -292,6 +307,8 @@ def assess_exit(
         else policy.trailing_stop_pct
     )
     trailing_break = peak_gain >= policy.trailing_activation_pct and drawdown >= effective_trailing_stop_pct
+    # Price-only, no corroboration required: see ShadowRecoveryPolicy.stop_loss_pct.
+    hard_stop = not principal_recovered and gain <= -policy.stop_loss_pct
     # Bought expecting a bounce; gave it the configured grace window, and
     # there's still no rise (gain below the bar) and no sign of one forming
     # (momentum non-positive) - exit proactively rather than wait for a
@@ -315,6 +332,12 @@ def assess_exit(
     if liquidity_failure and sells > buys:
         state = "EMERGENCY_EXIT"
         reasons.append("liquidity collapse with net selling")
+    elif hard_stop:
+        state = "EXIT"
+        reasons.append(
+            f"hard stop: {gain:+.2f}% breaches the -{policy.stop_loss_pct:.0f}% "
+            "loss limit; no flow confirmation required"
+        )
     elif trend_break and (trailing_break or drawdown >= policy.trailing_stop_pct or quote.get("decision") == "EXIT WARNING"):
         state = "EXIT"
         reasons.append("confirmed reversal: momentum, selling and peak/structure evidence")
