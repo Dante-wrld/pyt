@@ -111,7 +111,16 @@ class RiskArbiter:
         self.policy = policy or RiskPolicy()
 
     def evaluate_shadow_exit(self, amount_usd: float, state: RiskSnapshot) -> Arbitration:
-        """Approve a simulated position exit without changing role mandates."""
+        """Approve a simulated position exit without changing role mandates.
+
+        Like evaluate_live_exit, this does not apply the new-buy dollar cap:
+        max_order_usd bounds how much a single BUY can commit, not how much
+        of an already-owned position can be closed. Capping exits by it used
+        to split any position worth more than max_order_usd into a same-cycle
+        EXIT_CHUNK plus a remainder closed later, lagging shadow P&L on
+        winners by a cycle relative to live, which sizes exits deterministically
+        with no such cap.
+        """
         reasons = []
         if state.mode != "shadow" or state.mode not in self.policy.allowed_modes:
             reasons.append("shadow mode is required")
@@ -125,8 +134,7 @@ class RiskArbiter:
             reasons.append("invalid exit amount")
         if reasons:
             return Arbitration(False, 0, tuple(reasons))
-        approved = min(amount_usd, self.policy.max_order_usd)
-        return Arbitration(True, round(approved, 8), ("passed deterministic shadow exit checks",))
+        return Arbitration(True, round(amount_usd, 8), ("passed deterministic shadow exit checks",))
 
     def evaluate_live_exit(
         self, amount_usd: float, state: RiskSnapshot, *, min_amount_usd: float = 2,

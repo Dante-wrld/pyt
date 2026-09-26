@@ -582,11 +582,11 @@ def test_shadow_cycle_lock_rule_closes_a_faded_gain_when_enabled(tmp_path, monke
     review = shadow_once(Model(), book, core_only=True)["hunter_position_reviews"][0]
     assert review["state"] == "EXIT"
     assert "locked stop" in " ".join(review["reasons"]).lower()
-    # The shadow arbiter caps one order at $5, so a $5.25 position leaves in
-    # an EXIT_CHUNK with the remainder still marked for the next cycle.
-    assert review["shadow_fill"]["exit_value_usd"] == pytest.approx(5.0)
-    assert review["shadow_fill"]["stage"] == "EXIT_CHUNK"
-    assert review["remaining_position"] is not None
+    # Shadow exits are not capped by the buy-side max_order_usd, so a $5.25
+    # position closes fully in one fill, matching what live would do.
+    assert review["shadow_fill"]["exit_value_usd"] == pytest.approx(5.25)
+    assert review["shadow_fill"]["stage"] == "EXIT"
+    assert review["remaining_position"] is None
 
 
 def test_shallow_pullback_without_quote_evidence_never_buys(tmp_path, monkeypatch):
@@ -606,7 +606,10 @@ def test_shallow_pullback_without_quote_evidence_never_buys(tmp_path, monkeypatc
     assert book.public_status()["agents"][0]["cash_usd"] == 30
 
 
-def test_exit_is_capped_by_arbiter_with_remaining_position(tmp_path, monkeypatch):
+def test_exit_is_not_capped_by_the_buy_side_order_limit(tmp_path, monkeypatch):
+    """evaluate_shadow_exit must not apply max_order_usd: that caps how much a
+    new BUY can commit, not how much of an already-owned position can be
+    closed. A position worth well over $5 should still exit in one fill."""
     book = CapitalBook(tmp_path / "capital.json")
     book.initialize(30)
     book.reserve_shadow_buy(agent_id="hunter-v1", mint=MINT, symbol="A", amount_usd=5,
@@ -624,10 +627,10 @@ def test_exit_is_capped_by_arbiter_with_remaining_position(tmp_path, monkeypatch
             return {"action": "WATCH", "mint": MINT, "confidence": 0.9, "thesis": "test"}
     review = shadow_once(Model(), book, core_only=True)["hunter_position_reviews"][0]
     assert review["state"] == "EXIT"
-    assert review["arbitration"]["approved_usd"] == 5
-    assert review["shadow_fill"]["stage"] == "EXIT_CHUNK"
-    assert review["remaining_position"] is not None
-    assert book.public_status()["agents"][0]["open_positions"] == 1
+    assert review["arbitration"]["approved_usd"] == pytest.approx(7.5)
+    assert review["shadow_fill"]["stage"] == "EXIT"
+    assert review["remaining_position"] is None
+    assert book.public_status()["agents"][0]["open_positions"] == 0
 
 
 def test_open_position_is_marked_from_tracked_quote_outside_shortlist(tmp_path, monkeypatch):

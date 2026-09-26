@@ -195,6 +195,14 @@ class CapitalBook:
         self, agent_id: str, mint: str, *, fraction: float = 1.0,
         slippage_pct: float = 0.0, stage: str = "EXIT",
     ) -> dict[str, Any]:
+        """Close (all or part of) an owned shadow position.
+
+        DEFAULT_MAX_ORDER_USD bounds a new BUY in reserve_shadow_buy; it does
+        not apply here. A position's current_value_usd can exceed it purely
+        from price appreciation, and closing it should not be capped by what
+        the original buy was allowed to commit - the same distinction
+        RiskArbiter.evaluate_shadow_exit makes.
+        """
         if not 0 < fraction <= 1 or not 0 <= slippage_pct < 100:
             raise ValueError("invalid shadow sell fraction or estimated slippage")
         payload = self.load()
@@ -202,8 +210,6 @@ class CapitalBook:
             raise ValueError("initialize agent capital first")
         account = payload["agents"][agent_id]
         position = account["positions"][mint]
-        if float(position.get("current_value_usd", position["allocated_usd"])) * fraction > DEFAULT_MAX_ORDER_USD + 1e-8:
-            raise ValueError("shadow exit exceeds the $5 maximum")
         cost = float(position["allocated_usd"]) * fraction
         gross = float(position.get("current_value_usd", position["allocated_usd"])) * fraction
         proceeds = gross * (1 - slippage_pct / 100)
