@@ -199,6 +199,14 @@ class LadderRules:
     buy/sell evidence that the tracker does not record. ``stop_loss_pct`` is
     the price-only stand-in for those, and the live trailing stop waits for
     selling pressure where this one fires on price alone.
+
+    Candidate additions, off by default and not in the live bot: the live
+    ladder protects nothing between break-even and the trailing activation,
+    so a +12% move can still end at the stop.
+      - ``lock_after_gain_pct``: once the peak gain reaches this, the stop
+        moves up to ``lock_stop_pct`` above entry (set it at or above the
+        cost model's break-even move to lock in a small win).
+      - ``early_take_pct``: sell ``early_take_fraction`` once at this gain.
     """
 
     stop_loss_pct: float = 20.0
@@ -215,6 +223,10 @@ class LadderRules:
     min_exit_liquidity_usd: float = 1000.0
     dead_exit_fraction: float = 0.0
     max_entry_lag_seconds: float = 300.0
+    lock_after_gain_pct: float = 0.0
+    lock_stop_pct: float = 0.0
+    early_take_pct: float = 0.0
+    early_take_fraction: float = 0.5
 
     def entry_rules(self) -> ExitRules:
         return ExitRules(
@@ -256,7 +268,8 @@ def simulate_ladder_trade(
     usable = [o for o in after if o.usable(rules.min_exit_liquidity_usd)]
     trailing_dead = bool(after) and not after[-1].usable(rules.min_exit_liquidity_usd)
     peak = entry_price
-    principal_done = second_done = False
+    principal_done = second_done = early_done = locked = False
+    lock_price = entry_price * (1 + rules.lock_stop_pct / 100)
     exit_at = entry_obs.observed_at
     for obs in usable:
         price = float(obs.price_usd or 0.0)
@@ -271,8 +284,12 @@ def simulate_ladder_trade(
             rules.principal_recovered_trailing_stop_pct
             if principal_done else rules.trailing_stop_pct
         )
+        if rules.lock_after_gain_pct > 0 and peak_gain_pct >= rules.lock_after_gain_pct:
+            locked = True
         stop_price = entry_price * (1 - rules.stop_loss_pct / 100)
-        if not principal_done and price <= stop_price:
+        if not principal_done and locked and price <= lock_price:
+            sell(remaining, price, "LOCKED")
+        elif not principal_done and price <= stop_price:
             sell(remaining, price, "STOP_LOSS")
         elif peak_gain_pct >= rules.trailing_activation_pct and drawdown_pct >= trail:
             sell(remaining, price, "TRAILING")
@@ -285,6 +302,14 @@ def simulate_ladder_trade(
             sell(remaining, price, "STAGNANT")
         elif age >= rules.max_hold_seconds:
             sell(remaining, price, "TIME_EXIT")
+        elif (
+            rules.early_take_pct > 0
+            and not early_done
+            and not principal_done
+            and gain_pct >= rules.early_take_pct
+        ):
+            sell(remaining * rules.early_take_fraction, price, "EARLY_TAKE")
+            early_done = True
         elif not principal_done and multiple >= rules.principal_multiple:
             # Sell just enough to get the stake back after costs.
             needed = costs.position_usd + costs.fixed_fee_usd_per_side

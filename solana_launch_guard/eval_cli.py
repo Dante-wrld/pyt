@@ -90,6 +90,15 @@ def _add_ladder_args(parser: argparse.ArgumentParser) -> None:
     add("--stagnation-min-gain-pct", type=float,
         default=_env_float("STAGNATION_MIN_GAIN_PCT", 3.0))
     add("--ladder-max-hold-seconds", type=float, default=24 * 3600.0)
+    add("--lock-after-gain-pct", type=float, default=0.0,
+        help="candidate rule (not live): once up this much, raise the stop "
+        "to --lock-stop-pct above entry; 0 = off")
+    add("--lock-stop-pct", type=float, default=8.0,
+        help="where the locked stop sits, %% above entry (8 ~ break-even "
+        "at default costs)")
+    add("--early-take-pct", type=float, default=0.0,
+        help="candidate rule (not live): sell part once up this much; 0 = off")
+    add("--early-take-fraction", type=float, default=0.5)
 
 
 def _add_cost_args(parser: argparse.ArgumentParser) -> None:
@@ -128,6 +137,10 @@ def _ladder(args: argparse.Namespace) -> LadderRules:
         min_exit_liquidity_usd=args.min_exit_liquidity_usd,
         dead_exit_fraction=args.dead_exit_fraction,
         max_entry_lag_seconds=args.max_entry_lag,
+        lock_after_gain_pct=args.lock_after_gain_pct,
+        lock_stop_pct=args.lock_stop_pct,
+        early_take_pct=args.early_take_pct,
+        early_take_fraction=args.early_take_fraction,
     )
 
 
@@ -196,6 +209,14 @@ def _parser() -> argparse.ArgumentParser:
     sweep.add_argument("--activations", default="10,20,40")
     sweep.add_argument("--principal-multiples", default="1.5,2,3")
     sweep.add_argument("--stagnation-windows", default="0,300,900")
+    sweep.add_argument(
+        "--locks", default="0",
+        help="lock-after-gain levels to try, e.g. 0,10,15 (0 = off)",
+    )
+    sweep.add_argument(
+        "--early-takes", default="0",
+        help="early-take levels to try, e.g. 0,10,15 (0 = off)",
+    )
     sweep.add_argument("--min-train-trades", type=int, default=30)
     sweep.add_argument("--top", type=int, default=10)
     sweep.add_argument("--json", action="store_true")
@@ -620,14 +641,16 @@ def run_sweep(
     grid = itertools.product(
         _floats(args.stops), _floats(args.trails), _floats(args.activations),
         _floats(args.principal_multiples), _floats(args.stagnation_windows),
+        _floats(args.locks), _floats(args.early_takes),
     )
-    for stop, trail, activation, principal, stagnation in grid:
+    for stop, trail, activation, principal, stagnation, lock, early in grid:
         rules = replace(
             live, stop_loss_pct=stop, trailing_stop_pct=trail,
             trailing_activation_pct=activation, principal_multiple=principal,
             half_profit_multiple=max(live.half_profit_multiple, principal + 0.5),
             stagnation_window_seconds=stagnation,
             stagnation_enabled=stagnation > 0,
+            lock_after_gain_pct=lock, early_take_pct=early,
         )
         tr = summarize(_simulate(train, rules, costs))
         if tr.trades < args.min_train_trades:
@@ -636,6 +659,7 @@ def run_sweep(
             "stop_loss_pct": stop, "trailing_stop_pct": trail,
             "trailing_activation_pct": activation, "principal_multiple": principal,
             "stagnation_window_seconds": stagnation,
+            "lock_after_gain_pct": lock, "early_take_pct": early,
             "train": tr.as_dict(),
             "test": summarize(_simulate(test, rules, costs)).as_dict(),
         })
@@ -671,13 +695,15 @@ def _render_sweep(result: dict) -> str:
         )
         return "\n".join(lines)
     lines.append(
-        "\nTop settings ranked by TRAIN (stop/trail/activation/principal/stag):"
+        "\nTop settings ranked by TRAIN "
+        "(stop/trail/activation/principal/stag/lock/early-take):"
     )
     for row in result["best"]:
         name = (
             f"{row['stop_loss_pct']:g}/{row['trailing_stop_pct']:g}/"
             f"{row['trailing_activation_pct']:g}/{row['principal_multiple']:g}x/"
-            f"{row['stagnation_window_seconds']:g}s"
+            f"{row['stagnation_window_seconds']:g}s/"
+            f"{row['lock_after_gain_pct']:g}/{row['early_take_pct']:g}"
         )
         tr, te = Summary(**row["train"]), Summary(**row["test"])
         ci = te.expectancy_ci95_usd

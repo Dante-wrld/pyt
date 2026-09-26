@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 import pytest
 from solana_launch_guard.eval_cli import build_report, main
 from solana_launch_guard.evaluation import (
@@ -141,3 +143,62 @@ def test_sweep_on_empty_store_says_not_enough_data(tmp_path, capsys, monkeypatch
     monkeypatch.chdir(tmp_path)
     main(["--outcomes-db", str(tmp_path / "o.db"), "sweep"])
     assert "Not enough data yet" in capsys.readouterr().out
+
+
+# --- candidate exit rules (simulation only) --------------------------------
+
+def test_lock_turns_a_round_trip_into_a_small_win():
+    # EARLY BUY overnight: peak +12%, then all the way to the -20% stop.
+    round_trip = path(1.0, 1.06, 1.12, 1.05, 0.9, 0.78)
+    live = simulate_ladder_trade(round_trip, LIVE, FREE)
+    locked = simulate_ladder_trade(
+        round_trip, replace(LIVE, lock_after_gain_pct=10, lock_stop_pct=8), FREE
+    )
+    assert live.exit_reason == "STOP_LOSS" and live.pnl_usd == pytest.approx(-1.1)
+    assert locked.exit_reason == "LOCKED"
+    # sold at the first print below +8%
+    assert locked.pnl_usd == pytest.approx(5 * 0.05)
+
+
+def test_lock_does_nothing_until_the_gain_is_reached():
+    small = path(1.0, 1.05, 0.9, 0.78)
+    rules = replace(LIVE, lock_after_gain_pct=10, lock_stop_pct=8)
+    assert simulate_ladder_trade(small, rules, FREE).exit_reason == "STOP_LOSS"
+
+
+def test_early_take_banks_half_then_the_ladder_runs_the_rest():
+    runner = path(1.0, 1.16, 1.3, 1.1)
+    rules = replace(LIVE, early_take_pct=15, early_take_fraction=0.5)
+    result = simulate_ladder_trade(runner, rules, FREE)
+    assert result.exit_reason.startswith("EARLY_TAKE")
+    # 2.5 tokens @1.16 + 2.5 @1.1 (trailing: 1.3 -> 1.1 is 15% off the peak)
+    assert result.pnl_usd == pytest.approx(2.5 * 1.16 + 2.5 * 1.1 - 5)
+
+
+def test_candidate_rules_are_off_by_default():
+    trade = path(1.0, 1.12, 0.78)
+    assert simulate_ladder_trade(trade, LadderRules(stagnation_enabled=False), FREE) \
+        .exit_reason == "STOP_LOSS"
+
+
+def test_sweep_tries_lock_levels(tmp_path, capsys, monkeypatch):
+    from solana_launch_guard import eval_cli
+
+    monkeypatch.setattr(eval_cli, "_load_dotenv", lambda *a, **k: None)
+    monkeypatch.chdir(tmp_path)
+    decisions = []
+    for i in range(60):
+        start = i * 10_000.0
+        obs = tuple(Observation(start + 10 + k * 60, p, 9000, True)
+                    for k, p in enumerate((1.0, 1.06, 1.12, 1.05, 0.9, 0.78)))
+        decisions.append(
+            TrackedDecision("signal", f"m{i}", start, "EARLY BUY", (), obs)
+        )
+    _store_with(tmp_path, decisions)
+    main(["--outcomes-db", str(tmp_path / "o.db"), "sweep", "--group", "signal:EARLY",
+          "--stops", "20", "--trails", "12", "--activations", "20",
+          "--principal-multiples", "2", "--stagnation-windows", "0",
+          "--locks", "0,10", "--lock-stop-pct", "8", "--min-train-trades", "10"])
+    out = capsys.readouterr().out
+    best = out.split("Top settings ranked by TRAIN")[1].splitlines()[1]
+    assert best.strip().startswith("20/12/20/2x/0s/10/0")

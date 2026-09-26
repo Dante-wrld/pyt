@@ -134,3 +134,26 @@ launch-guard-eval report --exit-model ladder --group "signal:MOMENTUM BUY" \
 
 Prefer the full date over a bare `HH:MM` once a day has passed, so the window
 does not silently move.
+
+## Candidate exit rules (simulation only)
+
+The live ladder protects nothing between break-even and the trailing-stop
+activation (+20%), so a signal that peaks at +12% can still end at the stop.
+Two candidate rules exist only in the simulator, off by default:
+
+- `--lock-after-gain-pct X --lock-stop-pct Y`: once up X%, the stop rises to
+  Y% above entry. With the default costs a Y of about 8 locks in a small win.
+- `--early-take-pct X --early-take-fraction F`: sell F of the position once,
+  at +X%.
+
+```bash
+launch-guard-eval report --exit-model ladder --group signal: --since "2026-09-25 12:07" \
+    --lock-after-gain-pct 10
+launch-guard-eval sweep --group "signal:EARLY BUY" --since "2026-09-25 12:07" \
+    --stops 15,20 --trails 12 --activations 20 --principal-multiples 2 \
+    --stagnation-windows 0,300 --locks 0,8,10,15 --early-takes 0,10,15
+```
+
+Keep the grid small: the more combinations a sweep tries, the better its best
+row looks by luck. A rule earns a place in the live bot only if it holds up
+on test data for more than one signal type.
