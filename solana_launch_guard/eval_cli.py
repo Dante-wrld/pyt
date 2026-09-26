@@ -14,9 +14,12 @@ import itertools
 import json
 import logging
 import os
+import re
+import time
 from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import replace
+from datetime import datetime, timedelta
 
 from .config import _load_dotenv
 from .copyfomo_report import (
@@ -166,6 +169,11 @@ def _parser() -> argparse.ArgumentParser:
         help="only groups starting with this, e.g. 'signal:' or 'signal:MOMENTUM BUY'",
     )
     report.add_argument("--json", action="store_true")
+    report.add_argument(
+        "--since", default="",
+        help="only decisions from this local time on: HH:MM, YYYY-MM-DD[ HH:MM], "
+        "or epoch seconds",
+    )
 
     sweep = sub.add_parser(
         "sweep", help="try many ladder exit settings: rank on train, show test"
@@ -182,6 +190,11 @@ def _parser() -> argparse.ArgumentParser:
     sweep.add_argument("--min-train-trades", type=int, default=30)
     sweep.add_argument("--top", type=int, default=10)
     sweep.add_argument("--json", action="store_true")
+    sweep.add_argument(
+        "--since", default="",
+        help="only decisions from this local time on: HH:MM, YYYY-MM-DD[ HH:MM], "
+        "or epoch seconds",
+    )
 
     copyfomo = sub.add_parser(
         "copyfomo", help="CopyFomo's realized P&L from its recorded wallet trades"
@@ -408,8 +421,17 @@ def _horizon_dict(stats: object) -> dict:
     }
 
 
+def _since_line(since: float | None) -> str | None:
+    if since is None:
+        return None
+    local = datetime.fromtimestamp(since).astimezone()
+    return f"Only decisions since {local:%Y-%m-%d %H:%M %Z}."
+
+
 def _render(report: dict) -> str:
     lines: list[str] = []
+    if line := _since_line(report.get("since")):
+        lines.append(line)
     c = report["costs"]
     lines.append(
         f"Cost model: ${c['position_usd']:.2f} per trade, "
@@ -511,6 +533,45 @@ def _render(report: dict) -> str:
     return "\n".join(lines)
 
 
+def parse_since(raw: str, *, now: float | None = None) -> float:
+    """Epoch seconds for --since. Accepts epoch seconds, an ISO date/time
+    ('2026-09-25', '2026-09-25 12:07', or with an offset), or a bare local
+    'HH:MM' meaning the most recent such time (yesterday if it is later
+    than now). Naive times are local, like the bot's own logs."""
+    text = raw.strip()
+    now = time.time() if now is None else now
+    try:
+        return float(text)
+    except ValueError:
+        pass
+    if re.fullmatch(r"\d{1,2}:\d{2}", text):
+        hour, minute = (int(part) for part in text.split(":"))
+        local_now = datetime.fromtimestamp(now).astimezone()
+        at = local_now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if at.timestamp() > now:
+            at -= timedelta(days=1)
+        return at.timestamp()
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError as exc:
+        raise SystemExit(
+            f"--since {raw!r}: use HH:MM, YYYY-MM-DD[ HH:MM], or epoch seconds"
+        ) from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.astimezone()  # local time, like the logs
+    return parsed.timestamp()
+
+
+def _selected(
+    decisions: Sequence[TrackedDecision], group: str, since: float | None
+) -> list[TrackedDecision]:
+    return [
+        d for d in decisions
+        if f"{d.source}:{d.label}".startswith(group)
+        and (since is None or d.decided_at >= since)
+    ]
+
+
 def _floats(raw: str) -> list[float]:
     return [float(x) for x in raw.split(",") if x.strip()]
 
@@ -563,7 +624,8 @@ def run_sweep(
 
 
 def _render_sweep(result: dict) -> str:
-    lines = [
+    lines = [line] if (line := _since_line(result.get("since"))) else []
+    lines += [
         f"Sweep over {result['group']}: {result['tracked']} tracked "
         f"({result['train_tracked']} train / {result['test_tracked']} test), "
         f"{result['combinations_kept']} settings with enough train trades",
@@ -634,11 +696,10 @@ def main(argv: Sequence[str] | None = None) -> None:
             return
         costs = _costs(args)
         if args.command == "sweep":
-            members = [
-                d for d in store.load()
-                if f"{d.source}:{d.label}".startswith(args.group)
-            ]
+            since = parse_since(args.since) if args.since else None
+            members = _selected(store.load(), args.group, since)
             result = run_sweep(members, _ladder(args), costs, args)
+            result["since"] = since
             print(json.dumps(result, indent=2) if args.json else _render_sweep(result))
             return
         rules: ExitRules | LadderRules = (
@@ -650,15 +711,14 @@ def main(argv: Sequence[str] | None = None) -> None:
             dead_exit_fraction=args.dead_exit_fraction,
             max_entry_lag_seconds=args.max_entry_lag,
         ))
-        loaded = [
-            d for d in store.load()
-            if f"{d.source}:{d.label}".startswith(args.group)
-        ]
+        since = parse_since(args.since) if args.since else None
+        loaded = _selected(store.load(), args.group, since)
         report = build_report(
             loaded, rules, costs,
             train_fraction=args.train_fraction,
             min_category_size=args.min_category_size,
         )
+        report["since"] = since
         print(json.dumps(report, indent=2) if args.json else _render(report))
     finally:
         store.close()

@@ -119,3 +119,18 @@ bullish marubozu vs on a shooting star, with the same costs and exits.
 Signals from before tagging existed show as `untagged`. Compare patterns
 within one signal type only, and treat a pattern as worth a rule only when
 its interval clears the others'.
+
+## Restricting to a time window
+
+`report` and `sweep` take `--since` to use only decisions from a given local
+time on: `HH:MM` (the most recent such time), `YYYY-MM-DD[ HH:MM]`, or epoch
+seconds. Use it to judge exits only on signals recorded after the tracker's
+dense window was lengthened, e.g.:
+
+```bash
+launch-guard-eval report --exit-model ladder --group "signal:MOMENTUM BUY" \
+    --since "2026-09-25 12:07" --stagnation-window 0
+```
+
+Prefer the full date over a bare `HH:MM` once a day has passed, so the window
+does not silently move.
