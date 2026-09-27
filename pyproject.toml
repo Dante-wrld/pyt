@@ -28,6 +28,7 @@ dev = [
 ]
 
 [project.scripts]
+launch-guard-trend-shadow = "solana_launch_guard.trend_shadow:main"
 launch-guard-robinhood = "solana_launch_guard.robinhood_setup:main"
 launch-guard = "solana_launch_guard.app:main"
 launch-guard-agents = "solana_launch_guard.agent_cli:main"

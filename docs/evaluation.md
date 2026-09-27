@@ -193,47 +193,117 @@ median realized slippage) to pass to `report` and `sweep` with `--fee-bps 0`.
 It needs `JUPITER_API_KEY` for the quotes and pauses about a second between
 tokens. Re-measure now and then; costs move with liquidity and token mix.
 
-## Multi-hour holds: the swing strategy (swing-v1)
+## Shadow trend entries and portfolio-approved swing holds
 
-hunter-v1's exits are built for minutes: the 5-minute stagnation exit closes
-most entries long before a token's real move, which on 2026-09-27 came a
-median ~22 hours later. swing-v1 keeps hunter-v1's entries (same entry
-review, live gates and re-entry rule, no model call) and swaps the exits for
-multi-hour ones: no stagnation exit, a 35% hard stop, a trailing stop that
-arms at +50% and trails 25% (40% once the stake is back), a deeper reversal
-bar, and a 24-hour max hold. It is paper only.
+The current swing design is a management mandate on an existing position,
+not a fourth independent buyer. Hunter opens the paper position. The swing
+module supplies evidence; the portfolio exit path approves or rejects the hold
+and executes the normal profit stages and risk exits. No swing purchases or
+averaging down are enabled. `launch-guard-swing` is now **exit-only** for any
+positions left in its legacy paper book.
 
-The tracker samples every 15 minutes from hour 1 to hour 24
-(`--swing-interval`, `--swing-window`), so multi-hour exits can be replayed.
-Decisions tracked before that only have 1h/4h/24h points after the first
-hour; judge the swing model on data recorded after this change.
+A swing mandate reserves the position's **remaining cost basis** against a
+$30 management limit. This is an internal responsibility allocation, not a
+new funded account: it does not create cash, return money to hunter, transfer
+tokens, or book profit. Source ownership and P&L stay in the original account.
+Partial exits release the corresponding capacity; closing releases the rest.
+The reservation persists with the position, and status exposes reserved and
+available capacity. Do not count this limit as another $30 of portfolio equity.
 
-    launch-guard-eval report --exit-model ladder --slippage-bps 60 --fee-bps 0
-    launch-guard-eval report --exit-model swing  --slippage-bps 60 --fee-bps 0
+The experimental hold rule requires fresh 15-minute EMA trend evidence, price
+at least 97% of entry, liquidity at least 90% of entry and above the policy
+floor, and known positive buying flow with buys >= sells. Reviews can assign
+management before stagnation. Approval only defers the ordinary stagnation
+exit. It never widens the original stop, overrides a reversal/emergency exit,
+or changes principal recovery and profit stages. A confirmed trend failure
+invalidates the hold. Evidence expires after 15 minutes; missing/stale evidence
+restores ordinary exits. The maximum hold is 24 hours from the **original
+entry**, not from delegation or a process restart.
 
-Same decisions, two exit models: compare them per signal type on the test
-split. The swing numbers are a starting point (SWING_STOP_LOSS_PCT,
-SWING_TRAILING_ACTIVATION_PCT, SWING_TRAILING_STOP_PCT,
-SWING_PRINCIPAL_TRAILING_STOP_PCT, SWING_MAX_HOLD_HOURS, ...), not a result.
+### Run the controlled paper comparison
 
-It also averages down, as many traders do: while the stake is still at
-risk, when the price is 20% below the average cost it buys half the first
-stake more ($2.50 on $5), at most twice ($10 per position at most). One add
-at -20% brings the average-cost loss to about -13%, and the 35% stop is
-then measured from the new average. It never adds into a pool that has lost
-30% of its entry liquidity, or while a reversal signal is showing. The
-simulator models the adds too (`ADD` in the exit reasons), so `report
---exit-model swing` shows both sides: adds rescue dips that recover and
-lose more on tokens that keep falling. Compare against SWING_MAX_ADDS=0.
+After updating/installing the code (`.venv/bin/pip install -e .`), keep the
+normal recommendation monitor running and start:
 
-Paper trading it live, beside the bot (its own book, launch_guard_swing_capital.json):
+```bash
+.venv/bin/launch-guard-trend-shadow
+```
 
-    launch-guard-swing            # loop, every 60s
-    launch-guard-swing --status   # results and open positions
+For a single cycle or a report:
 
-Positions that fall off the board are priced directly from DEX Screener;
-those quotes have no buy/sell flow, so the trailing stop then fires on price
-alone, as in the simulator.
+```bash
+.venv/bin/launch-guard-trend-shadow --once
+.venv/bin/launch-guard-trend-shadow --status
+```
+
+No wallet, signer, OpenAI model, or live trader is invoked. It uses a separate
+`launch_guard_trend_shadow/` directory and three virtual $30 hunter books:
+
+| Arm | Entry | Exit |
+| --- | --- | --- |
+| baseline | Deterministic eligible candidate | Ordinary hunter rules |
+| trend | Same opportunity, only if trend + pullback qualifies | Ordinary rules |
+| managed | Exact same entry as baseline | Portfolio-approved swing hold |
+
+The baseline and managed arms buy the same mint, price and size in the same
+cycle. The filtered arm accepts or skips that same opportunity. All arms must
+have capacity before the next entry, and no mint is re-entered while any arm
+still holds it. This deliberately controls entry selection to compare rules;
+it does **not** estimate independent-strategy throughput. Existing live-entry
+profile, liquidity and confirmation gates apply, with $5 entries, two open
+positions, $3 realized daily-loss limit, and shared re-entry checks. These are
+paper fills without the live model, transaction preflight or execution route.
+
+The trend filter uses a pool age of at least three days and 150 contiguous,
+closed 15-minute candles (37.5 hours of history). Pool age is not token mint
+creation time. EMA20 must exceed EMA50 and rise over the latest three samples,
+with price above EMA20. One of the preceding three bars must touch EMA20
+(within 0.5%) and close above EMA50. The latest bar must be bullish and close
+above the previous high, no more than 3% above EMA20. The current entry quote
+must still be above EMA20 and within that 3% band. Recent volume must be
+positive. Open, stale, gapped or malformed candles never qualify. These fixed
+parameters are hypotheses, not proven settings. This experiment uses EMA
+confirmation; it does not implement Supertrend or breaker blocks.
+
+The runner fetches at most eight candle requests per minute, prioritizing held
+positions. It writes `launch_guard_trend_evidence.json`, per-cycle decisions,
+and a report with realized/unrealized P&L, completed trades and drawdown.
+The default round-trip cost estimate is 1.2%, charged proportionally on exits
+in every arm, with no separate fixed network fee. It is an assumption, not a
+measured fill. Set `--round-trip-cost-pct` to test another assumption in a **new
+--directory**; costs cannot silently change in an existing experiment.
+No results are evidence of improved returns until sufficient forward samples
+have completed, including losing and open positions.
+
+### Opt in for the existing hunter shadow loop
+
+The comparison itself always tests the manager in its managed arm. To also
+apply it to the existing hunter shadow book, run the evidence producer above
+and enable:
+
+```dotenv
+SWING_SHADOW_MANAGER_ENABLED=true
+SHADOW_TREND_EVIDENCE_PATH=launch_guard_trend_evidence.json
+```
+
+Then restart only the hunter shadow loop. This flag is read by the shadow
+path only; live trading behavior is unchanged. The ordinary shadow loop stays
+the sole writer/executor of its capital book. The research process only reads
+it for held mints and writes candle evidence. Use absolute paths when running
+from different directories. Do not run multiple writers against the same book.
+
+### Historical swing replay
+
+`launch-guard-eval report --exit-model swing` remains the **legacy** independent
+swing exit/averaging scenario, not a backtest of the new candle-based manager.
+Its simulated adds now require retention of at least 70% of entry liquidity,
+and stop, trailing and maximum-hold exits are evaluated before adding. Flow
+and portfolio cash constraints are still approximations in the price replay.
+Compare with `SWING_MAX_ADDS=0` when studying that historical scenario.
+
+The outcome tracker samples every 15 minutes from hour 1 to hour 24. Sparse
+samples can miss intervening price moves; data from before that sampling
+change is especially limited for multi-hour evaluation.
 
 ## Re-entry after losses (live and paper)
 

@@ -120,7 +120,7 @@ def _run(book, snapshot, quotes=None):
                                    fetch_quotes=fetch))
 
 
-def test_cycle_buys_the_best_buy_ready_candidate_under_the_live_gate(tmp_path,
+def test_legacy_swing_never_buys_even_with_buy_ready_candidates(tmp_path,
                                                                       monkeypatch):
     monkeypatch.setenv("ENTRY_ALLOWED_DECISIONS", "BUY ZONE")
     monkeypatch.setenv("ENTRY_MIN_TOKEN_AGE_DAYS", "3")
@@ -135,8 +135,8 @@ def test_cycle_buys_the_best_buy_ready_candidate_under_the_live_gate(tmp_path,
     ]
     book = _book(tmp_path)
     result = _run(book, _snapshot(tmp_path, rows))
-    assert result["entry"]["mint"] == "B" * 44
-    assert list(book.load()["agents"][SWING_AGENT_ID]["positions"]) == ["B" * 44]
+    assert result["entry"] is None
+    assert book.load()["agents"][SWING_AGENT_ID]["positions"] == {}
 
 
 def test_off_board_positions_are_priced_directly_and_stopped(tmp_path):
@@ -205,18 +205,14 @@ def _off_board(price, liquidity=80_000):
     return {"price": price, "price_currency": "USD", "liquidity_usd": liquidity}
 
 
-def test_paper_adds_twice_at_most_and_lowers_the_average(tmp_path):
+def test_legacy_swing_never_adds_to_existing_positions(tmp_path):
     book, mint = _held(tmp_path)
     [review] = _run(book, _snapshot(tmp_path, []), {mint: _off_board(0.78)})["exits"]
-    assert review["state"] == "ADD"
+    assert review["state"] == "HOLD"
     position = book.load()["agents"][SWING_AGENT_ID]["positions"][mint]
-    assert position["adds"] == 1 and position["allocated_usd"] == 7.5
-    assert position["entry_price"] == pytest.approx(7.5 / (5 + 2.5 / 0.78))
-    assert book.load()["agents"][SWING_AGENT_ID]["cash_usd"] == 22.5
-    _run(book, _snapshot(tmp_path, []), {mint: _off_board(0.70)})   # -23% vs avg
-    _run(book, _snapshot(tmp_path, []), {mint: _off_board(0.60)})   # would be a 3rd
-    position = book.load()["agents"][SWING_AGENT_ID]["positions"][mint]
-    assert position["adds"] == 2 and position["allocated_usd"] == 10.0
+    assert "adds" not in position
+    assert position["allocated_usd"] == 5
+    assert book.load()["agents"][SWING_AGENT_ID]["cash_usd"] == 25
 
 
 def test_no_add_into_a_draining_pool(tmp_path):
@@ -227,9 +223,34 @@ def test_no_add_into_a_draining_pool(tmp_path):
     assert "adds" not in book.load()["agents"][SWING_AGENT_ID]["positions"][mint]
 
 
-def test_stop_is_measured_from_the_average_cost(tmp_path):
+def test_legacy_swing_stop_is_not_widened_by_adding(tmp_path):
     book, mint = _held(tmp_path)
-    _run(book, _snapshot(tmp_path, []), {mint: _off_board(0.78)})   # avg ~0.914
-    # 0.62 is -38% from the first price but only -32% from the average: held.
+    _run(book, _snapshot(tmp_path, []), {mint: _off_board(0.78)})
     [review] = _run(book, _snapshot(tmp_path, []), {mint: _off_board(0.62)})["exits"]
-    assert review["state"] == "ADD"
+    assert review["state"] == "EXIT"
+
+
+@pytest.mark.parametrize("age,liquidity,expected", [
+    (3600, 40000, "DATA_END"),
+    (25 * 3600, 80000, "TIME_EXIT"),
+])
+def test_replay_never_adds_into_drain_or_after_deadline(age, liquidity, expected):
+    t0 = 2_000_000.0
+    path = (Observation(t0, 1, 80000, True),
+            Observation(t0 + age, .78, liquidity, True),
+            Observation(t0 + age + 900, .79, liquidity, True))
+    decision = TrackedDecision("signal", "M", t0, "BUY ZONE", (), path)
+    result = simulate_ladder_trade(decision, S.ladder_rules(), CostModel())
+    assert result.exit_reason == expected
+    if expected == "TIME_EXIT":
+        assert result.held_seconds == age
+
+
+def test_replay_trailing_exit_takes_priority_over_add():
+    t0 = 2_000_000.0
+    path = tuple(Observation(t0 + i * 900, p, 80000, True)
+                 for i, p in enumerate([1, 1.6, .78]))
+    result = simulate_ladder_trade(
+        TrackedDecision("signal", "M", t0, "BUY ZONE", (), path),
+        S.ladder_rules(), CostModel())
+    assert result.exit_reason == "TRAILING"

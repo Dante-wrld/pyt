@@ -129,6 +129,8 @@ class CapitalBook:
         entry_liquidity_usd: float = 0,
         max_order_usd: float = DEFAULT_MAX_ORDER_USD,
         max_open_positions: int = DEFAULT_MAX_OPEN_POSITIONS,
+        pair_address: str | None = None,
+        pair_created_at_ms: float | None = None,
     ) -> dict[str, Any]:
         payload = self.load()
         if payload is None:
@@ -171,6 +173,8 @@ class CapitalBook:
             "recovered_usd": 0.0,
             "second_stage_taken": False,
             "status": "SHADOW_OPEN",
+            "pair_address": pair_address,
+            "pair_created_at_ms": pair_created_at_ms,
         }
         payload["updated_at"] = datetime.now(UTC).isoformat()
         self._write(payload)
@@ -209,6 +213,42 @@ class CapitalBook:
         payload["updated_at"] = datetime.now(UTC).isoformat()
         self._write(payload)
         return dict(position)
+
+    @staticmethod
+    def _swing_allocation(payload: dict) -> dict:
+        # Responsibility ceiling, not additional wallet cash. Remaining cost
+        # stays in its original account; never credit the entry agent on handoff.
+        reserved = sum(float(p["allocated_usd"])
+                       for account in payload["agents"].values()
+                       for p in account["positions"].values()
+                       if p.get("exit_manager") == "swing-v1")
+        return {"limit_usd": 30.0, "reserved_usd": round(reserved, 8),
+                "available_usd": round(max(0.0, 30.0 - reserved), 8),
+                "additional_cash_usd": 0.0}
+
+    def delegate_shadow_exit(self, agent_id: str, mint: str, review: dict) -> bool:
+        """Portfolio approves a hold mandate within swing's $30 cost budget.
+
+        No purchase, token transfer, cash credit or realized profit occurs.
+        Partial/final exits release capacity through the remaining cost basis.
+        """
+        if not review.get("swing_handoff"):
+            return False
+        payload = self.load()
+        if payload is None:
+            raise ValueError("initialize agent capital first")
+        position = payload["agents"][agent_id]["positions"][mint]
+        if (position.get("exit_manager") != "swing-v1"
+                and float(position["allocated_usd"]) >
+                self._swing_allocation(payload)["available_usd"] + 1e-8):
+            return False
+        position["exit_manager"] = "swing-v1"
+        position["exit_executor"] = "portfolio-v1"
+        position.setdefault("swing_assigned_at", datetime.now(UTC).isoformat())
+        position["swing_evidence_as_of"] = review["evidence_as_of"]
+        position["swing_reason"] = review["reasons"][-1]
+        self._write(payload)
+        return True
 
     def mark_shadow_position(self, agent_id: str, mint: str, price: float) -> dict[str, Any]:
         if not math.isfinite(price) or price <= 0:
@@ -264,7 +304,9 @@ class CapitalBook:
                 "opened_at": opened_at, "position_closed": fraction == 1,
                 # Kept for the re-entry rule (hunter_shadow_strategy).
                 "entry_price": position.get("entry_price"),
-                "price_currency": position.get("price_currency")}
+                "price_currency": position.get("price_currency"),
+                "exit_manager": position.get("exit_manager", agent_id),
+                "exit_executor": position.get("exit_executor", agent_id)}
         account["cash_usd"] = round(float(account["cash_usd"]) + proceeds, 8)
         account["reserved_usd"] = round(max(0, float(account["reserved_usd"]) - cost), 8)
         account["realized_pnl_usd"] = round(float(account["realized_pnl_usd"]) + pnl, 8)
@@ -408,6 +450,7 @@ class CapitalBook:
             "live_execution": False,
             "starting_capital_per_agent_usd": payload["starting_capital_per_agent_usd"],
             "total_starting_capital_usd": payload["total_starting_capital_usd"],
+            "swing_allocation": self._swing_allocation(payload),
             "agents": [
                 {
                     "agent_id": row.agent_id,
