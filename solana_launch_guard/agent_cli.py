@@ -28,6 +28,8 @@ from .agents import (
 from .config import _dotenv_value
 from .hunter_shadow_strategy import ShadowRecoveryPolicy, assess_entry, assess_exit
 from .live_trial_ledger import principal_sale_fraction
+from .live_trial_runner import live_entry_gate
+from .strategy_profile import StrategyProfile
 from .openai_agents import OpenAIProposalModel, connection_test
 
 
@@ -381,8 +383,18 @@ def shadow_once(model: OpenAIProposalModel | None, book: CapitalBook, *, portfol
         and isinstance(item.get("mint"), str)
         and 0 <= time.time() - float(item.get("quoted_at") or 0) <= 15
     } if _snapshot_is_fresh(recommendations) else {}
-    candidate_reviews = {item["mint"]: assess_entry(fresh_quotes[item["mint"]], recovery_policy)
-                         for item in observed if isinstance(item, dict) and item.get("mint") in fresh_quotes}
+    # Same gates as the live trial (MOMENTUM BUY pause, strategy profile),
+    # so the shadow hunter only buys what live hunter-v1 would.
+    entry_profile = StrategyProfile.from_env()
+    candidate_reviews = {
+        item["mint"]: live_entry_gate(
+            fresh_quotes[item["mint"]],
+            assess_entry(fresh_quotes[item["mint"]], recovery_policy),
+            profile=entry_profile,
+        )
+        for item in observed
+        if isinstance(item, dict) and item.get("mint") in fresh_quotes
+    }
     shadow_reviews: list[dict[str, object]] = []
     if not portfolio_sell_only:
         # Existing position marks and exits use the same fresh, read-only quote
@@ -542,7 +554,10 @@ def shadow_once(model: OpenAIProposalModel | None, book: CapitalBook, *, portfol
             if selected is None:
                 arbitration = Arbitration(False, 0, ("buy mint lacks a fresh watched quote",))
             else:
-                entry_review = assess_entry(selected, recovery_policy)
+                entry_review = live_entry_gate(
+                    selected, assess_entry(selected, recovery_policy),
+                    profile=entry_profile,
+                )
                 arbitration = coordinator.arbiter.evaluate(
                     proposal,
                     RiskSnapshot(

@@ -222,6 +222,33 @@ def _live_arbiter(max_quote_age_seconds: int = 15, min_liquidity_usd: float = 50
     ))
 
 
+def live_entry_gate(
+    candidate: dict, review: dict, *, now: float | None = None,
+    profile: StrategyProfile | None = None,
+) -> dict:
+    """The live trial's entry gates on top of assess_entry, shared with the
+    hunter-v1 shadow loop so paper trading buys only what live would.
+
+    - MOMENTUM_BUY_PAUSED turns every MOMENTUM BUY into PAUSED.
+    - The strategy profile (ENTRY_ALLOWED_DECISIONS, ENTRY_MIN_TOKEN_AGE_DAYS,
+      ENTRY_SHADOW_ONLY_SOURCES) pauses an otherwise BUY_READY candidate.
+
+    A gated candidate keeps assess_entry's review shape, so it still flows
+    through BUY_ZONE_SKIPPED logging and the outcome tracker without an order.
+    """
+    if MOMENTUM_BUY_PAUSED and candidate.get("decision") == "MOMENTUM BUY":
+        review = {**review, "state": "PAUSED",
+                  "reasons": ["MOMENTUM BUY is paused pending a strategy review"]}
+    profile = profile or StrategyProfile.from_env()
+    blocked = profile.entry_block_reason(
+        candidate.get("decision"), candidate.get("pair_created_at_ms"),
+        sources=candidate.get("sources"), now=now,
+    )
+    if blocked is not None and review["state"] == "BUY_READY":
+        review = {**review, "state": "PAUSED", "reasons": [blocked]}
+    return review
+
+
 async def decide_hunter_entry(
     snapshot: dict, *, model, ledger: LiveTrialLedger,
     now: float | None = None,
@@ -242,31 +269,11 @@ async def decide_hunter_entry(
         (c, assess_entry(c, policy))
         for c in _fresh_candidates(snapshot, now=at, min_liquidity_usd=policy.min_liquidity_usd)
     ]
-    if MOMENTUM_BUY_PAUSED:
-        # Reuses the exact same "not BUY_READY" path below (dedup'd
-        # BUY_ZONE_SKIPPED logging included) rather than a separate code
-        # path, by synthesizing the same review shape assess_entry itself
-        # returns for a candidate that isn't ready yet.
-        assessed = [
-            (c, review) if c.get("decision") != "MOMENTUM BUY" else
-            (c, {**review, "state": "PAUSED",
-                 "reasons": ["MOMENTUM BUY is paused pending a strategy review"]})
-            for c, review in assessed
-        ]
-    # The same shadow-only gate the deterministic auto-buyer uses: blocked
-    # signals still flow through assessment and BUY_ZONE_SKIPPED logging, so
-    # the ledger and outcome tracker keep recording them without an order.
     profile = StrategyProfile.from_env()
-    gated = []
-    for c, review in assessed:
-        blocked = profile.entry_block_reason(
-            c.get("decision"), c.get("pair_created_at_ms"),
-            sources=c.get("sources"), now=at,
-        )
-        if blocked is not None and review["state"] == "BUY_READY":
-            review = {**review, "state": "PAUSED", "reasons": [blocked]}
-        gated.append((c, review))
-    assessed = gated
+    assessed = [
+        (c, live_entry_gate(c, review, now=at, profile=profile))
+        for c, review in assessed
+    ]
     ready = [c for c, review in assessed if review["state"] == "BUY_READY"]
     if not ready:
         # A candidate can already show BUY ZONE/BUY NOW in the recommendation
