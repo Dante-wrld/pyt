@@ -11,11 +11,7 @@ from pathlib import Path
 
 from openai import OpenAIError
 
-from .agent_capital import (
-    REPEAT_LOSS_BLOCK_COUNT,
-    REPEAT_LOSS_WINDOW_HOURS,
-    CapitalBook,
-)
+from .agent_capital import CapitalBook
 from .agents import (
     AgentCoordinator,
     AgentRecord,
@@ -27,7 +23,12 @@ from .agents import (
     TradeAction,
 )
 from .config import _dotenv_value
-from .hunter_shadow_strategy import ShadowRecoveryPolicy, assess_entry, assess_exit
+from .hunter_shadow_strategy import (
+    ShadowRecoveryPolicy,
+    assess_entry,
+    assess_exit,
+    reentry_block_reason,
+)
 from .live_trial_ledger import principal_sale_fraction
 from .live_trial_runner import (
     HUNTER_EQUITY_USD,
@@ -591,14 +592,21 @@ def shadow_once(model: OpenAIProposalModel | None, book: CapitalBook, *, portfol
                 )
                 if entry_review["state"] != "BUY_READY":
                     arbitration = Arbitration(False, 0, tuple(entry_review["reasons"]) + arbitration.reasons)
-            # Repeat-loss block (same rule as coin_tracker): do not keep
-            # re-buying a mint that has already lost money repeatedly today.
-            losing_exits = book.recent_losing_exits(agent_id, proposal.mint)
-            if losing_exits >= REPEAT_LOSS_BLOCK_COUNT:
-                arbitration = Arbitration(False, 0, (
-                    f"repeat-loss block: {losing_exits} losing exits of this mint "
-                    f"in the last {REPEAT_LOSS_WINDOW_HOURS:g}h",
-                ) + arbitration.reasons)
+            # Re-entry rule shared with the live trial: after repeated
+            # losses a mint waits until its price reclaims where the losing
+            # streak began (reentry_block_reason).
+            quote_row = selected or {}
+            blocked = reentry_block_reason(
+                book.sell_history(
+                    agent_id, proposal.mint,
+                    price_currency=str(quote_row.get("price_currency") or ""),
+                ),
+                float(quote_row.get("price") or 0),
+            )
+            if blocked is not None:
+                arbitration = Arbitration(
+                    False, 0, (f"re-entry block: {blocked}",) + arbitration.reasons
+                )
         if proposal.action is TradeAction.REBUY and not any(
             item.get("decision") == "REBUY REVIEW"
             and item.get("token_address") == proposal.mint

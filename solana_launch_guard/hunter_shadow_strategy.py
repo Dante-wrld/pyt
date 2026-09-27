@@ -36,6 +36,52 @@ def _epoch(value: Any) -> float:
     return 0.0
 
 
+# Re-entry after repeated losses (live trial and shadow share this).
+# A mint whose last REENTRY_LOSS_STREAK sells all lost money is blocked -
+# until it "graduates": its price reclaims the entry price of the first
+# trade in that losing streak, i.e. where we first judged it worth buying.
+# A token that bled -23% after our entries and has since climbed back to
+# that level is showing new strength, so it may be bought again (every
+# other entry rule still applies). No time limit: it stays blocked until
+# it proves itself.
+REENTRY_LOSS_STREAK = 2
+
+
+@dataclass(frozen=True)
+class SellRecord:
+    """One confirmed sell of a mint, oldest first: what it realized and the
+    entry price of the position it came from (None when not recorded)."""
+
+    realized_usd: float
+    entry_price: float | None
+
+
+def reentry_block_reason(
+    sells: list[SellRecord], current_price: float,
+    *, streak_needed: int = REENTRY_LOSS_STREAK,
+) -> str | None:
+    """Why a fresh buy of this mint is refused, or None if it may be bought."""
+    streak = 0
+    for sell in reversed(sells):
+        if sell.realized_usd < 0:
+            streak += 1
+        else:
+            break
+    if streak < streak_needed:
+        return None
+    lost = sum(s.realized_usd for s in sells[-streak:])
+    reclaim = sells[-streak].entry_price
+    head = f"{streak} consecutive losing sells on this mint ({lost:+.2f} USD)"
+    if reclaim is None or reclaim <= 0 or not math.isfinite(reclaim):
+        return head + "; no entry price recorded to measure a recovery against"
+    if current_price >= reclaim:
+        return None  # graduated: back to where the losing streak began
+    return (
+        f"{head}; re-entry once price reclaims {reclaim:.6g} (first entry of "
+        f"the streak), now {(current_price / reclaim - 1) * 100:+.1f}%"
+    )
+
+
 @dataclass(frozen=True)
 class ShadowRecoveryPolicy:
     pullback_pct: float = 4.0

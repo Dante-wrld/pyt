@@ -9,15 +9,15 @@ from pathlib import Path
 from typing import Any
 
 from .agents import AgentRole
+from .hunter_shadow_strategy import SellRecord
 
 
 DEFAULT_AGENT_CAPITAL_USD = 30.0
 DEFAULT_MAX_ORDER_USD = 5.0
 DEFAULT_MAX_OPEN_POSITIONS = 2
-# Same repeat-loss rule as coin_tracker.py (repeat_loss_block_count /
-# repeat_loss_window_hours), so the two paper systems stay comparable.
-REPEAT_LOSS_BLOCK_COUNT = 2
-REPEAT_LOSS_WINDOW_HOURS = 24.0
+# Fills recorded before entry prices were kept cannot show a recovery, so a
+# losing streak made only of those stops blocking after this long.
+LEGACY_REENTRY_BLOCK_HOURS = 24.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -227,7 +227,10 @@ class CapitalBook:
                 "exit_value_usd": round(proceeds, 8), "realized_pnl_usd": round(pnl, 8),
                 "return_pct": round(pnl / cost * 100, 6), "holding_seconds": held,
                 "slippage_pct": slippage_pct, "closed_at": closed_at.isoformat(),
-                "opened_at": opened_at, "position_closed": fraction == 1}
+                "opened_at": opened_at, "position_closed": fraction == 1,
+                # Kept for the re-entry rule (hunter_shadow_strategy).
+                "entry_price": position.get("entry_price"),
+                "price_currency": position.get("price_currency")}
         account["cash_usd"] = round(float(account["cash_usd"]) + proceeds, 8)
         account["reserved_usd"] = round(max(0, float(account["reserved_usd"]) - cost), 8)
         account["realized_pnl_usd"] = round(float(account["realized_pnl_usd"]) + pnl, 8)
@@ -317,39 +320,41 @@ class CapitalBook:
                 "evidence_sufficient": False,
                 "slippage_note": "zero means no estimate was available; not a measured fill"}
 
-    def recent_losing_exits(
-        self, agent_id: str, mint: str, *,
-        window_hours: float = REPEAT_LOSS_WINDOW_HOURS,
+    def sell_history(
+        self, agent_id: str, mint: str, *, price_currency: str | None = None,
         now: datetime | None = None,
-    ) -> int:
-        """Closed trades of this mint, fully exited within the window, whose
-        fills (all stages together) lost money. A $0.00 breakeven is not a
-        loss, matching performance()."""
+    ) -> list[SellRecord]:
+        """Every sell fill of this mint, oldest first, for the shared re-entry
+        rule (the same per-sell view the live ledger gives). A fill's entry
+        price is only comparable when quoted in price_currency; otherwise it
+        is None. Legacy fills with no entry price older than
+        LEGACY_REENTRY_BLOCK_HOURS are dropped so they cannot block forever."""
         payload = self.load()
         if payload is None:
-            return 0
+            return []
         fills = payload["agents"].get(agent_id, {}).get("completed_trades", [])
-        cutoff = (now or datetime.now(UTC)).timestamp() - window_hours * 3600
-        trades: dict[str, dict[str, Any]] = {}
-        for index, fill in enumerate(fills):
+        at = (now or datetime.now(UTC)).timestamp()
+        cutoff = at - LEGACY_REENTRY_BLOCK_HOURS * 3600
+        history: list[SellRecord] = []
+        for fill in fills:
             if fill.get("mint") != mint:
                 continue
-            trade = trades.setdefault(
-                str(fill.get("opened_at", f"legacy-{index}")),
-                {"pnl": 0.0, "closed": False, "closed_at": 0.0},
-            )
-            trade["pnl"] += float(fill.get("realized_pnl_usd", 0.0))
-            if fill.get("position_closed", True):
-                trade["closed"] = True
+            entry = fill.get("entry_price")
+            if entry is None:
                 try:
-                    closed = datetime.fromisoformat(str(fill["closed_at"]))
-                    trade["closed_at"] = closed.timestamp()
+                    closed = datetime.fromisoformat(str(fill["closed_at"])).timestamp()
                 except (KeyError, ValueError):
-                    pass
-        return sum(
-            1 for t in trades.values()
-            if t["closed"] and t["pnl"] < 0 and t["closed_at"] >= cutoff
-        )
+                    closed = 0.0
+                if closed < cutoff:
+                    continue
+            elif (price_currency is not None
+                  and fill.get("price_currency") != price_currency):
+                entry = None
+            history.append(SellRecord(
+                float(fill.get("realized_pnl_usd", 0.0)),
+                None if entry is None else float(entry),
+            ))
+        return history
 
     def daily_realized_pnl(self, agent_id: str, *, today: str | None = None) -> float:
         payload = self.load()

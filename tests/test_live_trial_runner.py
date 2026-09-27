@@ -302,6 +302,30 @@ def test_decide_hunter_entry_blocks_a_mint_after_two_consecutive_losses(tmp_path
     book.close()
 
 
+@pytest.mark.parametrize("first_entry, allowed", [(0.004, True), (0.008, False)])
+def test_decide_hunter_entry_lets_a_losing_mint_graduate(tmp_path, monkeypatch,
+                                                         first_entry, allowed):
+    """Two losing round trips block a mint only until its price reclaims the
+    entry of the first losing trade (candidate price here is 0.005)."""
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    book = LiveTrialLedger(tmp_path / "trial.sqlite")
+    book.start()
+    # Each round trip: $0.40 in, $0.20 out (the helper trades one unit).
+    _seed_closed_position(book, mint=MINT, exit_price=0.2, label="first",
+                          cost_cents=40, entry_price=first_entry, now=1)
+    _seed_closed_position(book, mint=MINT, exit_price=0.2, label="second",
+                          cost_cents=40, entry_price=0.004, now=2)
+    model = Model()
+    decision = asyncio.run(decide_hunter_entry(snapshot(), model=model, ledger=book))
+    assert (decision is not None) is allowed
+    if not allowed:
+        reason = book.db.execute(
+            "SELECT reason FROM decisions WHERE state='BLOCKED' ORDER BY id DESC"
+        ).fetchone()[0]
+        assert "re-entry once price reclaims 0.008" in reason
+    book.close()
+
+
 def test_decide_hunter_entry_still_allows_a_buy_after_one_loss(tmp_path, monkeypatch):
     """One prior loss on a mint is real evidence for the model to weigh,
     not grounds to refuse it outright - only a repeated pattern (two in a
@@ -1889,8 +1913,8 @@ class FakeOracle:
         return self.quote_returned
 
 
-def _seed_closed_position(book, *, mint, exit_price, agent="hunter-v1", now=None, label=None,
-                          cost_cents=50):
+def _seed_closed_position(book, *, mint, exit_price, agent="hunter-v1", now=None,
+                          label=None, cost_cents=50, entry_price=1.0):
     """A full buy+sell round trip through the public ledger API, producing
     a real closed_positions row the way a genuine round trip would.
 
@@ -1906,7 +1930,7 @@ def _seed_closed_position(book, *, mint, exit_price, agent="hunter-v1", now=None
                      approved_cents=500, now=at)
     book.transition(f"seed-buy:{tag}", "SUBMITTED", signature=f"seed-buy-sig:{tag}")
     book.confirm_buy(intent=f"seed-buy:{tag}", signature=f"seed-buy-sig:{tag}", executed_cents=cost_cents,
-                     quantity_raw=1, decimals=0, entry_price=1.0,
+                     quantity_raw=1, decimals=0, entry_price=entry_price,
                      entry_liquidity_usd=60000, verified_on_chain=True)
     book.reserve_sell(intent=f"seed-sell:{tag}", agent=agent, mint=mint, now=at)
     book.transition(f"seed-sell:{tag}", "SUBMITTED", signature=f"seed-sell-sig:{tag}")
@@ -2031,12 +2055,38 @@ def test_decide_regrowth_rebuy_blocks_a_mint_after_two_consecutive_losses(tmp_pa
     # cost_cents=200 against a $1 (100-cent) exit realizes a loss each time -
     # small enough (total -$2) to stay under the $3 daily-loss cap, so the
     # loss-streak block is what's actually being exercised here, not that.
-    _seed_closed_position(book, mint=MINT, exit_price=1.0, label="first", cost_cents=200)
-    _seed_closed_position(book, mint=MINT, exit_price=1.0, label="second", cost_cents=200)
+    # Bought at $2 both times: the regrowth price (~$1.15-1.3) is still
+    # below where the losing streak began, so it has not graduated.
+    for label in ("first", "second"):
+        _seed_closed_position(book, mint=MINT, exit_price=1.0, label=label,
+                              cost_cents=200, entry_price=2.0)
     model = Model()
     oracle = FakeOracle(_quote(price=1 + REGROWTH_MIN_GROWTH_PCT / 100 * 1.5))
     assert asyncio.run(decide_regrowth_rebuy(model=model, ledger=book, oracle=oracle)) is None
     assert model.calls == 0
+    book.close()
+
+
+def test_decide_regrowth_rebuy_allows_a_mint_that_reclaimed_its_first_entry(
+        tmp_path, monkeypatch):
+    """Graduation: two losses in a row, but the price has since climbed back
+    above the entry of the first losing trade - it may be bought again."""
+    monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
+    book = LiveTrialLedger(tmp_path / "trial.sqlite")
+    book.start()
+    for label, entry in (("first", 1.1), ("second", 1.0)):
+        _seed_closed_position(book, mint=MINT, exit_price=1.0, label=label,
+                              cost_cents=200, entry_price=entry)
+    confirmations: dict[str, int] = {}
+    model = Model()
+    oracle = FakeOracle(_quote(price=1 + REGROWTH_MIN_GROWTH_PCT / 100 * 1.5))
+    decision = None
+    for _ in range(REGROWTH_CONFIRMATION_POLLS):
+        decision = asyncio.run(decide_regrowth_rebuy(
+            model=model, ledger=book, oracle=oracle,
+            regrowth_confirmation_counts=confirmations,
+        ))
+    assert decision is not None
     book.close()
 
 
@@ -2049,8 +2099,11 @@ def test_decide_regrowth_rebuy_only_logs_a_loss_streak_block_once_per_reason(tmp
     monkeypatch.setenv("AGENT_LIVE_KILL_SWITCH", "false")
     book = LiveTrialLedger(tmp_path / "trial.sqlite")
     book.start()
-    _seed_closed_position(book, mint=MINT, exit_price=1.0, label="first", cost_cents=200)
-    _seed_closed_position(book, mint=MINT, exit_price=1.0, label="second", cost_cents=200)
+    # Bought at $2 both times: the regrowth price (~$1.15-1.3) is still
+    # below where the losing streak began, so it has not graduated.
+    for label in ("first", "second"):
+        _seed_closed_position(book, mint=MINT, exit_price=1.0, label=label,
+                              cost_cents=200, entry_price=2.0)
     model = Model()
     oracle = FakeOracle(_quote(price=1 + REGROWTH_MIN_GROWTH_PCT / 100 * 1.5))
     skip_reasons: dict[str, str] = {}

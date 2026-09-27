@@ -12,6 +12,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .hunter_shadow_strategy import SellRecord
+
 
 BUY_AGENTS = ("hunter-v1", "copy-v1")
 BUY_CAP_CENTS = 500
@@ -127,8 +129,13 @@ class LiveTrialLedger:
                 "ALTER TABLE positions ADD COLUMN proceeds_cents INTEGER NOT NULL DEFAULT 0"
             )
         self._backfill_recovery_accounting()
-        if "decision" not in {row[1] for row in self.db.execute("PRAGMA table_info(orders)")}:
+        order_columns = {row[1] for row in self.db.execute("PRAGMA table_info(orders)")}
+        if "decision" not in order_columns:
             self.db.execute("ALTER TABLE orders ADD COLUMN decision TEXT")
+        # A BUY's entry price, kept after its position closes: the re-entry
+        # rule measures a mint's recovery against it (reentry_block_reason).
+        if "entry_price" not in order_columns:
+            self.db.execute("ALTER TABLE orders ADD COLUMN entry_price REAL")
 
     def _backfill_recovery_accounting(self) -> None:
         """Reconstruct entry cost and sale proceeds for positions recorded
@@ -278,6 +285,23 @@ class LiveTrialLedger:
         ).fetchone()
         return int(row[0])
 
+    def sell_history(self, mint: str) -> list[SellRecord]:
+        """Every confirmed sell of this mint, oldest first, each with the
+        entry price of the buy that opened its position."""
+        rows = self.db.execute(
+            "SELECT side, realized_cents, entry_price FROM orders WHERE mint=? "
+            "AND state='CONFIRMED' ORDER BY created_at, intent",
+            (mint,),
+        ).fetchall()
+        history: list[SellRecord] = []
+        entry: float | None = None
+        for side, realized_cents, entry_price in rows:
+            if side == "BUY":
+                entry = entry_price
+            elif realized_cents is not None:
+                history.append(SellRecord(realized_cents / 100, entry))
+        return history
+
     def daily_realized_cents(self, agent: str, *, now: float | None = None) -> int:
         at = time.time() if now is None else now
         start = math.floor(at / 86400) * 86400
@@ -416,8 +440,9 @@ class LiveTrialLedger:
                 entry_price, entry_liquidity_usd, entry_price, entry_price,
                 time.time(), time.time(), origin, executed_cents,
             ))
-            self.db.execute("UPDATE orders SET state='CONFIRMED',executed_cents=?,decision=? WHERE intent=?",
-                           (executed_cents, decision, intent))
+            self.db.execute("UPDATE orders SET state='CONFIRMED',executed_cents=?,decision=?,"
+                            "entry_price=? WHERE intent=?",
+                            (executed_cents, decision, entry_price, intent))
             self.db.execute("DELETE FROM closed_positions WHERE agent=? AND mint=?", (row[0], row[1]))
             self.db.commit()
         except BaseException:

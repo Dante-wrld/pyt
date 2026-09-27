@@ -16,7 +16,11 @@ from .agents import (
     AgentCoordinator, AgentRecord, AgentRole, RiskArbiter, RiskPolicy,
     RiskSnapshot, TradeAction,
 )
-from .hunter_shadow_strategy import ShadowRecoveryPolicy, assess_entry
+from .hunter_shadow_strategy import (
+    ShadowRecoveryPolicy,
+    assess_entry,
+    reentry_block_reason,
+)
 from .live_trial_ledger import MAX_POSITIONS_PER_AGENT, LiveTrialLedger, TrialHalted
 from .execution import BuyIntent, USDC_MINT, PortfolioSignalExitPlanner
 from .market_structure import MarketStructureScanner
@@ -41,7 +45,7 @@ EMERGENCY_MIN_PROCEEDS_FRACTION = 0.25
 # every fresh evaluation starting from a blank slate). One loss can be a
 # genuinely bad entry on an otherwise fine setup; two in a row on the same
 # mint is a real pattern worth refusing to repeat a third time.
-MINT_LOSS_STREAK_BLOCK = 2
+MINT_LOSS_STREAK_BLOCK = 2  # kept equal to REENTRY_LOSS_STREAK (see below)
 
 # hunter-v1's starting budget, used both to size the RiskSnapshot passed to
 # the model and to pre-check the daily loss limit deterministically before
@@ -120,6 +124,18 @@ REGROWTH_MAX_OPEN_POSITIONS = 1
 # counted against candidates of that same kind.
 HUNTER_MOMENTUM_MAX_OPEN_POSITIONS = 2
 HUNTER_NORMAL_MAX_OPEN_POSITIONS = 2
+
+
+def _usd_price(candidate: dict) -> float:
+    """The candidate's price in USD, or 0 when it is quoted in another
+    currency (live entry prices are USDC fills, so only USD compares)."""
+    if str(candidate.get("price_currency") or "USD").upper() not in {"USD", "USDC"}:
+        return 0.0
+    try:
+        price = float(candidate.get("price") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    return price if math.isfinite(price) else 0.0
 
 
 def _mint_round_trip_history(ledger: LiveTrialLedger, mint: str) -> dict[str, Any]:
@@ -363,11 +379,9 @@ async def decide_hunter_entry(
         ledger.log(agent="hunter-v1", mint=mint, state="BLOCKED", reason="daily loss limit reached")
         return None
     mint_history = _mint_round_trip_history(ledger, mint)
-    if mint_history["consecutive_losses"] >= MINT_LOSS_STREAK_BLOCK:
-        ledger.log(agent="hunter-v1", mint=mint, state="BLOCKED",
-                   reason=f"{mint_history['consecutive_losses']} consecutive losing round trips "
-                          f"on this mint this session (total {mint_history['total_realized_usd']:+.2f} "
-                          "USD); declining to repeat the pattern a third time")
+    blocked = reentry_block_reason(ledger.sell_history(mint), _usd_price(candidate))
+    if blocked is not None:
+        ledger.log(agent="hunter-v1", mint=mint, state="BLOCKED", reason=blocked)
         return None
     # Freeze the target price the first time this mint becomes buyable, and
     # compare every later retry against that frozen value, not the live one -
@@ -791,7 +805,8 @@ async def decide_regrowth_rebuy(
         if confirmations[mint] < REGROWTH_CONFIRMATION_POLLS:
             continue
         mint_history = _mint_round_trip_history(ledger, mint)
-        if mint_history["consecutive_losses"] >= MINT_LOSS_STREAK_BLOCK:
+        blocked = reentry_block_reason(ledger.sell_history(mint), quote.price_usd)
+        if blocked is not None:
             # A mint stuck here keeps clearing the growth bar every cycle
             # (it's still climbing) while permanently failing the same
             # loss-streak check - logging that on every cycle would grow
@@ -799,9 +814,7 @@ async def decide_regrowth_rebuy(
             # problem decide_hunter_entry's buy_zone_skip_reasons solves.
             # Only log when the reason actually changes for that mint.
             skip_reasons = regrowth_skip_reasons if regrowth_skip_reasons is not None else {}
-            reason = (f"{mint_history['consecutive_losses']} consecutive losing round trips "
-                     f"on this mint this session (total {mint_history['total_realized_usd']:+.2f} "
-                     "USD); declining a regrowth re-entry into the same pattern")
+            reason = blocked
             if skip_reasons.get(mint) != reason:
                 skip_reasons[mint] = reason
                 ledger.log(agent="hunter-v1", mint=mint, state="BLOCKED", reason=reason)
