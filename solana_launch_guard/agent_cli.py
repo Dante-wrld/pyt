@@ -10,7 +10,11 @@ from pathlib import Path
 
 from openai import OpenAIError
 
-from .agent_capital import CapitalBook
+from .agent_capital import (
+    REPEAT_LOSS_BLOCK_COUNT,
+    REPEAT_LOSS_WINDOW_HOURS,
+    CapitalBook,
+)
 from .agents import (
     AgentCoordinator,
     AgentRecord,
@@ -551,6 +555,14 @@ def shadow_once(model: OpenAIProposalModel | None, book: CapitalBook, *, portfol
                 )
                 if entry_review["state"] != "BUY_READY":
                     arbitration = Arbitration(False, 0, tuple(entry_review["reasons"]) + arbitration.reasons)
+            # Repeat-loss block (same rule as coin_tracker): do not keep
+            # re-buying a mint that has already lost money repeatedly today.
+            losing_exits = book.recent_losing_exits(agent_id, proposal.mint)
+            if losing_exits >= REPEAT_LOSS_BLOCK_COUNT:
+                arbitration = Arbitration(False, 0, (
+                    f"repeat-loss block: {losing_exits} losing exits of this mint "
+                    f"in the last {REPEAT_LOSS_WINDOW_HOURS:g}h",
+                ) + arbitration.reasons)
         if proposal.action is TradeAction.REBUY and not any(
             item.get("decision") == "REBUY REVIEW"
             and item.get("token_address") == proposal.mint

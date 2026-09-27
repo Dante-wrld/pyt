@@ -14,6 +14,10 @@ from .agents import AgentRole
 DEFAULT_AGENT_CAPITAL_USD = 30.0
 DEFAULT_MAX_ORDER_USD = 5.0
 DEFAULT_MAX_OPEN_POSITIONS = 2
+# Same repeat-loss rule as coin_tracker.py (repeat_loss_block_count /
+# repeat_loss_window_hours), so the two paper systems stay comparable.
+REPEAT_LOSS_BLOCK_COUNT = 2
+REPEAT_LOSS_WINDOW_HOURS = 24.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -312,6 +316,40 @@ class CapitalBook:
                 "expectancy_pct": round(len(wins) / n * avg_win - len(losses) / n * avg_loss, 4) if n else 0,
                 "evidence_sufficient": False,
                 "slippage_note": "zero means no estimate was available; not a measured fill"}
+
+    def recent_losing_exits(
+        self, agent_id: str, mint: str, *,
+        window_hours: float = REPEAT_LOSS_WINDOW_HOURS,
+        now: datetime | None = None,
+    ) -> int:
+        """Closed trades of this mint, fully exited within the window, whose
+        fills (all stages together) lost money. A $0.00 breakeven is not a
+        loss, matching performance()."""
+        payload = self.load()
+        if payload is None:
+            return 0
+        fills = payload["agents"].get(agent_id, {}).get("completed_trades", [])
+        cutoff = (now or datetime.now(UTC)).timestamp() - window_hours * 3600
+        trades: dict[str, dict[str, Any]] = {}
+        for index, fill in enumerate(fills):
+            if fill.get("mint") != mint:
+                continue
+            trade = trades.setdefault(
+                str(fill.get("opened_at", f"legacy-{index}")),
+                {"pnl": 0.0, "closed": False, "closed_at": 0.0},
+            )
+            trade["pnl"] += float(fill.get("realized_pnl_usd", 0.0))
+            if fill.get("position_closed", True):
+                trade["closed"] = True
+                try:
+                    closed = datetime.fromisoformat(str(fill["closed_at"]))
+                    trade["closed_at"] = closed.timestamp()
+                except (KeyError, ValueError):
+                    pass
+        return sum(
+            1 for t in trades.values()
+            if t["closed"] and t["pnl"] < 0 and t["closed_at"] >= cutoff
+        )
 
     def daily_realized_pnl(self, agent_id: str, *, today: str | None = None) -> float:
         payload = self.load()
