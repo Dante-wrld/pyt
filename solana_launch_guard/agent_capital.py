@@ -39,7 +39,7 @@ class AgentCapital:
 class CapitalBook:
     """Persistent shadow capital; it has no wallet or execution capability."""
 
-    AGENTS = (
+    AGENTS: tuple[tuple[str, AgentRole], ...] = (
         ("hunter-v1", AgentRole.OPPORTUNITY_HUNTER),
         ("portfolio-v1", AgentRole.PORTFOLIO_MANAGER),
         ("copy-v1", AgentRole.COPY_TRADER),

@@ -239,7 +239,8 @@ def test_tracker_end_to_end_report(tmp_path):
     tracker = OutcomeTracker(
         store, client,
         TrackerConfig(reject_sample_rate=1.0, dense_interval_seconds=60,
-                      dense_window_seconds=120, horizons_seconds=(300.0,)),
+                      dense_window_seconds=120, horizons_seconds=(300.0,),
+                      swing_interval_seconds=0),
         launch_db=launch_db, ledger_db=None, clock=lambda: clock[0],
     )
     assert tracker.ingest() == 6  # stale one skipped
@@ -302,3 +303,16 @@ def test_tracker_reads_board_candidates_from_intelligence_scores(tmp_path):
     assert tracker.ingest() == 1
     assert store.due_mints(1010.0, 10) == ["OLD"]
     store.close()
+
+
+def test_swing_band_samples_every_15_minutes_to_24_hours():
+    from solana_launch_guard.outcome_tracker import NewDecision, plan_samples
+
+    decision = NewDecision("signal", 1, "M", 0.0, "BUY ZONE", True, ())
+    due = plan_samples(decision, 0.0, TrackerConfig(), dense=True)
+    after_hour = [t for t in due if t > 3600]
+    assert after_hour[0] == 3600 + 900
+    assert max(after_hour) == 24 * 3600
+    assert all(b - a <= 900 for a, b in zip(after_hour, after_hour[1:], strict=False))
+    # Sampled rejects stay sparse: fixed horizons only.
+    assert len(plan_samples(decision, 0.0, TrackerConfig(), dense=False)) == 6

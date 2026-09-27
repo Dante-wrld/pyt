@@ -32,6 +32,7 @@ launch-guard-robinhood = "solana_launch_guard.robinhood_setup:main"
 launch-guard = "solana_launch_guard.app:main"
 launch-guard-agents = "solana_launch_guard.agent_cli:main"
 launch-guard-eval = "solana_launch_guard.eval_cli:main"
+launch-guard-swing = "solana_launch_guard.swing_strategy:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["solana_launch_guard"]

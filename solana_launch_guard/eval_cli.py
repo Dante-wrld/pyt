@@ -54,6 +54,7 @@ from .outcome_tracker import (
     TrackerConfig,
     uncopyable_wallet_ids,
 )
+from .swing_strategy import SwingSettings
 
 DEFAULT_OUTCOMES_DB = "launch_guard_outcomes.db"
 MIN_TRADES_FOR_A_VERDICT = 100
@@ -175,6 +176,11 @@ def _parser() -> argparse.ArgumentParser:
     track.add_argument("--reject-sample-rate", type=float, default=0.10)
     track.add_argument("--dense-interval", type=float, default=60.0)
     track.add_argument("--dense-window", type=float, default=3600.0)
+    track.add_argument(
+        "--swing-interval", type=float, default=900.0,
+        help="after the dense window, sample every N seconds (0 = off)",
+    )
+    track.add_argument("--swing-window", type=float, default=24 * 3600.0)
     track.add_argument("--max-decision-lag", type=float, default=300.0)
     track.add_argument("--requests-per-cycle", type=int, default=10)
     track.add_argument("--poll-seconds", type=float, default=20.0)
@@ -182,8 +188,9 @@ def _parser() -> argparse.ArgumentParser:
     report = sub.add_parser("report", help="simulate trades after costs")
     _add_cost_args(report)
     report.add_argument(
-        "--exit-model", choices=("simple", "ladder"), default="simple",
-        help="simple: one TP/SL/time exit; ladder: the live-style profit ladder",
+        "--exit-model", choices=("simple", "ladder", "swing"), default="simple",
+        help="simple: one TP/SL/time exit; ladder: the live-style profit ladder; "
+        "swing: swing-v1's multi-hour exits (SWING_* settings, no stagnation)",
     )
     report.add_argument("--take-profit-pct", type=float, default=30.0)
     report.add_argument("--stop-loss-pct", type=float, default=20.0)
@@ -815,6 +822,8 @@ def main(argv: Sequence[str] | None = None) -> None:
                 reject_sample_rate=args.reject_sample_rate,
                 dense_interval_seconds=args.dense_interval,
                 dense_window_seconds=args.dense_window,
+                swing_interval_seconds=args.swing_interval,
+                swing_window_seconds=args.swing_window,
                 max_decision_lag_seconds=args.max_decision_lag,
                 requests_per_cycle=args.requests_per_cycle,
             )
@@ -843,7 +852,9 @@ def main(argv: Sequence[str] | None = None) -> None:
             print(json.dumps(result, indent=2) if args.json else _render_sweep(result))
             return
         rules: ExitRules | LadderRules = (
-            _ladder(args) if args.exit_model == "ladder" else ExitRules(
+            SwingSettings.from_env().ladder_rules(_ladder(args))
+            if args.exit_model == "swing"
+            else _ladder(args) if args.exit_model == "ladder" else ExitRules(
             take_profit_pct=args.take_profit_pct,
             stop_loss_pct=args.stop_loss_pct,
             max_hold_seconds=args.max_hold_seconds,

@@ -192,3 +192,43 @@ It prints a suggested `--slippage-bps` (half the median round trip plus the
 median realized slippage) to pass to `report` and `sweep` with `--fee-bps 0`.
 It needs `JUPITER_API_KEY` for the quotes and pauses about a second between
 tokens. Re-measure now and then; costs move with liquidity and token mix.
+
+## Multi-hour holds: the swing strategy (swing-v1)
+
+hunter-v1's exits are built for minutes: the 5-minute stagnation exit closes
+most entries long before a token's real move, which on 2026-09-27 came a
+median ~22 hours later. swing-v1 keeps hunter-v1's entries (same entry
+review, live gates and re-entry rule, no model call) and swaps the exits for
+multi-hour ones: no stagnation exit, a 35% hard stop, a trailing stop that
+arms at +50% and trails 25% (40% once the stake is back), a deeper reversal
+bar, and a 24-hour max hold. It is paper only.
+
+The tracker samples every 15 minutes from hour 1 to hour 24
+(`--swing-interval`, `--swing-window`), so multi-hour exits can be replayed.
+Decisions tracked before that only have 1h/4h/24h points after the first
+hour; judge the swing model on data recorded after this change.
+
+    launch-guard-eval report --exit-model ladder --slippage-bps 60 --fee-bps 0
+    launch-guard-eval report --exit-model swing  --slippage-bps 60 --fee-bps 0
+
+Same decisions, two exit models: compare them per signal type on the test
+split. The swing numbers are a starting point (SWING_STOP_LOSS_PCT,
+SWING_TRAILING_ACTIVATION_PCT, SWING_TRAILING_STOP_PCT,
+SWING_PRINCIPAL_TRAILING_STOP_PCT, SWING_MAX_HOLD_HOURS, ...), not a result.
+
+Paper trading it live, beside the bot (its own book, launch_guard_swing_capital.json):
+
+    launch-guard-swing            # loop, every 60s
+    launch-guard-swing --status   # results and open positions
+
+Positions that fall off the board are priced directly from DEX Screener;
+those quotes have no buy/sell flow, so the trailing stop then fires on price
+alone, as in the simulator.
+
+## Re-entry after losses (live and paper)
+
+After two losing sells in a row a mint is blocked until its price reclaims
+the entry price of the first trade in that losing streak; then it
+"graduates" and may be bought again, subject to every other entry rule.
+hunter-v1 live, hunter-v1 paper and swing-v1 all use the same rule
+(`reentry_block_reason`).

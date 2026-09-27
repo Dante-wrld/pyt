@@ -56,6 +56,12 @@ class TrackerConfig:
     horizons_seconds: tuple[float, ...] = DEFAULT_HORIZONS
     dense_interval_seconds: float = 60.0
     dense_window_seconds: float = 3600.0
+    # After the dense first hour, keep sampling every swing_interval out to
+    # swing_window, so multi-hour exits (the swing strategy) can be
+    # simulated: with only 1h/4h/24h points a stop between them is invisible.
+    # 0 turns the band off.
+    swing_interval_seconds: float = 900.0
+    swing_window_seconds: float = 24 * 3600.0
     max_decision_lag_seconds: float = 300.0
     requests_per_cycle: int = 10
 
@@ -573,6 +579,12 @@ def plan_samples(
         while offset <= config.dense_window_seconds:
             due.add(decision.decided_at + offset)
             offset += step
+        if config.swing_interval_seconds > 0:
+            step = max(config.swing_interval_seconds, 60.0)
+            offset = config.dense_window_seconds + step
+            while offset <= config.swing_window_seconds:
+                due.add(decision.decided_at + offset)
+                offset += step
     for horizon in config.horizons_seconds:
         due.add(decision.decided_at + horizon)
     return sorted(t for t in due if t >= now)
