@@ -97,12 +97,17 @@ def _wallet_db(path, rows):
     _make_launch_db(path, [])
     SQLiteStore(str(path)).close()
     db = sqlite3.connect(path)
-    for i, (at, wallet, mint, side) in enumerate(rows):
+    for i, row in enumerate(rows):
+        at, wallet, mint, side = row[:4]
+        # A real swap: SOL out on a buy, in on a sell. Rows may override it
+        # (None = a receipt with no payment) and set a symbol.
+        sol = row[4] if len(row) > 4 else (-0.05 if side == "BUY" else 0.05)
+        symbol = row[5] if len(row) > 5 else mint.lower()
         db.execute(
             "INSERT INTO wallet_trades(seen_at, wallet, signature, slot, mint, side, "
-            "token_delta) VALUES (?, ?, ?, ?, ?, ?, 1)",
+            "token_delta, native_sol_delta, symbol) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)",
             (datetime.fromtimestamp(at, UTC).isoformat(), wallet, f"s{i}", i,
-             mint, side),
+             mint, side, sol, symbol),
         )
     db.commit()
     db.close()
@@ -116,6 +121,8 @@ def test_tracker_follows_copyfomo_and_leader_buys_once_each(tmp_path):
         (1040.0, CF, "WEED", "BUY"),   # a top-up: not a new entry
         (1050.0, CF, "WEED", "SELL"),  # sells are not entries
         (1060.0, "X" * 44, "WEED", "BUY"),  # someone not configured
+        (1061.0, A, "PUMPMINT", "BUY", None, "PUMP"),  # a free reward: no payment
+        (1062.0, A, "TSLAMINT", "BUY", -0.05, "TSLAx"),  # a tokenized stock
     ])
     store = OutcomeStore(tmp_path / "o.db")
     tracker = OutcomeTracker(

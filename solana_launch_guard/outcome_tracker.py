@@ -37,6 +37,7 @@ from typing import Any
 
 import certifi
 
+from .copyfomo_report import WalletTradeRow, is_paid_buy, looks_like_tokenized_stock
 from .evaluation import Observation, TrackedDecision
 
 LOGGER = logging.getLogger(__name__)
@@ -239,23 +240,44 @@ def read_signal_tags(path: str | Path, ids: Sequence[int]) -> dict[int, str]:
     return {int(row_id): str(pattern) for row_id, pattern in rows}
 
 
+def _wallet_row_is_copyable(
+    symbol: str | None, mint: str, sol: float | None, usdc: float | None
+) -> bool:
+    """A paid (SOL or USDC) buy of something other than a tokenized stock -
+    the same cleaning the CopyFomo report applies to leaders."""
+    row = WalletTradeRow(0.0, "", mint, symbol or "", "BUY", 0.0, sol, usdc)
+    return is_paid_buy(row) and not looks_like_tokenized_stock(symbol, mint)
+
+
+def _wallet_columns(connection: sqlite3.Connection) -> tuple[str, str]:
+    columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(wallet_trades)")
+    }
+    return (
+        "native_sol_delta" if "native_sol_delta" in columns else "NULL",
+        "usdc_delta" if "usdc_delta" in columns else "NULL",
+    )
+
+
 def read_wallet_buys(
     path: str | Path, after_id: int, wallet_labels: dict[str, str]
 ) -> list[NewDecision]:
     """Buys recorded for CopyFomo's wallet and its leaders' wallets, so their
     real entries can be replayed through the same exit simulations.
-    Labelled 'COPYFOMO' or 'leader:<name>'."""
+    Labelled 'COPYFOMO' or 'leader:<name>'. Unpaid receipts (PUMP rewards,
+    airdrops) and tokenized stocks are skipped: nobody could copy them."""
     if not wallet_labels:
         return []
     connection = _open_read_only(path)
     if connection is None:
         return []
     try:
+        sol, usdc = _wallet_columns(connection)
         marks = ",".join("?" * len(wallet_labels))
         rows = connection.execute(
-            "SELECT id, seen_at, wallet, mint FROM wallet_trades "
-            f"WHERE id > ? AND side = 'BUY' AND wallet IN ({marks}) "
-            "ORDER BY id LIMIT 5000",
+            f"SELECT id, seen_at, wallet, mint, symbol, {sol}, {usdc} "
+            f"FROM wallet_trades WHERE id > ? AND side = 'BUY' "
+            f"AND wallet IN ({marks}) ORDER BY id LIMIT 5000",
             (after_id, *wallet_labels),
         ).fetchall()
     except sqlite3.OperationalError:
@@ -263,15 +285,52 @@ def read_wallet_buys(
     finally:
         connection.close()
     decisions: list[NewDecision] = []
-    for row_id, seen_at, wallet, mint in rows:
+    for row_id, seen_at, wallet, mint, symbol, sol_delta, usdc_delta in rows:
         try:
             at = _iso_to_epoch(seen_at)
         except (ValueError, TypeError):
+            continue
+        if not _wallet_row_is_copyable(symbol, mint, sol_delta, usdc_delta):
+            # Passed on only so the cursor moves past it (record() uses the
+            # max source_id); the tracking loop never schedules it.
+            decisions.append(NewDecision(
+                "wallet", row_id, mint, at, wallet_labels[wallet], False,
+                ("not copyable: unpaid receipt or tokenized stock",),
+            ))
             continue
         decisions.append(
             NewDecision("wallet", row_id, mint, at, wallet_labels[wallet], None, ())
         )
     return decisions
+
+
+def uncopyable_wallet_ids(path: str | Path, ids: Sequence[int]) -> set[int]:
+    """Of these wallet_trades ids, the ones that were not copyable buys, so
+    wallet decisions tracked before that filter existed can be dropped."""
+    if not ids:
+        return set()
+    connection = _open_read_only(path)
+    if connection is None:
+        return set()
+    try:
+        sol, usdc = _wallet_columns(connection)
+        bad: set[int] = set()
+        id_list = list(ids)
+        for start in range(0, len(id_list), 500):
+            chunk = id_list[start:start + 500]
+            marks = ",".join("?" * len(chunk))
+            for row_id, mint, symbol, sol_delta, usdc_delta in connection.execute(
+                f"SELECT id, mint, symbol, {sol}, {usdc} FROM wallet_trades "
+                f"WHERE id IN ({marks})",
+                tuple(chunk),
+            ):
+                if not _wallet_row_is_copyable(symbol, mint, sol_delta, usdc_delta):
+                    bad.add(int(row_id))
+    except sqlite3.OperationalError:
+        return set()
+    finally:
+        connection.close()
+    return bad
 
 
 def read_scored_candidates(path: str | Path, after_id: int) -> list[NewDecision]:
@@ -486,14 +545,15 @@ class OutcomeStore:
                 Observation(at, price, liquidity, bool(found))
             )
         loaded: list[TrackedDecision] = []
-        for source, mint, at, label, reasons_json in self.connection.execute(
-            "SELECT source, mint, decided_at, label, reasons_json "
+        for source, source_id, mint, at, label, reasons_json in self.connection.execute(
+            "SELECT source, source_id, mint, decided_at, label, reasons_json "
             "FROM tracked_decisions ORDER BY decided_at"
         ):
             loaded.append(
                 TrackedDecision(
                     source, mint, at, label, tuple(json.loads(reasons_json)),
                     tuple(o for o in observations.get(mint, ()) if o.observed_at >= at),
+                    source_id=int(source_id),
                 )
             )
         return loaded
@@ -571,6 +631,8 @@ class OutcomeTracker:
             for decision in decisions:
                 if now - decision.decided_at > self.config.max_decision_lag_seconds:
                     continue  # too stale for a realistic entry quote
+                if decision.source == "wallet" and decision.accepted is False:
+                    continue  # uncopyable (see read_wallet_buys); cursor only
                 if decision.accepted is False and not sampled(
                     decision.mint, self.config.reject_sample_rate
                 ):

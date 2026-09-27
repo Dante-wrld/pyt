@@ -26,12 +26,18 @@ that cannot be priced are set aside and reported, never guessed:
 A position opens with a buy and closes once at least 99% of what was bought
 has been sold; a later buy of the same mint opens a new position. Only
 closed positions count as realized.
+
+Leaders' trades are cleaned before they are judged: tokens that arrived
+without any SOL or USDC payment (pump.fun's PUMP rewards, airdrops) are not
+buys anyone could copy, and tokenized stocks (TSLAx, NVDAx, ...) are not
+meme-coin entries. Both are counted and reported, never scored.
 """
 from __future__ import annotations
 
+import re
 import sqlite3
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -53,6 +59,8 @@ class WalletTradeRow:
     token_delta: float
     native_sol_delta: float | None
     usdc_delta: float | None = None
+    # SOL per token quoted when the monitor saw the trade (just after it).
+    observed_price_sol: float | None = None
 
 
 @dataclass(slots=True)
@@ -110,9 +118,10 @@ def load_trades(db_path: str | Path, wallet: str) -> list[WalletTradeRow]:
             row[1] for row in connection.execute("PRAGMA table_info(wallet_trades)")
         }
         usdc = "usdc_delta" if "usdc_delta" in columns else "NULL"
+        price = "observed_price_sol" if "observed_price_sol" in columns else "NULL"
         rows = connection.execute(
             "SELECT seen_at, signature, mint, symbol, side, token_delta, "
-            f"native_sol_delta, {usdc} FROM wallet_trades WHERE wallet = ? "
+            f"native_sol_delta, {usdc}, {price} FROM wallet_trades WHERE wallet = ? "
             "ORDER BY slot, id",
             (wallet,),
         ).fetchall()
@@ -125,10 +134,64 @@ def load_trades(db_path: str | Path, wallet: str) -> list[WalletTradeRow]:
             _epoch(seen_at), signature, mint, symbol or mint[:6], side,
             float(token_delta), None if sol is None else float(sol),
             None if usdc_amount is None else float(usdc_amount),
+            None if observed is None else float(observed),
         )
         for (seen_at, signature, mint, symbol, side, token_delta, sol,
-             usdc_amount) in rows
+             usdc_amount, observed) in rows
     ]
+
+
+# Backed Finance xStocks on Solana: an upper-case ticker plus a lower-case
+# "x" (TSLAx, NVDAx, SPCXx, GLDx), minted at vanity addresses starting "Xs".
+_STOCK_SYMBOL = re.compile(r"^w?[A-Z]{1,5}x$")
+
+
+def looks_like_tokenized_stock(symbol: str | None, mint: str) -> bool:
+    """Offline check for tokenized stocks, so reports need no network.
+    The live bot filters with Robinhood's full list instead."""
+    return bool(_STOCK_SYMBOL.match((symbol or "").strip())) or mint.startswith("Xs")
+
+
+def is_paid_buy(trade: WalletTradeRow) -> bool:
+    """A buy the wallet paid real SOL or USDC for - something a copier could
+    have bought too. False for rewards and airdrops."""
+    return trade.side == "BUY" and _payment(trade) is not None
+
+
+def clean_leader_trades(
+    trades: Sequence[WalletTradeRow],
+) -> tuple[list[WalletTradeRow], dict[str, int]]:
+    """Drop tokenized-stock trades and unpaid token receipts from a leader's
+    history; return what is left and how much of each was dropped."""
+    kept: list[WalletTradeRow] = []
+    noise = {"stock_trades": 0, "unpaid_receipts": 0}
+    for trade in trades:
+        if looks_like_tokenized_stock(trade.symbol, trade.mint):
+            noise["stock_trades"] += 1
+        elif trade.side == "BUY" and not is_paid_buy(trade):
+            noise["unpaid_receipts"] += 1
+        else:
+            kept.append(trade)
+    return kept, noise
+
+
+def post_buy_premium(trade: WalletTradeRow) -> float | None:
+    """How far above the leader's own fill the price was when the monitor saw
+    the buy: their own price impact plus detection delay - roughly the
+    premium a copier pays over the leader. SOL-paid buys only (USDC legs have
+    no SOL price at fill to compare with)."""
+    if not is_paid_buy(trade) or trade.token_delta <= 0:
+        return None
+    payment = _payment(trade)
+    if payment is None or payment[0] != "SOL" or not trade.observed_price_sol:
+        return None
+    fill = payment[1] / trade.token_delta
+    if fill <= 0:
+        return None
+    premium = trade.observed_price_sol / fill - 1
+    # Older rows stored a USD price in this column (~150x a SOL price); a
+    # ratio that far off is a unit mismatch, not a market move.
+    return premium if -0.9 <= premium <= 5 else None
 
 
 def _payment(trade: WalletTradeRow) -> tuple[str, float] | None:
@@ -207,7 +270,7 @@ COPY_EARLY_TOLERANCE_SECONDS = 30.0
 
 def attribute_leaders(
     positions: Sequence[TokenResult],
-    leader_trades: dict[str, Sequence[WalletTradeRow]],
+    leader_trades: Mapping[str, Sequence[WalletTradeRow]],
     *,
     window_seconds: float = COPY_WINDOW_SECONDS,
 ) -> list[dict]:
@@ -224,8 +287,14 @@ def attribute_leaders(
     leader_buys: list[tuple[float, str, str]] = []  # (time, mint, leader)
     leader_positions: list[tuple[str, TokenResult]] = []
     for name, trades in leader_trades.items():
-        leader_positions.extend((name, p) for p in per_token(list(trades)))
-        # Every leader buy counts for attribution, priced or not.
+        # Only real meme-coin positions are judged: rewards, airdrops and
+        # tokenized stocks were never copyable entries (clean_leader_trades).
+        kept, _ = clean_leader_trades(list(trades))
+        leader_positions.extend(
+            (name, p) for p in per_token(kept) if p.tokens_bought > 0
+        )
+        # Attribution still considers every leader buy, priced or not, so a
+        # copy of a token-to-token swap buy is not misattributed.
         for trade in trades:
             if trade.side == "BUY":
                 leader_buys.append((trade.seen_at, trade.mint, name))
@@ -309,8 +378,33 @@ def _stats(values: list[float]) -> dict:
     }
 
 
+def leader_profiles(
+    leader_trades: Mapping[str, Sequence[WalletTradeRow]],
+) -> dict[str, dict]:
+    """Per leader: raw trade count, what was set aside as noise, how many real
+    paid meme-coin buys remain, and the post-buy premium (median and range)
+    on their SOL-paid buys."""
+    out: dict[str, dict] = {}
+    for name, trades in leader_trades.items():
+        kept, noise = clean_leader_trades(list(trades))
+        premiums = sorted(
+            p for p in (post_buy_premium(t) for t in kept) if p is not None
+        )
+        out[name] = {
+            "raw_trades": len(trades),
+            **noise,
+            "paid_buys": sum(is_paid_buy(t) for t in kept),
+            "premium_n": len(premiums),
+            "premium_median": premiums[len(premiums) // 2] if premiums else None,
+            "premium_p25": premiums[len(premiums) // 4] if premiums else None,
+            "premium_p75": premiums[len(premiums) * 3 // 4] if premiums else None,
+        }
+    return out
+
+
 def build_copyfomo_report(
-    tokens: Sequence[TokenResult], leader_rows: Sequence[dict] = ()
+    tokens: Sequence[TokenResult], leader_rows: Sequence[dict] = (),
+    profiles: dict[str, dict] | None = None,
 ) -> dict:
     closed = [t for t in tokens if t.status == "CLOSED"]
     by_currency: dict[str, list[float]] = defaultdict(list)
@@ -345,6 +439,7 @@ def build_copyfomo_report(
             1 for t in tokens if (t.leader_match or "").startswith("ambiguous")
         ),
         "leader_trades": _leader_summary(leader_rows),
+        "leader_profiles": profiles or {},
         "tokens": [t.as_dict() for t in tokens],
     }
 
@@ -418,7 +513,23 @@ def render_copyfomo_report(report: dict, wallet: str) -> str:
                         f"avg return {r['avg_return'] * 100:+.0f}%  "
                         f"win {pct(r['win_rate'])} ({currency})"
                     )
-    elif report["tokens"]:
+    if report.get("leader_profiles"):
+        lines.append(
+            "\nLeader activity (rewards/airdrops and tokenized stocks set aside):"
+        )
+        for leader, p in report["leader_profiles"].items():
+            premium = (
+                f"price {p['premium_median'] * 100:+.1f}% vs their fill when seen "
+                f"(middle half {p['premium_p25'] * 100:+.1f}% to "
+                f"{p['premium_p75'] * 100:+.1f}%, n={p['premium_n']})"
+                if p["premium_median"] is not None else "no SOL-paid buys to price"
+            )
+            lines.append(
+                f"  {leader:<16} raw {p['raw_trades']:<4} -> paid buys "
+                f"{p['paid_buys']:<4} (dropped {p['unpaid_receipts']} unpaid, "
+                f"{p['stock_trades']} stock) | {premium}"
+            )
+    elif report["tokens"] and not report["leader_trades"]:
         lines.append(
             "\nNo leader wallets configured: set COPYFOMO_LEADER_WALLETS to see "
             "results per leader and the trades CopyFomo skipped."

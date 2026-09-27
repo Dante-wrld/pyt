@@ -51,6 +51,7 @@ class TrackedDecision:
     label: str
     reasons: tuple[str, ...]
     observations: tuple[Observation, ...]
+    source_id: int | None = None  # row id in the source table, when known
 
 
 @dataclass(frozen=True, slots=True)

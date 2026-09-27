@@ -26,6 +26,7 @@ from .config import _load_dotenv, parse_leader_wallets
 from .copyfomo_report import (
     attribute_leaders,
     build_copyfomo_report,
+    leader_profiles,
     load_trades,
     per_token,
     render_copyfomo_report,
@@ -51,6 +52,7 @@ from .outcome_tracker import (
     OutcomeStore,
     OutcomeTracker,
     TrackerConfig,
+    uncopyable_wallet_ids,
 )
 
 DEFAULT_OUTCOMES_DB = "launch_guard_outcomes.db"
@@ -195,6 +197,10 @@ def _parser() -> argparse.ArgumentParser:
     )
     report.add_argument("--json", action="store_true")
     report.add_argument(
+        "--launch-db", default=os.getenv("DATABASE_PATH", "launch_guard.db"),
+        help="bot database, used to drop uncopyable wallet buys",
+    )
+    report.add_argument(
         "--since", default="",
         help="only decisions from this local time on: HH:MM, YYYY-MM-DD[ HH:MM], "
         "or epoch seconds",
@@ -223,6 +229,10 @@ def _parser() -> argparse.ArgumentParser:
     sweep.add_argument("--min-train-trades", type=int, default=30)
     sweep.add_argument("--top", type=int, default=10)
     sweep.add_argument("--json", action="store_true")
+    sweep.add_argument(
+        "--launch-db", default=os.getenv("DATABASE_PATH", "launch_guard.db"),
+        help="bot database, used to drop uncopyable wallet buys",
+    )
     sweep.add_argument(
         "--since", default="",
         help="only decisions from this local time on: HH:MM, YYYY-MM-DD[ HH:MM], "
@@ -637,6 +647,22 @@ def _selected(
     ]
 
 
+def _drop_uncopyable(
+    decisions: Sequence[TrackedDecision], launch_db: str
+) -> list[TrackedDecision]:
+    """Remove wallet decisions tracked before read_wallet_buys filtered out
+    unpaid receipts (PUMP rewards, airdrops) and tokenized stocks."""
+    ids = [
+        d.source_id for d in decisions
+        if d.source == "wallet" and d.source_id is not None
+    ]
+    bad = uncopyable_wallet_ids(launch_db, ids) if ids else set()
+    return [
+        d for d in decisions
+        if not (d.source == "wallet" and d.source_id in bad)
+    ]
+
+
 def _floats(raw: str) -> list[float]:
     return [float(x) for x in raw.split(",") if x.strip()]
 
@@ -769,11 +795,13 @@ def main(argv: Sequence[str] | None = None) -> None:
             raise SystemExit("Set COPYFOMO_SOLANA_WALLET or pass --wallet.")
         positions = per_token(load_trades(args.db, args.wallet))
         leaders = parse_leader_wallets(args.leaders)
-        leader_rows = attribute_leaders(
-            positions,
-            {name: load_trades(args.db, address) for name, address in leaders},
-        ) if leaders else []
-        cf_report = build_copyfomo_report(positions, leader_rows)
+        leader_trades = {
+            name: load_trades(args.db, address) for name, address in leaders
+        }
+        leader_rows = attribute_leaders(positions, leader_trades) if leaders else []
+        cf_report = build_copyfomo_report(
+            positions, leader_rows, leader_profiles(leader_trades)
+        )
         print(
             json.dumps(cf_report, indent=2)
             if args.json
@@ -807,7 +835,9 @@ def main(argv: Sequence[str] | None = None) -> None:
         costs = _costs(args)
         if args.command == "sweep":
             since = parse_since(args.since) if args.since else None
-            members = _selected(store.load(), args.group, since)
+            members = _drop_uncopyable(
+                _selected(store.load(), args.group, since), args.launch_db
+            )
             result = run_sweep(members, _ladder(args), costs, args)
             result["since"] = since
             print(json.dumps(result, indent=2) if args.json else _render_sweep(result))
@@ -822,7 +852,9 @@ def main(argv: Sequence[str] | None = None) -> None:
             max_entry_lag_seconds=args.max_entry_lag,
         ))
         since = parse_since(args.since) if args.since else None
-        loaded = _selected(store.load(), args.group, since)
+        loaded = _drop_uncopyable(
+            _selected(store.load(), args.group, since), args.launch_db
+        )
         report = build_report(
             loaded, rules, costs,
             train_fraction=args.train_fraction,
