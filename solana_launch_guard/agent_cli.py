@@ -6,6 +6,7 @@ import json
 import math
 import os
 import time
+from dataclasses import replace
 from pathlib import Path
 
 from openai import OpenAIError
@@ -28,7 +29,13 @@ from .agents import (
 from .config import _dotenv_value
 from .hunter_shadow_strategy import ShadowRecoveryPolicy, assess_entry, assess_exit
 from .live_trial_ledger import principal_sale_fraction
-from .live_trial_runner import live_entry_gate
+from .live_trial_runner import (
+    HUNTER_EQUITY_USD,
+    HUNTER_MOMENTUM_MAX_OPEN_POSITIONS,
+    HUNTER_NORMAL_MAX_OPEN_POSITIONS,
+    _live_arbiter,
+    live_entry_gate,
+)
 from .strategy_profile import StrategyProfile
 from .openai_agents import OpenAIProposalModel, connection_test
 
@@ -485,6 +492,15 @@ def shadow_once(model: OpenAIProposalModel | None, book: CapitalBook, *, portfol
             return {"mode": "shadow", "live_execution": False, "agents": [], "hunter_candidate_reviews": candidate_reviews, "hunter_position_reviews": shadow_reviews, "reason": "no eligible Solana opportunity or priced sell recommendation", "capital": book.public_status()}
     if model is None:
         raise ValueError("an agent model is required for available shadow inputs")
+    hunter_shadow_arbiter = RiskArbiter(replace(
+        _live_arbiter(
+            min_liquidity_usd=recovery_policy.min_liquidity_usd,
+            max_open_positions=(
+                HUNTER_MOMENTUM_MAX_OPEN_POSITIONS + HUNTER_NORMAL_MAX_OPEN_POSITIONS
+            ),
+        ).policy,
+        allowed_modes=("shadow",),
+    ))
     coordinator = AgentCoordinator(
         model,
         RiskArbiter(
@@ -558,10 +574,15 @@ def shadow_once(model: OpenAIProposalModel | None, book: CapitalBook, *, portfol
                     selected, assess_entry(selected, recovery_policy),
                     profile=entry_profile,
                 )
-                arbitration = coordinator.arbiter.evaluate(
+                # The live trial's arbiter limits (daily loss 10% of a fixed
+                # $30, impact, liquidity, quote age), in shadow mode. Before
+                # this, the shadow used the generic 3%-of-current-equity daily
+                # limit (~$0.84): one bad hour froze it for the rest of the
+                # UTC day while live would have kept trading.
+                arbitration = hunter_shadow_arbiter.evaluate(
                     proposal,
                     RiskSnapshot(
-                        mode="shadow", equity_usd=account.equity_usd,
+                        mode="shadow", equity_usd=HUNTER_EQUITY_USD,
                         daily_realized_pnl_usd=book.daily_realized_pnl(agent_id),
                         open_positions=account.open_positions,
                         liquidity_usd=float(selected.get("liquidity_usd") or 0),
