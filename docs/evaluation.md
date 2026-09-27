@@ -216,6 +216,16 @@ split. The swing numbers are a starting point (SWING_STOP_LOSS_PCT,
 SWING_TRAILING_ACTIVATION_PCT, SWING_TRAILING_STOP_PCT,
 SWING_PRINCIPAL_TRAILING_STOP_PCT, SWING_MAX_HOLD_HOURS, ...), not a result.
 
+It also averages down, as many traders do: while the stake is still at
+risk, when the price is 20% below the average cost it buys half the first
+stake more ($2.50 on $5), at most twice ($10 per position at most). One add
+at -20% brings the average-cost loss to about -13%, and the 35% stop is
+then measured from the new average. It never adds into a pool that has lost
+30% of its entry liquidity, or while a reversal signal is showing. The
+simulator models the adds too (`ADD` in the exit reasons), so `report
+--exit-model swing` shows both sides: adds rescue dips that recover and
+lose more on tokens that keep falling. Compare against SWING_MAX_ADDS=0.
+
 Paper trading it live, beside the bot (its own book, launch_guard_swing_capital.json):
 
     launch-guard-swing            # loop, every 60s

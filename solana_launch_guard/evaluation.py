@@ -230,6 +230,13 @@ class LadderRules:
     lock_stop_pct: float = 0.0
     early_take_pct: float = 0.0
     early_take_fraction: float = 0.5
+    # Averaging down (swing-v1): while the stake is still at risk, when price
+    # is add_trigger_pct below the average cost, buy add_fraction of the
+    # first stake more, at most max_adds times. Stops, multiples and gains
+    # are then measured from the new average cost. 0 adds = off.
+    add_trigger_pct: float = 20.0
+    add_fraction: float = 0.5
+    max_adds: int = 0
 
     def entry_rules(self) -> ExitRules:
         return ExitRules(
@@ -265,10 +272,14 @@ def simulate_ladder_trade(
     if entry is None:
         return None
     start, entry_obs = entry
-    entry_price = float(entry_obs.price_usd or 0.0)
+    first_price = float(entry_obs.price_usd or 0.0)
+    entry_price = first_price  # average cost per token; moves with each add
     side = (costs.slippage_bps_per_side + costs.fee_bps_per_side) / 10_000
     invested = costs.position_usd - costs.fixed_fee_usd_per_side
     remaining = invested * (1 - side) / entry_price if invested > 0 else 0.0
+    spent = costs.position_usd
+    basis_tokens = costs.position_usd / entry_price  # for the average cost
+    adds = 0
     proceeds = 0.0
     sold_value = sold_tokens = 0.0
     legs: list[str] = []
@@ -308,7 +319,24 @@ def simulate_ladder_trade(
         if rules.lock_after_gain_pct > 0 and peak_gain_pct >= rules.lock_after_gain_pct:
             locked = True
         stop_price = entry_price * (1 - rules.stop_loss_pct / 100)
-        if not principal_done and locked and price <= lock_price:
+        add_ready = (
+            adds < rules.max_adds
+            and not principal_done
+            and price > stop_price
+            and gain_pct <= -rules.add_trigger_pct
+        )
+        if add_ready:
+            add_usd = costs.position_usd * rules.add_fraction
+            net = add_usd - costs.fixed_fee_usd_per_side
+            if net > 0:
+                remaining += net * (1 - side) / price
+            spent += add_usd
+            basis_tokens += add_usd / price
+            entry_price = spent / basis_tokens
+            lock_price = entry_price * (1 + rules.lock_stop_pct / 100)
+            adds += 1
+            legs.append("ADD")
+        elif not principal_done and locked and price <= lock_price:
             sell(remaining, price, "LOCKED")
         elif not principal_done and price <= stop_price:
             sell(remaining, price, "STOP_LOSS")
@@ -337,7 +365,7 @@ def simulate_ladder_trade(
             early_done = True
         elif not principal_done and multiple >= rules.principal_multiple:
             # Sell just enough to get the stake back after costs.
-            needed = costs.position_usd + costs.fixed_fee_usd_per_side
+            needed = spent + costs.fixed_fee_usd_per_side
             sell(needed / (price * (1 - side)), price, "PRINCIPAL")
             principal_done = True
         elif (
@@ -367,11 +395,11 @@ def simulate_ladder_trade(
         mint=decision.mint,
         label=decision.label,
         entered_at=entry_obs.observed_at,
-        entry_price=entry_price,
+        entry_price=first_price,
         exit_price=sold_value / sold_tokens if sold_tokens else 0.0,
         exit_reason="+".join(dict.fromkeys(legs)) or "DATA_END",
         held_seconds=max(0.0, exit_at - entry_obs.observed_at),
-        pnl_usd=proceeds - costs.position_usd,
+        pnl_usd=proceeds - spent,
     )
 
 

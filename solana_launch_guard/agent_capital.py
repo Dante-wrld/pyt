@@ -176,6 +176,40 @@ class CapitalBook:
         self._write(payload)
         return positions[mint]
 
+    def add_to_shadow_position(
+        self, agent_id: str, mint: str, *, amount_usd: float, price: float,
+    ) -> dict[str, Any]:
+        """Average down: buy amount_usd more of an open position at price.
+        The entry price becomes the average cost, so stops and multiples
+        are measured from it; allocated and entry value grow by the add."""
+        if not (math.isfinite(amount_usd) and amount_usd > 0
+                and math.isfinite(price) and price > 0):
+            raise ValueError("an add needs a positive amount and price")
+        payload = self.load()
+        if payload is None:
+            raise ValueError("initialize agent capital first")
+        account = payload["agents"][agent_id]
+        position = account["positions"][mint]
+        if amount_usd > float(account["cash_usd"]):
+            raise ValueError("agent cash balance is below the add amount")
+        allocated = float(position["allocated_usd"])
+        tokens = allocated / float(position["entry_price"]) + amount_usd / price
+        allocated += amount_usd
+        position.update(
+            allocated_usd=round(allocated, 8),
+            entry_value_usd=round(float(position["entry_value_usd"]) + amount_usd, 8),
+            entry_price=allocated / tokens,
+            current_price=price,
+            current_value_usd=round(tokens * price, 8),
+            return_pct=round((price / (allocated / tokens) - 1) * 100, 6),
+            adds=int(position.get("adds", 0)) + 1,
+        )
+        account["cash_usd"] = round(float(account["cash_usd"]) - amount_usd, 8)
+        account["reserved_usd"] = round(float(account["reserved_usd"]) + amount_usd, 8)
+        payload["updated_at"] = datetime.now(UTC).isoformat()
+        self._write(payload)
+        return dict(position)
+
     def mark_shadow_position(self, agent_id: str, mint: str, price: float) -> dict[str, Any]:
         if not math.isfinite(price) or price <= 0:
             raise ValueError("shadow mark requires a finite positive price")

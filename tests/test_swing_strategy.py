@@ -158,3 +158,78 @@ def test_eval_report_accepts_the_swing_model(tmp_path, capsys):
     eval_main(["--outcomes-db", str(tmp_path / "o.db"), "report",
                "--exit-model", "swing", "--launch-db", str(tmp_path / "none.db")])
     assert capsys.readouterr().out
+
+
+# --- averaging down -------------------------------------------------------
+
+def _path(t0, prices, step=900):
+    first = [Observation(t0 + i * 60, 1.0, 80_000, True) for i in range(5)]
+    return first + [Observation(t0 + 300 + i * step, p, 80_000, True)
+                    for i, p in enumerate(prices)]
+
+
+def _sim(prices, max_adds):
+    t0 = 2_000_000.0
+    decision = TrackedDecision("signal", "M", t0, "BUY ZONE", (),
+                               tuple(_path(t0, prices)))
+    rules = SwingSettings(max_adds=max_adds).ladder_rules(LadderRules())
+    return simulate_ladder_trade(
+        decision, rules, CostModel(slippage_bps_per_side=60, fee_bps_per_side=0,
+                                   fixed_fee_usd_per_side=0))
+
+
+def test_adds_help_when_the_dip_recovers():
+    prices = [0.78, 0.62, 0.9, 1.05, 1.1]
+    with_adds, without = _sim(prices, 2), _sim(prices, 0)
+    assert with_adds.exit_reason.startswith("ADD")
+    assert with_adds.pnl_usd > 0 > without.pnl_usd
+
+
+def test_adds_cost_more_when_it_keeps_falling():
+    prices = [0.78, 0.62, 0.45, 0.3]
+    with_adds, without = _sim(prices, 2), _sim(prices, 0)
+    assert "ADD" in with_adds.exit_reason and "STOP_LOSS" in with_adds.exit_reason
+    assert with_adds.pnl_usd < without.pnl_usd < 0   # the honest downside
+
+
+def _held(tmp_path, *, liquidity=80_000):
+    book = _book(tmp_path)
+    mint = "F" * 44
+    book.reserve_shadow_buy(agent_id=SWING_AGENT_ID, mint=mint, symbol="F",
+                            amount_usd=5, entry_price=1.0, price_currency="USD",
+                            entry_liquidity_usd=80_000)
+    return book, mint
+
+
+def _off_board(price, liquidity=80_000):
+    return {"price": price, "price_currency": "USD", "liquidity_usd": liquidity}
+
+
+def test_paper_adds_twice_at_most_and_lowers_the_average(tmp_path):
+    book, mint = _held(tmp_path)
+    [review] = _run(book, _snapshot(tmp_path, []), {mint: _off_board(0.78)})["exits"]
+    assert review["state"] == "ADD"
+    position = book.load()["agents"][SWING_AGENT_ID]["positions"][mint]
+    assert position["adds"] == 1 and position["allocated_usd"] == 7.5
+    assert position["entry_price"] == pytest.approx(7.5 / (5 + 2.5 / 0.78))
+    assert book.load()["agents"][SWING_AGENT_ID]["cash_usd"] == 22.5
+    _run(book, _snapshot(tmp_path, []), {mint: _off_board(0.70)})   # -23% vs avg
+    _run(book, _snapshot(tmp_path, []), {mint: _off_board(0.60)})   # would be a 3rd
+    position = book.load()["agents"][SWING_AGENT_ID]["positions"][mint]
+    assert position["adds"] == 2 and position["allocated_usd"] == 10.0
+
+
+def test_no_add_into_a_draining_pool(tmp_path):
+    book, mint = _held(tmp_path)
+    [review] = _run(book, _snapshot(tmp_path, []),
+                    {mint: _off_board(0.78, liquidity=40_000)})["exits"]
+    assert review["state"] == "HOLD"
+    assert "adds" not in book.load()["agents"][SWING_AGENT_ID]["positions"][mint]
+
+
+def test_stop_is_measured_from_the_average_cost(tmp_path):
+    book, mint = _held(tmp_path)
+    _run(book, _snapshot(tmp_path, []), {mint: _off_board(0.78)})   # avg ~0.914
+    # 0.62 is -38% from the first price but only -32% from the average: held.
+    [review] = _run(book, _snapshot(tmp_path, []), {mint: _off_board(0.62)})["exits"]
+    assert review["state"] == "ADD"

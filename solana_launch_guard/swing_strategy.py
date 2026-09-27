@@ -15,7 +15,12 @@ bought. Different exits, sized for hours rather than minutes:
 - a wider hard stop, for multi-hour chop (SWING_STOP_LOSS_PCT, 35%);
 - the trailing stop arms later and sits wider (SWING_TRAILING_*);
 - the reversal exit needs a deeper m5 drop and heavier selling;
-- a max hold (SWING_MAX_HOLD_HOURS, 24h), then it sells.
+- a max hold (SWING_MAX_HOLD_HOURS, 24h), then it sells;
+- averaging down, as many traders do: while the stake is at risk, when the
+  price is 20% below the average cost it buys half the first stake more,
+  at most twice (SWING_ADD_TRIGGER_PCT, SWING_ADD_FRACTION, SWING_MAX_ADDS).
+  One add at -20% brings the average-cost loss to about -13%; the 35% stop
+  is measured from the new average. Not on a liquidity drain (a rug).
 
 These numbers are a starting point, not a result. `launch-guard-eval report
 --exit-model swing` replays the same rules over every tracked decision, so
@@ -86,6 +91,12 @@ class SwingSettings:
     order_usd: float = 5.0
     max_open_positions: int = 2
     max_daily_loss_usd: float = 3.0      # same as the live trial: 10% of $30
+    add_trigger_pct: float = 20.0
+    add_fraction: float = 0.5            # of the first stake: $2.50 on $5
+    max_adds: int = 2
+    # No add when pool liquidity has fallen below this share of the entry
+    # liquidity: averaging into a drained pool is feeding a rug.
+    add_min_liquidity_retention: float = 0.7
     round_trip_cost_pct: float = 1.2     # measured: ~60 bps per side
 
     @classmethod
@@ -111,6 +122,9 @@ class SwingSettings:
             max_hold_hours=_env_float("SWING_MAX_HOLD_HOURS", d.max_hold_hours),
             round_trip_cost_pct=_env_float(
                 "SWING_ROUND_TRIP_COST_PCT", d.round_trip_cost_pct),
+            add_trigger_pct=_env_float("SWING_ADD_TRIGGER_PCT", d.add_trigger_pct),
+            add_fraction=_env_float("SWING_ADD_FRACTION", d.add_fraction),
+            max_adds=int(_env_float("SWING_MAX_ADDS", d.max_adds)),
         )
 
     @property
@@ -133,6 +147,9 @@ class SwingSettings:
             max_hold_seconds=self.max_hold_seconds,
             lock_after_gain_pct=0.0,
             early_take_pct=0.0,
+            add_trigger_pct=self.add_trigger_pct,
+            add_fraction=self.add_fraction,
+            max_adds=self.max_adds,
         )
 
     def exit_policy(self, base: ShadowRecoveryPolicy) -> ShadowRecoveryPolicy:
@@ -192,6 +209,31 @@ def review_swing_exit(
                 return {**review, "state": "EXIT", "reasons": review["reasons"] + [
                     "trailing stop on price alone (no flow data off the board)"]}
     return review
+
+
+def _add_amount(
+    position: dict[str, Any], quote: dict[str, Any], settings: SwingSettings,
+    book: SwingCapitalBook,
+) -> float:
+    """How much to average down by now, or 0."""
+    if (settings.max_adds <= 0
+            or int(position.get("adds", 0)) >= settings.max_adds
+            or position.get("principal_recovered")
+            or float(position.get("return_pct", 0)) > -settings.add_trigger_pct):
+        return 0.0
+    entry_liquidity = float(position.get("entry_liquidity_usd") or 0)
+    liquidity = float(quote.get("liquidity_usd") or 0)
+    if entry_liquidity > 0 and liquidity < entry_liquidity * (
+            settings.add_min_liquidity_retention):
+        return 0.0
+    amount = settings.order_usd * settings.add_fraction
+    payload = book.load() or {}
+    account = payload.get("agents", {}).get(SWING_AGENT_ID, {})
+    if float(account.get("cash_usd", 0)) < amount:
+        return 0.0
+    if book.daily_realized_pnl(SWING_AGENT_ID) <= -settings.max_daily_loss_usd:
+        return 0.0
+    return amount
 
 
 def _opened_epoch(position: dict[str, Any]) -> float:
@@ -296,6 +338,18 @@ async def swing_cycle(
             else:
                 fraction, stage = settings.second_stage_fraction, "SECOND_STAGE"
         else:
+            # Only into a plain dip (HOLD): never while a reversal signal
+            # (heavy selling, a broken trend) is already showing.
+            add = (_add_amount(marked, quote, settings, book)
+                   if state == "HOLD" else 0.0)
+            if add:
+                review["state"] = "ADD"
+                review["reasons"].append(
+                    f"averaging down: {float(marked['return_pct']):+.1f}% vs average "
+                    f"cost, adding ${add:.2f} (add {int(marked.get('adds', 0)) + 1}"
+                    f" of {settings.max_adds})")
+                review["added"] = book.add_to_shadow_position(
+                    SWING_AGENT_ID, mint, amount_usd=add, price=price)
             exits.append(review)
             continue
         review["fill"] = book.close_shadow_position(
