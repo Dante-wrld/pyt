@@ -1,7 +1,35 @@
-"""Legacy swing paper book: exits only, no independent buys or additions.
+"""swing-v1: a paper-only, multi-hour sibling of hunter-v1 (its own book).
 
-New holds are delegated on existing positions by swing_manager inside portfolio
-management. SwingSettings remains an offline historical replay preset.
+Two swing ideas run side by side on paper (2026-09-27), because neither is
+proven and they take different risks:
+
+1. This module - the full swing hypothesis: ride out dips. Same entries as
+   hunter-v1 (assess_entry + the live entry gates + the shared re-entry
+   rule, no model call; the highest-scoring BUY_READY candidate is bought),
+   exits sized for hours rather than minutes:
+   - no stagnation exit;
+   - a 35% hard stop (SWING_STOP_LOSS_PCT), measured from the average cost;
+   - the trailing stop arms later and sits wider (SWING_TRAILING_*);
+   - the reversal exit needs a deeper m5 drop and heavier selling;
+   - a 24h max hold (SWING_MAX_HOLD_HOURS);
+   - averaging down: while the stake is at risk, when the price is 20% below
+     the average cost it buys half the first stake more, at most twice
+     (SWING_ADD_TRIGGER_PCT, SWING_ADD_FRACTION, SWING_MAX_ADDS; 0 = off).
+     Never into a pool that lost 30% of its entry liquidity, or while a
+     reversal signal shows. Up to $10 per position: bigger losses on rugs.
+
+2. swing_manager (PR #70) - the narrow version: hunter-v1 keeps its normal
+   stop and never adds; a stagnation exit is only deferred when there is
+   fresh EMA-uptrend evidence (SWING_SHADOW_MANAGER_ENABLED, off by default).
+
+`launch-guard-eval report --exit-model swing` replays (1) over tracked
+decisions, with and without the adds, so both can be judged on data before
+anything goes near real money.
+
+A held token often leaves the recommendation board within hours, so held
+positions are priced directly from DEX Screener when the board has no
+fresh quote. Those quotes carry no buy/sell flow; the trailing stop then
+fires on price alone, exactly as the evaluator models it.
 """
 from __future__ import annotations
 
@@ -23,7 +51,9 @@ from .agents import AgentRole
 from .evaluation import LadderRules
 from .hunter_shadow_strategy import (
     ShadowRecoveryPolicy,
+    assess_entry,
     assess_exit,
+    reentry_block_reason,
 )
 from .live_trial_ledger import principal_sale_fraction
 
@@ -181,6 +211,36 @@ def review_swing_exit(
     return review
 
 
+def _add_amount(
+    position: dict[str, Any], quote: dict[str, Any], settings: SwingSettings,
+    book: SwingCapitalBook, *, now: float,
+) -> float:
+    """How much to average down by now, or 0. Same guards as the replay
+    (evaluation.simulate_ladder_trade): known entry liquidity that has not
+    drained, and not at or past the max hold."""
+    if (settings.max_adds <= 0
+            or int(position.get("adds", 0)) >= settings.max_adds
+            or position.get("principal_recovered")
+            or float(position.get("return_pct", 0)) > -settings.add_trigger_pct):
+        return 0.0
+    opened = _opened_epoch(position)
+    if opened and now - opened >= settings.max_hold_seconds:
+        return 0.0
+    entry_liquidity = float(position.get("entry_liquidity_usd") or 0)
+    liquidity = float(quote.get("liquidity_usd") or 0)
+    if entry_liquidity <= 0 or liquidity < entry_liquidity * (
+            settings.add_min_liquidity_retention):
+        return 0.0
+    amount = settings.order_usd * settings.add_fraction
+    payload = book.load() or {}
+    account = payload.get("agents", {}).get(SWING_AGENT_ID, {})
+    if float(account.get("cash_usd", 0)) < amount:
+        return 0.0
+    if book.daily_realized_pnl(SWING_AGENT_ID) <= -settings.max_daily_loss_usd:
+        return 0.0
+    return amount
+
+
 def _opened_epoch(position: dict[str, Any]) -> float:
     try:
         return datetime.fromisoformat(str(position.get("opened_at"))).timestamp()
@@ -238,11 +298,13 @@ async def swing_cycle(
     fetch_quotes: QuoteFetcher = dexscreener_quotes,
     now: float | None = None,
 ) -> dict[str, Any]:
-    """Exit-only compatibility loop for positions in the old swing book."""
+    """One paper cycle: mark, add to or exit held positions, then maybe buy."""
+    from .live_trial_runner import live_entry_gate
+    from .strategy_profile import StrategyProfile
 
     at = time.time() if now is None else now
     exit_policy = settings.exit_policy(policy)
-    fresh, _ = _fresh_board(snapshot, at)
+    fresh, observed = _fresh_board(snapshot, at)
     payload = book.load() or {}
     account = payload.get("agents", {}).get(SWING_AGENT_ID, {})
     positions = dict(account.get("positions", {}))
@@ -281,6 +343,18 @@ async def swing_cycle(
             else:
                 fraction, stage = settings.second_stage_fraction, "SECOND_STAGE"
         else:
+            # Only into a plain dip (HOLD): never while a reversal signal
+            # (heavy selling, a broken trend) is already showing.
+            add = (_add_amount(marked, quote, settings, book, now=at)
+                   if state == "HOLD" else 0.0)
+            if add:
+                review["state"] = "ADD"
+                review["reasons"].append(
+                    f"averaging down: {float(marked['return_pct']):+.1f}% vs average "
+                    f"cost, adding ${add:.2f} (add {int(marked.get('adds', 0)) + 1}"
+                    f" of {settings.max_adds})")
+                review["added"] = book.add_to_shadow_position(
+                    SWING_AGENT_ID, mint, amount_usd=add, price=price)
             exits.append(review)
             continue
         review["fill"] = book.close_shadow_position(
@@ -289,9 +363,47 @@ async def swing_cycle(
         )
         exits.append(review)
 
+    entry: dict[str, Any] | None = None
+    payload = book.load() or {}
+    account = payload.get("agents", {}).get(SWING_AGENT_ID, {})
+    held = set(account.get("positions", {}))
     daily = book.daily_realized_pnl(SWING_AGENT_ID)
+    if (len(held) < settings.max_open_positions
+            and float(account.get("cash_usd", 0)) >= settings.order_usd
+            and daily > -settings.max_daily_loss_usd):
+        profile = StrategyProfile.from_env()
+        ready = []
+        for candidate in observed:
+            mint = candidate["mint"]
+            if mint in held:
+                continue
+            review = live_entry_gate(candidate, assess_entry(candidate, policy),
+                                     now=at, profile=profile)
+            if review["state"] != "BUY_READY":
+                continue
+            currency = str(candidate.get("price_currency") or "")
+            blocked = reentry_block_reason(
+                book.sell_history(SWING_AGENT_ID, mint, price_currency=currency),
+                float(candidate.get("price") or 0),
+            )
+            if blocked is None:
+                ready.append(candidate)
+        if ready:
+            pick = max(ready, key=lambda c: float(c.get("signal_score") or 0))
+            book.reserve_shadow_buy(
+                agent_id=SWING_AGENT_ID, mint=pick["mint"],
+                symbol=str(pick.get("symbol") or pick["mint"][:6]),
+                amount_usd=settings.order_usd, entry_price=float(pick["price"]),
+                price_currency=str(pick.get("price_currency") or "UNKNOWN"),
+                entry_liquidity_usd=float(pick.get("liquidity_usd") or 0),
+                max_open_positions=settings.max_open_positions,
+                pair_address=pick.get("pair_address"),
+                pair_created_at_ms=pick.get("pair_created_at_ms"),
+            )
+            entry = {"mint": pick["mint"], "symbol": pick.get("symbol"),
+                     "decision": pick.get("decision"), "price": pick["price"]}
     return {"agent_id": SWING_AGENT_ID, "mode": "shadow", "live_execution": False,
-            "exits": exits, "entry": None, "daily_realized_pnl_usd": daily,
+            "exits": exits, "entry": entry, "daily_realized_pnl_usd": daily,
             "at": datetime.fromtimestamp(at, UTC).isoformat()}
 
 
@@ -309,7 +421,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     _load_dotenv()
     parser = argparse.ArgumentParser(
         prog="launch-guard-swing",
-        description="legacy swing paper book: exits only; new holds use portfolio delegation",
+        description="swing-v1: paper-only multi-hour trader (never trades real money)",
     )
     parser.add_argument(
         "--book", default=os.getenv("SWING_BOOK_PATH", DEFAULT_SWING_BOOK))

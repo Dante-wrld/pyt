@@ -120,7 +120,7 @@ def _run(book, snapshot, quotes=None):
                                    fetch_quotes=fetch))
 
 
-def test_legacy_swing_never_buys_even_with_buy_ready_candidates(tmp_path,
+def test_cycle_buys_the_best_buy_ready_candidate_under_the_live_gate(tmp_path,
                                                                       monkeypatch):
     monkeypatch.setenv("ENTRY_ALLOWED_DECISIONS", "BUY ZONE")
     monkeypatch.setenv("ENTRY_MIN_TOKEN_AGE_DAYS", "3")
@@ -135,8 +135,8 @@ def test_legacy_swing_never_buys_even_with_buy_ready_candidates(tmp_path,
     ]
     book = _book(tmp_path)
     result = _run(book, _snapshot(tmp_path, rows))
-    assert result["entry"] is None
-    assert book.load()["agents"][SWING_AGENT_ID]["positions"] == {}
+    assert result["entry"]["mint"] == "B" * 44
+    assert list(book.load()["agents"][SWING_AGENT_ID]["positions"]) == ["B" * 44]
 
 
 def test_off_board_positions_are_priced_directly_and_stopped(tmp_path):
@@ -205,14 +205,18 @@ def _off_board(price, liquidity=80_000):
     return {"price": price, "price_currency": "USD", "liquidity_usd": liquidity}
 
 
-def test_legacy_swing_never_adds_to_existing_positions(tmp_path):
+def test_paper_adds_twice_at_most_and_lowers_the_average(tmp_path):
     book, mint = _held(tmp_path)
     [review] = _run(book, _snapshot(tmp_path, []), {mint: _off_board(0.78)})["exits"]
-    assert review["state"] == "HOLD"
+    assert review["state"] == "ADD"
     position = book.load()["agents"][SWING_AGENT_ID]["positions"][mint]
-    assert "adds" not in position
-    assert position["allocated_usd"] == 5
-    assert book.load()["agents"][SWING_AGENT_ID]["cash_usd"] == 25
+    assert position["adds"] == 1 and position["allocated_usd"] == 7.5
+    assert position["entry_price"] == pytest.approx(7.5 / (5 + 2.5 / 0.78))
+    assert book.load()["agents"][SWING_AGENT_ID]["cash_usd"] == 22.5
+    _run(book, _snapshot(tmp_path, []), {mint: _off_board(0.70)})   # -23% vs avg
+    _run(book, _snapshot(tmp_path, []), {mint: _off_board(0.60)})   # would be a 3rd
+    position = book.load()["agents"][SWING_AGENT_ID]["positions"][mint]
+    assert position["adds"] == 2 and position["allocated_usd"] == 10.0
 
 
 def test_no_add_into_a_draining_pool(tmp_path):
@@ -223,11 +227,34 @@ def test_no_add_into_a_draining_pool(tmp_path):
     assert "adds" not in book.load()["agents"][SWING_AGENT_ID]["positions"][mint]
 
 
-def test_legacy_swing_stop_is_not_widened_by_adding(tmp_path):
+def test_stop_is_measured_from_the_average_cost(tmp_path):
     book, mint = _held(tmp_path)
-    _run(book, _snapshot(tmp_path, []), {mint: _off_board(0.78)})
+    _run(book, _snapshot(tmp_path, []), {mint: _off_board(0.78)})   # avg ~0.914
+    # 0.62 is -38% from the first price but only -32% from the average: held,
+    # and it is the second add.
     [review] = _run(book, _snapshot(tmp_path, []), {mint: _off_board(0.62)})["exits"]
-    assert review["state"] == "EXIT"
+    assert review["state"] == "ADD"
+
+
+def test_no_add_without_known_entry_liquidity(tmp_path):
+    book = _book(tmp_path)
+    mint = "G" * 44
+    book.reserve_shadow_buy(agent_id=SWING_AGENT_ID, mint=mint, symbol="G",
+                            amount_usd=5, entry_price=1.0, price_currency="USD")
+    [review] = _run(book, _snapshot(tmp_path, []), {mint: _off_board(0.78)})["exits"]
+    assert review["state"] == "HOLD"
+
+
+def test_add_limit_off_turns_adds_off(tmp_path):
+    book, mint = _held(tmp_path)
+
+    async def fetch(mints):
+        return {mint: _off_board(0.78)}
+
+    result = asyncio.run(swing_cycle(
+        book, _snapshot(tmp_path, []), settings=SwingSettings(max_adds=0),
+        policy=POLICY, fetch_quotes=fetch))
+    assert result["exits"][0]["state"] == "HOLD"
 
 
 @pytest.mark.parametrize("age,liquidity,expected", [

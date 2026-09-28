@@ -195,12 +195,21 @@ tokens. Re-measure now and then; costs move with liquidity and token mix.
 
 ## Shadow trend entries and portfolio-approved swing holds
 
-The current swing design is a management mandate on an existing position,
-not a fourth independent buyer. Hunter opens the paper position. The swing
-module supplies evidence; the portfolio exit path approves or rejects the hold
-and executes the normal profit stages and risk exits. No swing purchases or
-averaging down are enabled. `launch-guard-swing` is now **exit-only** for any
-positions left in its legacy paper book.
+Two swing designs run side by side on paper, because neither is proven and
+they take different risks:
+
+- **Managed swing hold (this section).** A management mandate on an existing
+  hunter position, not a buyer. Hunter opens the paper position. The swing
+  module supplies evidence; the portfolio exit path approves or rejects the
+  hold and executes the normal profit stages and risk exits. It keeps the
+  normal stop and never adds. Off unless `SWING_SHADOW_MANAGER_ENABLED=true`.
+- **Standalone swing-v1 (`launch-guard-swing`).** Its own $30 paper book:
+  buys hunter-v1's BUY_READY entries itself, holds up to 24h with a 35% stop
+  from the average cost, a wider trailing stop, no stagnation exit, and
+  averages down at most twice (half the first stake at -20% vs average
+  cost; `SWING_MAX_ADDS=0` turns that off). Up to $10 per position, so it
+  loses more on rugs; the question it answers is whether riding out dips
+  pays on these tokens. `launch-guard-swing --status` shows its results.
 
 A swing mandate reserves the position's **remaining cost basis** against a
 $30 management limit. This is an internal responsibility allocation, not a
@@ -294,8 +303,8 @@ from different directories. Do not run multiple writers against the same book.
 
 ### Historical swing replay
 
-`launch-guard-eval report --exit-model swing` remains the **legacy** independent
-swing exit/averaging scenario, not a backtest of the new candle-based manager.
+`launch-guard-eval report --exit-model swing` replays the standalone swing-v1
+exits and adds, not the candle-based manager.
 Its simulated adds now require retention of at least 70% of entry liquidity,
 and stop, trailing and maximum-hold exits are evaluated before adding. Flow
 and portfolio cash constraints are still approximations in the price replay.
