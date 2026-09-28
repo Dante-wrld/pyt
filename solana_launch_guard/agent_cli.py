@@ -404,6 +404,10 @@ def shadow_once(model: OpenAIProposalModel | None, book: CapitalBook, *, portfol
         if isinstance(item, dict) and item.get("mint") in fresh_quotes
     }
     shadow_reviews: list[dict[str, object]] = []
+    from .swing_manager import load_evidence, managed_exit_review
+    swing_enabled = os.getenv("SWING_SHADOW_MANAGER_ENABLED", "false").lower() == "true"
+    trend_evidence = load_evidence() if swing_enabled else {}
+
     if not portfolio_sell_only:
         # Existing position marks and exits use the same fresh, read-only quote
         # snapshot as entries; a missing quote can never silently sell a token.
@@ -420,7 +424,14 @@ def shadow_once(model: OpenAIProposalModel | None, book: CapitalBook, *, portfol
             if not math.isfinite(price) or price <= 0:
                 continue
             marked = book.mark_shadow_position("hunter-v1", mint, price)
-            review = assess_exit(marked, quote, recovery_policy)
+            review = (managed_exit_review(
+                marked, quote, recovery_policy, trend_evidence.get(mint, {}),
+                now=time.time()) if swing_enabled else
+                assess_exit(marked, quote, recovery_policy))
+            if review.get("swing_handoff") and not book.delegate_shadow_exit(
+                    "hunter-v1", mint, review):
+                review = assess_exit(marked, quote, recovery_policy)
+                review["reasons"].append("swing allocation exhausted; ordinary exits apply")
             review.update({"mint": mint, "entry_price": marked["entry_price"], "current_price": price})
             state = review["state"]
             if state in {"EXIT", "EMERGENCY_EXIT", "TAKE_PARTIAL"}:
@@ -626,6 +637,8 @@ def shadow_once(model: OpenAIProposalModel | None, book: CapitalBook, *, portfol
                 entry_price=price,
                 price_currency=str(selected.get("price_currency") or "UNKNOWN"),
                 entry_liquidity_usd=float(selected.get("liquidity_usd") or 0),
+                pair_address=selected.get("pair_address"),
+                pair_created_at_ms=selected.get("pair_created_at_ms"),
             )
             shadow_fill = {"action": "BUY", "mint": proposal.mint, "amount_usd": arbitration.approved_usd}
         updated_account = {row.agent_id: row for row in book.accounts()}[agent_id]

@@ -175,10 +175,29 @@ class MarketStructureScanner:
         self._cache[key] = (now, candles)
         return candles
 
-    def _fetch(self, pool: str, mint: str, frame: tuple[str, int, int]) -> list[Candle] | None:
+    async def trend_candles(self, *, pool: str, mint: str) -> list[Candle]:
+        """Bounded, cached 15m history for shadow experiments only."""
+        key = (pool, mint, "trend:15m")
+        at = time.monotonic()
+        cached = self._cache.get(key)
+        if cached and at - cached[0] < 60:
+            return cached[1] or []
+        self._request_times = [t for t in self._request_times if at - t < 60]
+        if not pool or not mint or len(self._request_times) >= 8:
+            return []
+        self._request_times.append(at)
+        try:
+            bars = await asyncio.to_thread(
+                self._fetch, pool, mint, ("minute", 15, 900), limit=200)
+        except (OSError, ValueError, KeyError, TypeError, TimeoutError):
+            bars = None
+        self._cache[key] = (at, bars)
+        return bars or []
+
+    def _fetch(self, pool: str, mint: str, frame: tuple[str, int, int], *, limit: int = 32) -> list[Candle] | None:
         timeframe, aggregate, period = frame
         params = urllib.parse.urlencode(
-            {"aggregate": aggregate, "limit": 32, "currency": "usd",
+            {"aggregate": aggregate, "limit": limit, "currency": "usd",
              "token": mint, "include_empty_intervals": "true"}
         )
         path = (

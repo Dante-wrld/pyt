@@ -237,6 +237,7 @@ class LadderRules:
     add_trigger_pct: float = 20.0
     add_fraction: float = 0.5
     max_adds: int = 0
+    add_min_liquidity_retention: float = 0.7
 
     def entry_rules(self) -> ExitRules:
         return ExitRules(
@@ -323,20 +324,13 @@ def simulate_ladder_trade(
             adds < rules.max_adds
             and not principal_done
             and price > stop_price
+            and (entry_obs.liquidity_usd or 0) > 0
+            and (obs.liquidity_usd or 0) >= (
+                entry_obs.liquidity_usd * rules.add_min_liquidity_retention
+            )
             and gain_pct <= -rules.add_trigger_pct
         )
-        if add_ready:
-            add_usd = costs.position_usd * rules.add_fraction
-            net = add_usd - costs.fixed_fee_usd_per_side
-            if net > 0:
-                remaining += net * (1 - side) / price
-            spent += add_usd
-            basis_tokens += add_usd / price
-            entry_price = spent / basis_tokens
-            lock_price = entry_price * (1 + rules.lock_stop_pct / 100)
-            adds += 1
-            legs.append("ADD")
-        elif not principal_done and locked and price <= lock_price:
+        if not principal_done and locked and price <= lock_price:
             sell(remaining, price, "LOCKED")
         elif not principal_done and price <= stop_price:
             sell(remaining, price, "STOP_LOSS")
@@ -355,6 +349,17 @@ def simulate_ladder_trade(
             sell(remaining, price, "STAGNANT")
         elif age >= rules.max_hold_seconds:
             sell(remaining, price, "TIME_EXIT")
+        elif add_ready:
+            add_usd = costs.position_usd * rules.add_fraction
+            net = add_usd - costs.fixed_fee_usd_per_side
+            if net > 0:
+                remaining += net * (1 - side) / price
+            spent += add_usd
+            basis_tokens += add_usd / price
+            entry_price = spent / basis_tokens
+            lock_price = entry_price * (1 + rules.lock_stop_pct / 100)
+            adds += 1
+            legs.append("ADD")
         elif (
             rules.early_take_pct > 0
             and not early_done

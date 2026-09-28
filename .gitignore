@@ -49,3 +49,8 @@ launch_guard_hunter_capacity.json
 # Telethon session files - full access to the Telegram account, not just a token
 *.session
 *.session-journal
+
+# Private paper research books and candle evidence
+launch_guard_trend_shadow/
+launch_guard_trend_evidence.json*
+launch_guard_swing_capital.json*
