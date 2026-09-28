@@ -88,7 +88,7 @@ class SwingSettings:
     sell_pressure_ratio: float = 2.5
     max_hold_hours: float = 24.0
     order_usd: float = 5.0
-    max_open_positions: int = 2
+    max_open_positions: int = 4          # paper slots; $30 book bounds exposure
     max_daily_loss_usd: float = 3.0      # same as the live trial: 10% of $30
     add_trigger_pct: float = 20.0
     add_fraction: float = 0.5            # of the first stake: $2.50 on $5
@@ -124,6 +124,8 @@ class SwingSettings:
             add_trigger_pct=_env_float("SWING_ADD_TRIGGER_PCT", d.add_trigger_pct),
             add_fraction=_env_float("SWING_ADD_FRACTION", d.add_fraction),
             max_adds=int(_env_float("SWING_MAX_ADDS", d.max_adds)),
+            max_open_positions=int(
+                _env_float("SWING_MAX_OPEN_POSITIONS", d.max_open_positions)),
         )
 
     @property

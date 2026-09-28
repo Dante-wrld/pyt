@@ -282,6 +282,9 @@ def _parser() -> argparse.ArgumentParser:
                                           "launch_guard_swing_capital.json"))
     books.add_argument("--trend-dir", default="launch_guard_trend_shadow")
     books.add_argument(
+        "--wide-book", default=os.getenv("WIDE_BOOK_PATH",
+                                         "launch_guard_wide_capital.json"))
+    books.add_argument(
         "--hunter-book", default=os.getenv("AGENT_CAPITAL_PATH",
                                            "launch_guard_agent_capital.json"),
         help="the main paper hunter's book ('' to leave it out)")
@@ -817,6 +820,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         results = load_books(
             swing_book=Path(args.swing_book), trend_directory=Path(args.trend_dir),
             hunter_book=Path(args.hunter_book) if args.hunter_book else None,
+            wide_book=Path(args.wide_book) if args.wide_book else None,
         )
         print(json.dumps({"books": [b.as_dict() for b in results],
                           "verdict": verdict(results)}, indent=2)

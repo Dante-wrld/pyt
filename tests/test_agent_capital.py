@@ -59,7 +59,7 @@ def test_shadow_limits_block_oversize_and_third_position(tmp_path):
             entry_price=1,
             price_currency="USD",
         )
-    with pytest.raises(ValueError, match="two open positions"):
+    with pytest.raises(ValueError, match="2 open positions"):
         book.reserve_shadow_buy(
             agent_id="hunter-v1",
             mint="three",

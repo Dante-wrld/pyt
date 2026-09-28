@@ -17,7 +17,7 @@ books are read only; nothing is written.
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -77,14 +77,19 @@ def _load(path: Path) -> dict[str, Any] | None:
 
 def score_account(
     name: str, description: str, account: dict[str, Any] | None,
+    *, keep: Callable[[dict[str, Any]], bool] | None = None,
 ) -> BookResult:
-    """Score one agent account from a CapitalBook payload."""
+    """Score one agent account from a CapitalBook payload. `keep` selects a
+    slice of it (applied to every fill and open position)."""
     if account is None:
         return BookResult(name, description, 30.0, missing=True)
+    keep = keep or (lambda _row: True)
     result = BookResult(name, description,
                         float(account.get("starting_capital_usd") or 30.0))
     trades: dict[tuple[str, str], dict[str, Any]] = {}
     for index, fill in enumerate(account.get("completed_trades", [])):
+        if not keep(fill):
+            continue
         key = (str(fill.get("mint")), str(fill.get("opened_at", f"legacy-{index}")))
         trade = trades.setdefault(key, {"cost": 0.0, "pnl": 0.0, "closed": False,
                                         "closed_at": ""})
@@ -115,6 +120,8 @@ def score_account(
         result.max_drawdown_usd = max(result.max_drawdown_usd, peak - equity)
     result.return_ci95 = bootstrap_mean_ci(returns)
     for position in (account.get("positions") or {}).values():
+        if not keep(position):
+            continue
         cost = float(position.get("allocated_usd") or 0.0)
         value = float(position.get("current_value_usd", cost) or 0.0)
         result.open_positions += 1
@@ -123,8 +130,38 @@ def score_account(
     return result
 
 
+def wide_slices(account: dict[str, Any] | None) -> list[BookResult]:
+    """wide-v1 overall, then split by whether the live gate would have taken
+    each trade, then by signal type."""
+    rows = [score_account(
+        "wide-v1", "every BUY_READY signal kind, any token age; hunter exits",
+        account)]
+    if account is None:
+        return rows
+    rows.append(score_account(
+        "wide:live-too", "trades the frozen live gate would also take", account,
+        keep=lambda r: not r.get("live_blocked")))
+    rows.append(score_account(
+        "wide:frozen-out", "trades only this book takes (the freeze blocks them)",
+        account, keep=lambda r: bool(r.get("live_blocked"))))
+    kinds = sorted({str(r.get("decision")) for r in
+                    list(account.get("completed_trades", []))
+                    + list((account.get("positions") or {}).values())
+                    if r.get("decision")})
+    for kind in kinds:
+        rows.append(score_account(
+            f"wide:{kind}", f"wide-v1 {kind} trades only", account,
+            keep=_decision_is(kind)))
+    return rows
+
+
+def _decision_is(kind: str) -> Callable[[dict[str, Any]], bool]:
+    return lambda row: row.get("decision") == kind
+
+
 def load_books(
     *, swing_book: Path, trend_directory: Path, hunter_book: Path | None,
+    wide_book: Path | None = None,
 ) -> list[BookResult]:
     """Every paper book that exists, most comparable first."""
     books: list[BookResult] = []
@@ -140,6 +177,10 @@ def load_books(
     books.append(score_account(
         "swing-v1", "own entries, 35% stop from avg cost, up to 2 adds, 24h",
         payload.get("agents", {}).get("swing-v1") if payload else None))
+    if wide_book is not None:
+        payload = _load(wide_book)
+        books.extend(wide_slices(
+            payload.get("agents", {}).get("wide-v1") if payload else None))
     if hunter_book is not None:
         payload = _load(hunter_book)
         books.append(score_account(
@@ -150,7 +191,9 @@ def load_books(
 
 
 def verdict(books: Sequence[BookResult]) -> str:
-    ready = [b for b in books if not b.missing and b.trades >= MIN_TRADES_FOR_VERDICT]
+    # Slices of one book (wide:...) are shown for detail, not ranked against it.
+    ready = [b for b in books if not b.missing and not b.name.startswith("wide:")
+             and b.trades >= MIN_TRADES_FOR_VERDICT]
     if len(ready) < 2:
         return (f"Too early: fewer than two books have {MIN_TRADES_FOR_VERDICT} "
                 "closed trades. Differences so far are noise.")

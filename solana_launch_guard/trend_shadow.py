@@ -56,9 +56,14 @@ class ResearchCapitalBook(CapitalBook):
 class ShadowComparison:
     """One process owns these books; no capital is shared with the real bot."""
 
-    def __init__(self, directory: Path, *, cost_pct: float = 1.2):
+    def __init__(self, directory: Path, *, cost_pct: float = 1.2,
+                 max_open_positions: int | None = None):
         if not math.isfinite(cost_pct) or not 0 <= cost_pct < 100:
             raise ValueError("round-trip cost estimate must be in [0, 100)")
+        # More slots = more paired trades per day; same $5 size and $3 daily
+        # limit per arm. Paper only (TREND_SHADOW_MAX_OPEN_POSITIONS).
+        self.max_open_positions = max_open_positions or int(
+            os.getenv("TREND_SHADOW_MAX_OPEN_POSITIONS") or 4)
         self.directory, self.cost_pct = directory, cost_pct
         self.books = {
             arm: ResearchCapitalBook(directory / f"{arm}.json") for arm in ARMS
@@ -177,7 +182,7 @@ class ShadowComparison:
         # Paired entry cohort: both exit policies start the same trade at the
         # same price. Wait until all arms have room; never duplicate an open mint.
         can_enter = all(
-            len(_account(book)["positions"]) < 2
+            len(_account(book)["positions"]) < self.max_open_positions
             and _account(book)["cash_usd"] >= 5
             and book.daily_realized_pnl(AGENT) > -3
             for book in self.books.values()
@@ -202,6 +207,8 @@ class ShadowComparison:
                     entry_liquidity_usd=float(pick["liquidity_usd"]),
                     pair_address=pick.get("pair_address"),
                     pair_created_at_ms=pick.get("pair_created_at_ms"),
+                    max_open_positions=self.max_open_positions,
+                    decision=str(pick.get("decision") or ""),
                 )
                 entered.append(arm)
             entry = {

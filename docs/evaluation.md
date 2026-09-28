@@ -335,3 +335,27 @@ profit factor, and a 95% interval on the per-trade return. The verdict waits
 for 30 closed trades per book, flags overlapping intervals, and names the
 safer book when returns are close - prefer it then. The main hunter charges
 its own slippage estimates, so compare it with care. Read-only.
+
+## More paper trades without touching the strategy (wide-v1)
+
+The live strategy stays frozen (BUY ZONE, tokens 3+ days old), and the paper
+hunter keeps mirroring it exactly, 2 positions included. More evidence comes
+from the paper side only:
+
+- **wide-v1** (`launch-guard-wide`, its own $30 book): buys every BUY_READY
+  signal of the kinds in `WIDE_DECISIONS` (default BUY ZONE, BUY NOW, EARLY
+  BUY; MOMENTUM BUY stays out while paused) at any token age, with
+  hunter-v1's own exits, $5 per position, up to 4 open
+  (`WIDE_MAX_OPEN_POSITIONS`), $3 daily loss limit, 1.2% round-trip cost.
+  No model call. Each trade records its signal type and whether the live
+  gate would have taken it.
+- **More slots** in the other research books: swing-v1
+  (`SWING_MAX_OPEN_POSITIONS`) and the trend experiment
+  (`TREND_SHADOW_MAX_OPEN_POSITIONS`) now hold up to 4 positions instead of 2,
+  same $5 size and daily limit.
+
+`launch-guard-eval books` shows wide-v1 overall, then `wide:live-too` (trades
+the frozen gate would also take), `wide:frozen-out` (trades only the freeze
+blocks) and one row per signal type. If `wide:frozen-out` holds up after
+costs over 30+ trades, that is the evidence for loosening the freeze; if it
+loses, the freeze is doing its job.

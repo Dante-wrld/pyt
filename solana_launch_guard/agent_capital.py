@@ -131,7 +131,12 @@ class CapitalBook:
         max_open_positions: int = DEFAULT_MAX_OPEN_POSITIONS,
         pair_address: str | None = None,
         pair_created_at_ms: float | None = None,
+        decision: str | None = None,
+        live_blocked: str | None = None,
     ) -> dict[str, Any]:
+        """decision (BUY ZONE, BUY NOW, ...) and live_blocked (why the live
+        entry gate would refuse this buy, None if live would take it) are
+        kept on the position and its fills so results can be split by them."""
         payload = self.load()
         if payload is None:
             raise ValueError("initialize agent capital before shadow trading")
@@ -148,7 +153,8 @@ class CapitalBook:
         if mint in positions:
             raise ValueError("agent already has an open position in this mint")
         if len(positions) >= max_open_positions:
-            raise ValueError("agent already has two open positions")
+            raise ValueError(
+                f"agent already has {max_open_positions} open positions")
         if amount_usd > float(account["cash_usd"]):
             raise ValueError("agent cash balance is below the approved amount")
         account["cash_usd"] = round(float(account["cash_usd"]) - amount_usd, 8)
@@ -175,6 +181,8 @@ class CapitalBook:
             "status": "SHADOW_OPEN",
             "pair_address": pair_address,
             "pair_created_at_ms": pair_created_at_ms,
+            "decision": decision,
+            "live_blocked": live_blocked,
         }
         payload["updated_at"] = datetime.now(UTC).isoformat()
         self._write(payload)
@@ -306,7 +314,9 @@ class CapitalBook:
                 "entry_price": position.get("entry_price"),
                 "price_currency": position.get("price_currency"),
                 "exit_manager": position.get("exit_manager", agent_id),
-                "exit_executor": position.get("exit_executor", agent_id)}
+                "exit_executor": position.get("exit_executor", agent_id),
+                "decision": position.get("decision"),
+                "live_blocked": position.get("live_blocked")}
         account["cash_usd"] = round(float(account["cash_usd"]) + proceeds, 8)
         account["reserved_usd"] = round(max(0, float(account["reserved_usd"]) - cost), 8)
         account["realized_pnl_usd"] = round(float(account["realized_pnl_usd"]) + pnl, 8)
