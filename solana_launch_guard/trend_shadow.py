@@ -34,6 +34,14 @@ AGENT = "hunter-v1"
 ARMS = ("baseline", "trend", "managed")
 
 
+def _account(book: CapitalBook) -> dict:
+    """This arm's account; a missing book is an error, as in agent_capital."""
+    payload = book.load()
+    if payload is None:
+        raise ValueError("initialize agent capital first")
+    return payload["agents"][AGENT]
+
+
 def write_json(path: Path, value: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
@@ -67,7 +75,7 @@ class ShadowComparison:
     def positions(self) -> dict:
         result = {}
         for book in self.books.values():
-            result.update(book.load()["agents"][AGENT]["positions"])
+            result.update(_account(book)["positions"])
         return result
 
     def cycle(
@@ -83,7 +91,7 @@ class ShadowComparison:
         events = []
         held_at_start = set(self.positions())
         for arm, book in self.books.items():
-            positions = dict(book.load()["agents"][AGENT]["positions"])
+            positions = dict(_account(book)["positions"])
             for mint, position in positions.items():
                 quote = quotes.get(mint, {})
                 try:
@@ -169,8 +177,8 @@ class ShadowComparison:
         # Paired entry cohort: both exit policies start the same trade at the
         # same price. Wait until all arms have room; never duplicate an open mint.
         can_enter = all(
-            len(book.load()["agents"][AGENT]["positions"]) < 2
-            and book.load()["agents"][AGENT]["cash_usd"] >= 5
+            len(_account(book)["positions"]) < 2
+            and _account(book)["cash_usd"] >= 5
             and book.daily_realized_pnl(AGENT) > -3
             for book in self.books.values()
         )

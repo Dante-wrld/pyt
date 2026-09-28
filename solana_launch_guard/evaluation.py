@@ -274,6 +274,7 @@ def simulate_ladder_trade(
         return None
     start, entry_obs = entry
     first_price = float(entry_obs.price_usd or 0.0)
+    entry_liquidity = float(entry_obs.liquidity_usd or 0.0)
     entry_price = first_price  # average cost per token; moves with each add
     side = (costs.slippage_bps_per_side + costs.fee_bps_per_side) / 10_000
     invested = costs.position_usd - costs.fixed_fee_usd_per_side
@@ -324,9 +325,9 @@ def simulate_ladder_trade(
             adds < rules.max_adds
             and not principal_done
             and price > stop_price
-            and (entry_obs.liquidity_usd or 0) > 0
+            and entry_liquidity > 0
             and (obs.liquidity_usd or 0) >= (
-                entry_obs.liquidity_usd * rules.add_min_liquidity_retention
+                entry_liquidity * rules.add_min_liquidity_retention
             )
             and gain_pct <= -rules.add_trigger_pct
         )
