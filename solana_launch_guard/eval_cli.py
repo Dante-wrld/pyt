@@ -21,7 +21,10 @@ from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import replace
 from datetime import datetime, timedelta
+from pathlib import Path
 
+from .book_comparison import load_books, verdict
+from .book_comparison import render as render_books
 from .config import _load_dotenv, parse_leader_wallets
 from .copyfomo_report import (
     attribute_leaders,
@@ -270,6 +273,19 @@ def _parser() -> argparse.ArgumentParser:
         help="name:ADDRESS,... of the wallets CopyFomo copies",
     )
     copyfomo.add_argument("--json", action="store_true")
+
+    books = sub.add_parser(
+        "books", help="compare the paper books: profit per dollar risked, "
+        "worst trade, drawdown")
+    books.add_argument(
+        "--swing-book", default=os.getenv("SWING_BOOK_PATH",
+                                          "launch_guard_swing_capital.json"))
+    books.add_argument("--trend-dir", default="launch_guard_trend_shadow")
+    books.add_argument(
+        "--hunter-book", default=os.getenv("AGENT_CAPITAL_PATH",
+                                           "launch_guard_agent_capital.json"),
+        help="the main paper hunter's book ('' to leave it out)")
+    books.add_argument("--json", action="store_true")
     return parser
 
 
@@ -796,6 +812,15 @@ def main(argv: Sequence[str] | None = None) -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
     if args.command == "costs":
         run_costs(args)
+        return
+    if args.command == "books":
+        results = load_books(
+            swing_book=Path(args.swing_book), trend_directory=Path(args.trend_dir),
+            hunter_book=Path(args.hunter_book) if args.hunter_book else None,
+        )
+        print(json.dumps({"books": [b.as_dict() for b in results],
+                          "verdict": verdict(results)}, indent=2)
+              if args.json else render_books(results))
         return
     if args.command == "copyfomo":
         if not args.wallet:

@@ -321,3 +321,17 @@ the entry price of the first trade in that losing streak; then it
 "graduates" and may be bought again, subject to every other entry rule.
 hunter-v1 live, hunter-v1 paper and swing-v1 all use the same rule
 (`reentry_block_reason`).
+
+## Comparing the paper books (safety counts)
+
+    launch-guard-eval books
+
+One table for every paper book that exists: the trend experiment's three
+arms (baseline, trend, managed), swing-v1, and the main paper hunter. Each
+is scored on profit **and** risk: net P&L, return per dollar risked (swing-v1
+can put $10 into one position, the others $5), worst single trade, deepest
+realized drawdown (in dollars and as a share of the $30 book), win rate,
+profit factor, and a 95% interval on the per-trade return. The verdict waits
+for 30 closed trades per book, flags overlapping intervals, and names the
+safer book when returns are close - prefer it then. The main hunter charges
+its own slippage estimates, so compare it with care. Read-only.
