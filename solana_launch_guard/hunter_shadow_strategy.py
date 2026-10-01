@@ -140,6 +140,14 @@ class ShadowRecoveryPolicy:
     stagnation_window_seconds: float = 300.0
     stagnation_min_gain_pct: float = 3.0
     require_medium_risk: bool = True
+    # Volume-confirmed dip, for pullback entries (BUY ZONE / BUY NOW) only:
+    # refuse when the dip's heaviest five-minute volume reached this multiple
+    # of the rally's (a dip trading as heavily as the move up reads as
+    # distribution, not a pause). An unmeasured ratio fails too - missing
+    # data is never treated as favorable. Off (0) by default: switch it on
+    # only after `launch-guard-eval report` shows BUY ZONE's LIGHT bucket
+    # beating HEAVY on test data with non-overlapping intervals.
+    max_pullback_volume_ratio: float = 0.0
 
     @classmethod
     def from_env(cls) -> ShadowRecoveryPolicy:
@@ -177,6 +185,7 @@ class ShadowRecoveryPolicy:
             second_stage_fraction=get("AUTO_SELL_SECOND_STAGE_FRACTION", 0.5),
             min_sell_usd=get("PORTFOLIO_MIN_SELL_VALUE_USD", 2),
             require_medium_risk=get_bool("ENTRY_REQUIRE_MEDIUM_RISK", True),
+            max_pullback_volume_ratio=get("BUY_ZONE_MAX_PULLBACK_VOLUME_RATIO", 0),
         )
         # policy.confirmations itself has no independent floor here: its one
         # use (assess_entry's `required`, below) always clamps it inside
@@ -195,12 +204,13 @@ class ShadowRecoveryPolicy:
                 or policy.lock_after_gain_pct < 0
                 or (policy.lock_after_gain_pct > 0
                     and not 0 <= policy.lock_stop_pct < policy.lock_after_gain_pct)
-                or policy.stagnation_window_seconds <= 0):
+                or policy.stagnation_window_seconds <= 0
+                or not policy.max_pullback_volume_ratio >= 0):
             raise ValueError("invalid shadow recovery configuration: pullback, "
                              "trailing stop (with the principal-recovered variant exceeding it), "
                              "a hard stop loss between 0 and 100 percent, a lock stop below "
-                             "its activation gain when enabled, and a stagnation window "
-                             "are required")
+                             "its activation gain when enabled, a stagnation window, "
+                             "and a non-negative pullback volume ratio are required")
         return policy
 
 
@@ -264,6 +274,18 @@ def assess_entry(candidate: dict[str, Any], policy: ShadowRecoveryPolicy) -> dic
     if volume not in {"STEADY", "RISING"} or _number(candidate.get("buys_m5")) <= 0:
         failures.append("volume/trading activity does not support recovery")
         codes.append("volume")
+    if policy.max_pullback_volume_ratio > 0 and not is_momentum_buy and not is_early_buy:
+        dip_ratio = candidate.get("pullback_volume_ratio")
+        if (not isinstance(dip_ratio, (int, float)) or isinstance(dip_ratio, bool)
+                or not math.isfinite(dip_ratio)):
+            failures.append("dip volume vs rally volume not measured")
+            codes.append("pullback_volume")
+        elif dip_ratio >= policy.max_pullback_volume_ratio:
+            failures.append(
+                f"dip traded {dip_ratio:.2f}x the rally's volume "
+                f"(max {policy.max_pullback_volume_ratio:.2f}x): selling, not a pause"
+            )
+            codes.append("pullback_volume")
     required_ratio = (
         policy.momentum_buy_min_ratio if is_momentum_buy
         else policy.early_buy_min_ratio if is_early_buy

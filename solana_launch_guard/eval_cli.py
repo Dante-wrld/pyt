@@ -436,6 +436,7 @@ def build_report(
 
     patterns = split_signals("candle: ")
     signal_sources = split_signals("source: ")
+    pullback_volumes = split_signals("pullback_volume: ")
 
     momentum = group_reports.get("signal:MOMENTUM BUY", {}).get("test")
     pullback = group_reports.get("signal:BUY ZONE", {}).get("test")
@@ -451,6 +452,7 @@ def build_report(
         "momentum_vs_buy_zone": head_to_head,
         "signal_candle_patterns": patterns,
         "signal_sources": signal_sources,
+        "signal_pullback_volume": pullback_volumes,
         "costs": {
             "position_usd": costs.position_usd,
             "slippage_bps_per_side": costs.slippage_bps_per_side,
@@ -606,6 +608,22 @@ def _render(report: dict) -> str:
                 summary = Summary(**row["summary"])
                 lines.append(_summary_line(row["pattern"][:10], summary))
         lines.append("")
+
+    if report.get("signal_pullback_volume"):
+        lines.append(
+            "Signals by dip volume vs rally volume (same costs and exits; "
+            "LIGHT <= 0.6x, HEAVY >= 1.0x, UNKNOWN = no dip measured, "
+            "'untagged' = before tagging existed):"
+        )
+        for name, rows in report["signal_pullback_volume"].items():
+            lines.append(f"  {name}")
+            for row in rows:
+                summary = Summary(**row["summary"])
+                lines.append(_summary_line(row["pattern"][:10], summary))
+        lines.append(
+            "  The volume rule is worth switching on only if LIGHT's CI clears "
+            "HEAVY's on BUY ZONE test data (BUY_ZONE_MAX_PULLBACK_VOLUME_RATIO).\n"
+        )
 
     if report.get("momentum_vs_buy_zone"):
         h2h = report["momentum_vs_buy_zone"]

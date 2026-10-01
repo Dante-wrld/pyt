@@ -121,6 +121,43 @@ Signals from before tagging existed show as `untagged`. Compare patterns
 within one signal type only, and treat a pattern as worth a rule only when
 its interval clears the others'.
 
+## Dip volume vs rally volume at signal time
+
+Volume-price analysis reads a pullback on lighter volume than the rally as
+profit-taking (a dip worth buying) and a pullback that trades as heavily as
+the rally as distribution (likely to keep falling). The board measures this
+for every candidate: the heaviest m5 volume on the leg up into the peak, and
+the heaviest m5 volume once price is `PULLBACK_STARTED_PCT` below that peak.
+A new high after a dip starts a fresh leg. Each buy signal is tagged with:
+
+| Tag | Dip volume / rally volume |
+| --- | --- |
+| `LIGHT` | 0.6x or less |
+| `NORMAL` | between 0.6x and 1.0x |
+| `HEAVY` | 1.0x or more |
+| `UNKNOWN` | no dip measured (most MOMENTUM BUY and EARLY BUY signals) |
+
+DEX Screener's m5 volume is a rolling five-minute window, so the first polls
+of a dip still include the rally's tail. That pushes the ratio up, so a
+`LIGHT` tag is conservative. The volume is total volume, not sell volume.
+The cut-offs are research choices and have not been backtested.
+
+`report` splits each signal type by this tag. The matching entry rule is off
+by default:
+
+```bash
+# Refuse BUY ZONE / BUY NOW entries whose dip reached 1.0x the rally's
+# volume, or whose dip volume was never measured. MOMENTUM BUY and
+# EARLY BUY are unaffected. Applies to live and every paper book that
+# uses the hunter entry check.
+BUY_ZONE_MAX_PULLBACK_VOLUME_RATIO=1.0
+```
+
+Switch it on only when BUY ZONE's `LIGHT` (or `LIGHT`+`NORMAL`) bucket beats
+`HEAVY` on test data with non-overlapping intervals and 100+ test signals.
+A higher win rate alone is not enough: the rule must also raise profit per
+trade after costs, since it can drop winners along with losers.
+
 ## Restricting to a time window
 
 `report` and `sweep` take `--since` to use only decisions from a given local

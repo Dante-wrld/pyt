@@ -50,6 +50,7 @@ class RecommendationMonitorMixin(LaunchGuardState):
                         sources=candidate.sources,
                     ),
                     sources=",".join(candidate.sources),
+                    pullback_volume=candidate.pullback_volume_label,
                 )
             except Exception as exc:  # noqa: BLE001 - evaluation must not break the loop
                 LOGGER.warning("Could not record %s signal for %s: %s",

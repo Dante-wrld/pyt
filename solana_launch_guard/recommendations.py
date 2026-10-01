@@ -12,6 +12,16 @@ from .market import MarketQuote
 
 ACTIONABLE_BUY_DECISIONS = frozenset({"MOMENTUM BUY", "BUY ZONE", "BUY NOW", "EARLY BUY"})
 
+# Pullback volume: the heaviest five-minute volume seen during the dip,
+# divided by the heaviest seen on the leg up into the peak. Volume-price
+# analysis reads a light-volume dip as passive profit-taking (buyable) and a
+# dip that trades as heavily as the rally as real distribution. DEX
+# Screener's m5 volume is a rolling window, so the first few polls of a dip
+# still carry the rally's tail: that overlap pushes the ratio UP, which makes
+# LIGHT the conservative bucket. Thresholds are untested research cut-offs.
+PULLBACK_VOLUME_LIGHT_MAX_RATIO = 0.6
+PULLBACK_VOLUME_HEAVY_MIN_RATIO = 1.0
+
 CHAIN_LABELS = {
     "solana": "SOL",
     "ethereum": "ETH",
@@ -66,6 +76,11 @@ class RecommendationCandidate:
     # orders (StrategyProfile.entry_shadow_only_sources) while still being
     # scored, signalled and tracked.
     sources: list[str] = field(default_factory=lambda: ["board"])
+    # Heaviest m5 volume on the current leg up into peak_price, and the
+    # heaviest m5 volume since price dipped pullback_started_pct below it.
+    # Both 0 on snapshots saved before these fields existed.
+    rally_volume_m5_usd: float = 0.0
+    pullback_max_volume_m5_usd: float = 0.0
 
     def to_json(self) -> str:
         """Serialize the complete signal state for restart-safe monitoring."""
@@ -209,6 +224,24 @@ class RecommendationCandidate:
         return "STEADY"
 
     @property
+    def pullback_volume_ratio(self) -> float | None:
+        """Dip volume over rally volume; None until both have been seen."""
+        if self.rally_volume_m5_usd <= 0 or self.pullback_max_volume_m5_usd <= 0:
+            return None
+        return self.pullback_max_volume_m5_usd / self.rally_volume_m5_usd
+
+    @property
+    def pullback_volume_label(self) -> str:
+        ratio = self.pullback_volume_ratio
+        if ratio is None:
+            return "UNKNOWN"
+        if ratio >= PULLBACK_VOLUME_HEAVY_MIN_RATIO:
+            return "HEAVY"
+        if ratio <= PULLBACK_VOLUME_LIGHT_MAX_RATIO:
+            return "LIGHT"
+        return "NORMAL"
+
+    @property
     def risk_label(self) -> str:
         if self.decision == "AVOID" or self.tier == "MOONSHOT":
             return "HIGH"
@@ -349,6 +382,7 @@ class RecommendationBook:
             pair_created_at_ms=quote.pair_created_at_ms,
             sources=[source],
             peak_price=price,
+            rally_volume_m5_usd=max(0.0, quote.volume_m5_usd),
             entry_confirmation_required=self.entry_confirmation_polls,
             planned_stop_pct=stop_pct,
             planned_target_pct=max(
@@ -370,6 +404,7 @@ class RecommendationBook:
             return None
         candidate.symbol = quote.symbol
         candidate.current_price = price
+        self._track_pullback_volume(candidate, price, quote.volume_m5_usd)
         candidate.peak_price = max(candidate.peak_price, price)
         candidate.pair_address = quote.pair_address or None
         if quote.pair_created_at_ms is not None:
@@ -394,6 +429,35 @@ class RecommendationBook:
         ):
             self._pullback_alerts.add(candidate.key)
         return candidate
+
+    def _track_pullback_volume(
+        self, candidate: RecommendationCandidate, price: float, volume: float
+    ) -> None:
+        """Fold this poll's m5 volume into the rally or the pullback side.
+        Called before peak_price takes this price into account."""
+        if not volume >= 0:  # also rejects NaN
+            return
+        peak = candidate.peak_price
+        if price >= peak:
+            if candidate.pullback_max_volume_m5_usd > 0:
+                # New high after a dip: a fresh leg, measured from scratch.
+                candidate.rally_volume_m5_usd = volume
+            else:
+                candidate.rally_volume_m5_usd = max(
+                    candidate.rally_volume_m5_usd, volume
+                )
+            candidate.pullback_max_volume_m5_usd = 0.0
+            return
+        drop_pct = (peak - price) / peak * 100 if peak > 0 else 0.0
+        if drop_pct >= self.pullback_started_pct:
+            candidate.pullback_max_volume_m5_usd = max(
+                candidate.pullback_max_volume_m5_usd, volume
+            )
+        elif candidate.pullback_max_volume_m5_usd <= 0:
+            # Still hugging the peak with no dip yet: part of the rally.
+            candidate.rally_volume_m5_usd = max(
+                candidate.rally_volume_m5_usd, volume
+            )
 
     def pop_buy_zone_alerts(self) -> list[RecommendationCandidate]:
         alerts = [
@@ -964,6 +1028,10 @@ def build_snapshot(
                 "momentum_label": candidate.momentum_label,
                 "liquidity_label": candidate.liquidity_label,
                 "volume_label": candidate.volume_label,
+                "rally_volume_m5_usd": candidate.rally_volume_m5_usd,
+                "pullback_max_volume_m5_usd": candidate.pullback_max_volume_m5_usd,
+                "pullback_volume_ratio": candidate.pullback_volume_ratio,
+                "pullback_volume_label": candidate.pullback_volume_label,
                 "risk_label": candidate.risk_label,
                 "entry_confirmation_count": candidate.entry_confirmation_count,
                 "entry_confirmation_required": (
