@@ -420,8 +420,22 @@ class SQLiteStore:
                 candle_pattern TEXT,
                 candle_trend TEXT,
                 sources TEXT,
-                pullback_volume TEXT
+                pullback_volume TEXT,
+                pv_state TEXT
             );
+
+            CREATE TABLE IF NOT EXISTS board_samples (
+                at REAL NOT NULL,
+                chain TEXT NOT NULL,
+                mint TEXT NOT NULL,
+                price REAL NOT NULL,
+                volume_m5_usd REAL NOT NULL,
+                buys_m5 INTEGER NOT NULL,
+                sells_m5 INTEGER NOT NULL,
+                liquidity_usd REAL
+            );
+            CREATE INDEX IF NOT EXISTS idx_board_samples_mint
+                ON board_samples(mint, at);
 
             CREATE TABLE IF NOT EXISTS wallet_trades (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -726,7 +740,9 @@ class SQLiteStore:
             str(row["name"])
             for row in self.connection.execute("PRAGMA table_info(buy_signals)")
         }
-        for column in ("candle_pattern", "candle_trend", "sources", "pullback_volume"):
+        for column in (
+            "candle_pattern", "candle_trend", "sources", "pullback_volume", "pv_state",
+        ):
             if column not in signal_columns:
                 self.connection.execute(
                     f"ALTER TABLE buy_signals ADD COLUMN {column} TEXT"
@@ -858,6 +874,7 @@ class SQLiteStore:
         live_blocked_reason: str | None,
         sources: str | None = None,
         pullback_volume: str | None = None,
+        pv_state: str | None = None,
     ) -> int:
         """One row each time a candidate moves into a buy decision. Written
         for evaluation only; nothing on a trading path reads it."""
@@ -867,17 +884,32 @@ class SQLiteStore:
                 signaled_at, mint, symbol, chain, decision, price,
                 price_currency, liquidity_usd, signal_score,
                 pair_created_at_ms, reason, live_blocked_reason, sources,
-                pullback_volume
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                pullback_volume, pv_state
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 utc_now(), mint, symbol, chain, decision, price, price_currency,
                 liquidity_usd, signal_score, pair_created_at_ms, reason,
-                live_blocked_reason, sources, pullback_volume,
+                live_blocked_reason, sources, pullback_volume, pv_state,
             ),
         )
         self.connection.commit()
         return int(cursor.lastrowid or 0)
+
+    def save_board_samples(
+        self, rows: list[tuple[float, str, str, float, float, int, int, float | None]]
+    ) -> None:
+        """Board polls (at, chain, mint, price, m5 volume, m5 buys, m5 sells,
+        liquidity) so the price-volume engine can be replayed later with
+        `launch-guard-eval pv-backtest`. Evaluation only."""
+        if not rows:
+            return
+        self.connection.executemany(
+            "INSERT INTO board_samples(at, chain, mint, price, volume_m5_usd, "
+            "buys_m5, sells_m5, liquidity_usd) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            rows,
+        )
+        self.connection.commit()
 
     def tag_buy_signal(self, signal_id: int, pattern: str, trend: str | None) -> None:
         """Candle shape at the moment a signal fired (research only)."""

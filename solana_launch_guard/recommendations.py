@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections import deque
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -9,6 +10,7 @@ from typing import Any
 
 from .intelligence import IntelligenceResult
 from .market import MarketQuote
+from .price_volume import Assessment, PriceVolumeConfig, Sample, assess
 
 ACTIONABLE_BUY_DECISIONS = frozenset({"MOMENTUM BUY", "BUY ZONE", "BUY NOW", "EARLY BUY"})
 
@@ -81,6 +83,14 @@ class RecommendationCandidate:
     # Both 0 on snapshots saved before these fields existed.
     rally_volume_m5_usd: float = 0.0
     pullback_max_volume_m5_usd: float = 0.0
+    # Latest price-volume engine reading (price_volume.assess over this
+    # board's own recent polls). Advisory unless PV_ENABLED gates entries.
+    pv_state: str = "UNKNOWN"
+    pv_score: float | None = None
+    pv_entry_eligible: bool = False
+    pv_vetoed: bool = True
+    pv_exit_action: str = "HOLD"
+    pv_reason: str = ""
 
     def to_json(self) -> str:
         """Serialize the complete signal state for restart-safe monitoring."""
@@ -224,6 +234,15 @@ class RecommendationCandidate:
         return "STEADY"
 
     @property
+    def pv_reading(self) -> dict[str, object]:
+        """The fields price_volume.entry_block_reason reads."""
+        return {
+            "pv_state": self.pv_state,
+            "pv_entry_eligible": self.pv_entry_eligible,
+            "pv_vetoed": self.pv_vetoed,
+        }
+
+    @property
     def pullback_volume_ratio(self) -> float | None:
         """Dip volume over rally volume; None until both have been seen."""
         if self.rally_volume_m5_usd <= 0 or self.pullback_max_volume_m5_usd <= 0:
@@ -327,6 +346,12 @@ class RecommendationBook:
         self.early_buy_min_trades = early_buy_min_trades
         self.early_buy_min_liquidity_usd = early_buy_min_liquidity_usd
         self.candidates: dict[str, RecommendationCandidate] = {}
+        # Recent polls per candidate for the price-volume engine. In memory
+        # only: after a restart the engine reads UNKNOWN until it has
+        # min_history_seconds of new polls again.
+        self.pv_config = PriceVolumeConfig.from_env()
+        self.pv_history: dict[str, deque[Sample]] = {}
+        self._pv_unsaved: list[tuple[str, str, Sample]] = []
         self._buy_zone_alerts: set[str] = set()
         self._pullback_alerts: set[str] = set()
 
@@ -390,6 +415,7 @@ class RecommendationBook:
                 stop_pct * self.min_entry_reward_risk_ratio,
             ),
         )
+        self._record_pv_sample(candidate, quote, price, timestamp)
         self._refresh_decision(candidate)
         self.candidates[quote.recommendation_key] = candidate
         self._trim()
@@ -416,6 +442,7 @@ class RecommendationBook:
         candidate.price_change_m5_pct = quote.price_change_m5_pct
         candidate.buy_sell_ratio = quote.buy_sell_ratio
         candidate.updated_at = time.time() if now is None else now
+        self._record_pv_sample(candidate, quote, price, candidate.updated_at)
         previous_decision = candidate.decision
         self._refresh_decision(candidate)
         if (
@@ -429,6 +456,53 @@ class RecommendationBook:
         ):
             self._pullback_alerts.add(candidate.key)
         return candidate
+
+    def _record_pv_sample(
+        self, candidate: RecommendationCandidate, quote: MarketQuote,
+        price: float, at: float,
+    ) -> None:
+        history = self.pv_history.setdefault(candidate.key, deque(maxlen=400))
+        sample = Sample(
+            at=at, price=price, volume_m5_usd=quote.volume_m5_usd,
+            buys_m5=quote.buys_m5, sells_m5=quote.sells_m5,
+            liquidity_usd=quote.liquidity_usd,
+        )
+        last = history[-1] if history else None
+        if last is None or (
+            last.price, last.volume_m5_usd, last.buys_m5, last.sells_m5,
+            last.liquidity_usd,
+        ) != (
+            sample.price, sample.volume_m5_usd, sample.buys_m5, sample.sells_m5,
+            sample.liquidity_usd,
+        ):
+            self._pv_unsaved.append((candidate.chain, candidate.mint, sample))
+        history.append(sample)
+        reading = assess(history, self.pv_config)
+        candidate.pv_state = reading.state
+        candidate.pv_score = (
+            None if reading.score is None else round(reading.score, 1)
+        )
+        candidate.pv_entry_eligible = reading.entry_eligible
+        candidate.pv_vetoed = reading.vetoed
+        candidate.pv_exit_action = reading.exit_action
+        candidate.pv_reason = reading.reason
+
+    def drain_pv_samples(
+        self,
+    ) -> list[tuple[float, str, str, float, float, int, int, float | None]]:
+        """New, non-duplicate polls since the last call, ready for
+        SQLiteStore.save_board_samples."""
+        rows = [
+            (s.at, chain, mint, s.price, s.volume_m5_usd, s.buys_m5, s.sells_m5,
+             s.liquidity_usd)
+            for chain, mint, s in self._pv_unsaved
+        ]
+        self._pv_unsaved.clear()
+        return rows
+
+    def price_volume(self, key: str) -> Assessment:
+        """Full engine reading for a board key (UNKNOWN if not tracked)."""
+        return assess(self.pv_history.get(key, ()), self.pv_config)
 
     def _track_pullback_volume(
         self, candidate: RecommendationCandidate, price: float, volume: float
@@ -486,6 +560,7 @@ class RecommendationBook:
         ]
         for key in expired:
             del self.candidates[key]
+            self.pv_history.pop(key, None)
 
     def restore(self, candidate: RecommendationCandidate) -> bool:
         """Restore persisted state without making a stale signal look fresh."""
@@ -557,6 +632,7 @@ class RecommendationBook:
             key=lambda item: (item.signal_score, item.observed_at),
         )
         del self.candidates[lowest.key]
+        self.pv_history.pop(lowest.key, None)
 
     @staticmethod
     def _reset_entry_confirmation(candidate: RecommendationCandidate) -> None:
@@ -1032,6 +1108,12 @@ def build_snapshot(
                 "pullback_max_volume_m5_usd": candidate.pullback_max_volume_m5_usd,
                 "pullback_volume_ratio": candidate.pullback_volume_ratio,
                 "pullback_volume_label": candidate.pullback_volume_label,
+                "pv_state": candidate.pv_state,
+                "pv_score": candidate.pv_score,
+                "pv_entry_eligible": candidate.pv_entry_eligible,
+                "pv_vetoed": candidate.pv_vetoed,
+                "pv_exit_action": candidate.pv_exit_action,
+                "pv_reason": candidate.pv_reason,
                 "risk_label": candidate.risk_label,
                 "entry_confirmation_count": candidate.entry_confirmation_count,
                 "entry_confirmation_required": (
@@ -1168,7 +1250,10 @@ def format_dashboard(snapshot: dict[str, Any], *, color: bool = True) -> str:
                 f"{prefix}    momentum="
                 f"{(raw.get('momentum_label') or 'UNKNOWN')!s} | liquidity="
                 f"{(raw.get('liquidity_label') or 'UNKNOWN')!s} | volume="
-                f"{(raw.get('volume_label') or 'UNKNOWN')!s}{reset}"
+                f"{(raw.get('volume_label') or 'UNKNOWN')!s} | pv="
+                f"{(raw.get('pv_state') or 'UNKNOWN')!s}"
+                f"{'' if raw.get('pv_score') is None else ' ' + format(float(raw['pv_score']), '.0f')}"
+                f" ({(raw.get('pv_exit_action') or 'HOLD')!s} if held){reset}"
             ),
             (
                 f"{prefix}    reason="

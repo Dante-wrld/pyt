@@ -8,9 +8,12 @@ from __future__ import annotations
 import math
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
+
+from .price_volume import PriceVolumeConfig
+from .price_volume import entry_block_reason as pv_entry_block_reason
 
 
 def _number(value: Any, default: float = 0.0) -> float:
@@ -148,6 +151,9 @@ class ShadowRecoveryPolicy:
     # only after `launch-guard-eval report` shows BUY ZONE's LIGHT bucket
     # beating HEAVY on test data with non-overlapping intervals.
     max_pullback_volume_ratio: float = 0.0
+    # Price-volume confirmation engine gate (price_volume.py). Off unless
+    # PV_ENABLED; reads the board's pv_* fields from the candidate row.
+    price_volume: PriceVolumeConfig = field(default_factory=PriceVolumeConfig)
 
     @classmethod
     def from_env(cls) -> ShadowRecoveryPolicy:
@@ -186,6 +192,7 @@ class ShadowRecoveryPolicy:
             min_sell_usd=get("PORTFOLIO_MIN_SELL_VALUE_USD", 2),
             require_medium_risk=get_bool("ENTRY_REQUIRE_MEDIUM_RISK", True),
             max_pullback_volume_ratio=get("BUY_ZONE_MAX_PULLBACK_VOLUME_RATIO", 0),
+            price_volume=PriceVolumeConfig.from_env(),
         )
         # policy.confirmations itself has no independent floor here: its one
         # use (assess_entry's `required`, below) always clamps it inside
@@ -325,6 +332,12 @@ def assess_entry(candidate: dict[str, Any], policy: ShadowRecoveryPolicy) -> dic
     if candidate.get("decision") == "AVOID":
         failures.append("recommendation decision is AVOID")
         codes.append("avoid_decision")
+    pv_block = pv_entry_block_reason(
+        str(candidate.get("decision") or ""), candidate, policy.price_volume
+    )
+    if pv_block is not None:
+        failures.append(pv_block)
+        codes.append("price_volume")
     if _number(candidate.get("signal_score")) < policy.min_score:
         failures.append("signal score below minimum")
         codes.append("signal_score")
@@ -456,6 +469,19 @@ def assess_exit(
         # volume_label itself is "UNKNOWN") or a falling volume label.
         state = "EXIT"
         reasons.append("trailing stop: price pulled back from a considerable peak, confirmed by selling pressure")
+    elif (
+        policy.price_volume.exit_enabled
+        and not principal_recovered
+        and quote.get("pv_exit_action") == "EXIT_REVIEW"
+    ):
+        # Opt-in (PV_EXIT_ENABLED): the price-volume engine's most severe
+        # reading - breakdown with drained liquidity or sellers dominating.
+        # Ranked below every existing stop so it can only add an exit.
+        state = "EXIT"
+        reasons.append(
+            f"price-volume breakdown ({quote.get('pv_state', 'UNKNOWN')}): "
+            f"{quote.get('pv_reason') or 'falling price confirmed by selling'}"
+        )
     elif stagnant:
         state = "EXIT"
         reasons.append(

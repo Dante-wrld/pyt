@@ -57,6 +57,11 @@ from .outcome_tracker import (
     TrackerConfig,
     uncopyable_wallet_ids,
 )
+from .price_volume import PriceVolumeConfig
+from .pv_backtest import build as pv_build
+from .pv_backtest import load_samples
+from .pv_backtest import render as pv_render
+from .pv_backtest import replay as pv_replay
 from .swing_strategy import SwingSettings
 
 DEFAULT_OUTCOMES_DB = "launch_guard_outcomes.db"
@@ -292,6 +297,23 @@ def _parser() -> argparse.ArgumentParser:
                                            "launch_guard_agent_capital.json"),
         help="the main paper hunter's book ('' to leave it out)")
     books.add_argument("--json", action="store_true")
+
+    pv = sub.add_parser(
+        "pv-backtest",
+        help="replay the price-volume engine at each buy signal (no look-ahead) "
+        "and compare entries/exits with and without it",
+    )
+    _add_cost_args(pv)
+    _add_ladder_args(pv)
+    pv.add_argument(
+        "--launch-db", default=os.getenv("DATABASE_PATH", "launch_guard.db"),
+        help="board_samples (preferred) or intelligence_scores history",
+    )
+    pv.add_argument("--train-fraction", type=float, default=0.7)
+    pv.add_argument("--no-exits", action="store_true",
+                    help="skip the slower exit-overlay replay")
+    pv.add_argument("--since", default=None)
+    pv.add_argument("--json", action="store_true")
     return parser
 
 
@@ -437,6 +459,7 @@ def build_report(
     patterns = split_signals("candle: ")
     signal_sources = split_signals("source: ")
     pullback_volumes = split_signals("pullback_volume: ")
+    pv_states = split_signals("pv: ")
 
     momentum = group_reports.get("signal:MOMENTUM BUY", {}).get("test")
     pullback = group_reports.get("signal:BUY ZONE", {}).get("test")
@@ -453,6 +476,7 @@ def build_report(
         "signal_candle_patterns": patterns,
         "signal_sources": signal_sources,
         "signal_pullback_volume": pullback_volumes,
+        "signal_pv_states": pv_states,
         "costs": {
             "position_usd": costs.position_usd,
             "slippage_bps_per_side": costs.slippage_bps_per_side,
@@ -623,6 +647,21 @@ def _render(report: dict) -> str:
         lines.append(
             "  The volume rule is worth switching on only if LIGHT's CI clears "
             "HEAVY's on BUY ZONE test data (BUY_ZONE_MAX_PULLBACK_VOLUME_RATIO).\n"
+        )
+
+    if report.get("signal_pv_states"):
+        lines.append(
+            "Signals by price-volume engine state at signal time (same costs "
+            "and exits; 'untagged' = before tagging existed):"
+        )
+        for name, rows in report["signal_pv_states"].items():
+            lines.append(f"  {name}")
+            for row in rows:
+                summary = Summary(**row["summary"])
+                lines.append(_summary_line(row["pattern"][:10], summary))
+        lines.append(
+            "  Full replay with timeframes and exits: launch-guard-eval "
+            "pv-backtest.\n"
         )
 
     if report.get("momentum_vs_buy_zone"):
@@ -894,6 +933,21 @@ def main(argv: Sequence[str] | None = None) -> None:
                 asyncio.run(tracker.run(args.poll_seconds))
             return
         costs = _costs(args)
+        if args.command == "pv-backtest":
+            since = parse_since(args.since) if args.since else None
+            members = [
+                d for d in store.load()
+                if d.source == "signal" and (since is None or d.decided_at >= since)
+            ]
+            samples = load_samples(args.launch_db, {d.mint for d in members})
+            pv_rows = pv_replay(
+                members, samples, PriceVolumeConfig.from_env(), _ladder(args),
+                costs, exits=not args.no_exits,
+            )
+            pv_report = pv_build(pv_rows, train_fraction=args.train_fraction)
+            print(json.dumps(pv_report, indent=2, default=str) if args.json
+                  else pv_render(pv_report))
+            return
         if args.command == "sweep":
             since = parse_since(args.since) if args.since else None
             members = _drop_uncopyable(

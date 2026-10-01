@@ -8,6 +8,7 @@ from .execution import (
 )
 from .launch_guard_state import LaunchGuardState
 from .portfolio import OwnedHolding
+from .price_volume import entry_block_reason as pv_entry_block_reason
 from .recommendations import RecommendationCandidate
 from .wallet import SolanaRpc
 from .launch_guard_support import auto_buy_discovery_rejection
@@ -37,6 +38,9 @@ class AutoBuyMixin(LaunchGuardState):
         blocked = self.strategy_profile.entry_block_reason(
             candidate.decision, candidate.pair_created_at_ms,
             sources=candidate.sources,
+        ) or pv_entry_block_reason(
+            candidate.decision, candidate.pv_reading,
+            self.recommendations.pv_config,
         )
         if blocked is not None:
             if self.entry_block_logged.get(candidate.mint) != blocked:

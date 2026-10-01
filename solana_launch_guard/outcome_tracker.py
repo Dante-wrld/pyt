@@ -197,9 +197,10 @@ def read_buy_signals(path: str | Path, after_id: int) -> list[NewDecision]:
         }
         sources = "sources" if "sources" in columns else "NULL"
         dip_volume = "pullback_volume" if "pullback_volume" in columns else "NULL"
+        pv_state = "pv_state" if "pv_state" in columns else "NULL"
         rows = connection.execute(
             "SELECT id, signaled_at, mint, decision, reason, live_blocked_reason, "
-            f"{sources}, {dip_volume} FROM buy_signals "
+            f"{sources}, {dip_volume}, {pv_state} FROM buy_signals "
             "WHERE id > ? AND chain = 'solana' "
             "ORDER BY id LIMIT 5000",
             (after_id,),
@@ -209,7 +210,7 @@ def read_buy_signals(path: str | Path, after_id: int) -> list[NewDecision]:
     finally:
         connection.close()
     decisions: list[NewDecision] = []
-    for row_id, signaled_at, mint, decision, reason, blocked, found_by, dip in rows:
+    for row_id, signaled_at, mint, decision, reason, blocked, found_by, dip, pv in rows:
         try:
             at = _iso_to_epoch(signaled_at)
         except (ValueError, TypeError):
@@ -221,7 +222,8 @@ def read_buy_signals(path: str | Path, after_id: int) -> list[NewDecision]:
             f"source: {','.join(sorted(found_by.split(',')))}" if found_by else None
         )
         dip_tag = f"pullback_volume: {dip}" if dip else None
-        reasons = tuple(r for r in (reason, live, source, dip_tag) if r)
+        pv_tag = f"pv: {pv}" if pv else None
+        reasons = tuple(r for r in (reason, live, source, dip_tag, pv_tag) if r)
         decisions.append(
             NewDecision("signal", row_id, mint, at, decision, None, reasons)
         )

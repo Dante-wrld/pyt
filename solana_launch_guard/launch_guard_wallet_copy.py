@@ -4,6 +4,7 @@ import logging
 
 from .core import Launch
 from .launch_guard_state import LaunchGuardState
+from .price_volume import entry_block_reason as pv_entry_block_reason
 from .wallet import WalletTrade
 
 LOGGER = logging.getLogger("solana_launch_guard")
@@ -62,6 +63,16 @@ class WalletCopyMixin(LaunchGuardState):
         ):
             rejection = (
                 f"liquidity below ${self.settings.copy_min_liquidity_usd:,.0f}"
+            )
+        else:
+            # A copied buy still has to pass price-volume confirmation when
+            # PV_SIGNALS includes COPY: a leader buying into BEAR_CONFIRMED
+            # or BREAKDOWN_RISK is rejected, not followed.
+            board = self.recommendations.candidates.get(quote.recommendation_key)
+            rejection = pv_entry_block_reason(
+                "COPY",
+                board.pv_reading if board is not None else {},
+                self.recommendations.pv_config,
             )
 
         if rejection:
