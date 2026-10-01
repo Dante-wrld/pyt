@@ -111,7 +111,9 @@ def _add_ladder_args(parser: argparse.ArgumentParser) -> None:
         help="where the locked stop sits, %% above entry (8 ~ break-even "
         "at default costs). Defaults to LOCK_STOP_PCT, the live setting")
     add("--early-take-pct", type=float, default=0.0,
-        help="candidate rule (not live): sell part once up this much; 0 = off")
+        help="sell part once up this much; 0 = off. The live/paper twin is "
+        "EARLY_TAKE_PCT, which sells everything: pair it with "
+        "--early-take-fraction 1.0")
     add("--early-take-fraction", type=float, default=0.5)
 
 
@@ -292,6 +294,9 @@ def _parser() -> argparse.ArgumentParser:
     books.add_argument(
         "--wide-fresh-book", default=os.getenv("WIDE_FRESH_BOOK_PATH",
                                                "launch_guard_wide_fresh_capital.json"))
+    books.add_argument(
+        "--momentum-take-book", default=os.getenv(
+            "MOMENTUM_TAKE_BOOK_PATH", "launch_guard_momentum_take_capital.json"))
     books.add_argument(
         "--hunter-book", default=os.getenv("AGENT_CAPITAL_PATH",
                                            "launch_guard_agent_capital.json"),
@@ -883,6 +888,8 @@ def main(argv: Sequence[str] | None = None) -> None:
             wide_book=Path(args.wide_book) if args.wide_book else None,
             wide_fresh_book=(
                 Path(args.wide_fresh_book) if args.wide_fresh_book else None),
+            momentum_take_book=(
+                Path(args.momentum_take_book) if args.momentum_take_book else None),
         )
         print(json.dumps({"books": [b.as_dict() for b in results],
                           "verdict": verdict(results)}, indent=2)

@@ -133,6 +133,14 @@ class ShadowRecoveryPolicy:
     # --locks ...` holds up on the test split for more than one signal type.
     lock_after_gain_pct: float = 0.0
     lock_stop_pct: float = 8.0
+    # Early take-profit, the live twin of evaluation.LadderRules.early_take_pct
+    # with early_take_fraction=1.0: sell the whole position once the gain
+    # reaches this, while principal is still at risk. Most signals reach
+    # break-even and stall, and the stagnation exit then closes them at a
+    # small loss; on 2026-09-25..10-01 replays a +4% full take lifted
+    # MOMENTUM BUY's win rate from 17% to 41% (62% with a 30-minute
+    # stagnation window). Off (0) by default; momentum-take-v1 paper-tests it.
+    early_take_pct: float = 0.0
     momentum_exit_pct: float = -8.0
     sell_pressure_ratio: float = 1.5
     liquidity_drop_pct: float = 30.0
@@ -181,6 +189,7 @@ class ShadowRecoveryPolicy:
             stop_loss_pct=get("STOP_LOSS_PCT", 20),
             lock_after_gain_pct=get("LOCK_AFTER_GAIN_PCT", 0),
             lock_stop_pct=get("LOCK_STOP_PCT", 8),
+            early_take_pct=get("EARLY_TAKE_PCT", 0),
             momentum_exit_pct=get("MOMENTUM_EXIT_PCT", -8),
             sell_pressure_ratio=get("SELL_PRESSURE_RATIO", 1.5),
             liquidity_drop_pct=get("LIQUIDITY_DROP_PCT", 30),
@@ -212,12 +221,14 @@ class ShadowRecoveryPolicy:
                 or (policy.lock_after_gain_pct > 0
                     and not 0 <= policy.lock_stop_pct < policy.lock_after_gain_pct)
                 or policy.stagnation_window_seconds <= 0
-                or not policy.max_pullback_volume_ratio >= 0):
+                or not policy.max_pullback_volume_ratio >= 0
+                or not policy.early_take_pct >= 0):
             raise ValueError("invalid shadow recovery configuration: pullback, "
                              "trailing stop (with the principal-recovered variant exceeding it), "
                              "a hard stop loss between 0 and 100 percent, a lock stop below "
                              "its activation gain when enabled, a stagnation window, "
-                             "and a non-negative pullback volume ratio are required")
+                             "and non-negative pullback volume ratio and early take "
+                             "are required")
         return policy
 
 
@@ -451,6 +462,16 @@ def assess_exit(
         reasons.append(
             f"hard stop: {gain:+.2f}% breaches the -{policy.stop_loss_pct:.0f}% "
             "loss limit; no flow confirmation required"
+        )
+    elif (
+        policy.early_take_pct > 0
+        and not principal_recovered
+        and gain >= policy.early_take_pct
+    ):
+        state = "EXIT"
+        reasons.append(
+            f"early take-profit: {gain:+.2f}% reached the "
+            f"+{policy.early_take_pct:g}% target"
         )
     elif locked:
         state = "EXIT"

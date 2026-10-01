@@ -167,6 +167,7 @@ def _decision_is(kind: str) -> Callable[[dict[str, Any]], bool]:
 def load_books(
     *, swing_book: Path, trend_directory: Path, hunter_book: Path | None,
     wide_book: Path | None = None, wide_fresh_book: Path | None = None,
+    momentum_take_book: Path | None = None,
 ) -> list[BookResult]:
     """Every paper book that exists, most comparable first."""
     books: list[BookResult] = []
@@ -193,6 +194,13 @@ def load_books(
             name="wide-fresh-v1", prefix="wide-fresh",
             overall_description="wide-v1 rules + a fresh-setup re-entry gate "
             "(no re-buy on the same signal until a new high above the last exit)"))
+    if momentum_take_book is not None:
+        payload = _load(momentum_take_book)
+        books.extend(wide_slices(
+            payload.get("agents", {}).get("momentum-take-v1") if payload else None,
+            name="momentum-take-v1", prefix="momentum-take",
+            overall_description="MOMENTUM BUY, wide-v1 entries; sell all at "
+            "+4%, 30-minute stagnation exit"))
     if hunter_book is not None:
         payload = _load(hunter_book)
         books.append(score_account(
