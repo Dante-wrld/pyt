@@ -517,3 +517,32 @@ settings. Reproduce the replay with
 `launch-guard-eval report --exit-model ladder --slippage-bps 60
 --stagnation-window 1800 --early-take-pct 4 --early-take-fraction 1.0`.
 
+### Correction: pool flips (2026-10-01)
+
+DEX Screener's batch replies sometimes leave out a token's main pool, and
+the deepest remaining pool, often at a very different price, was then
+recorded for that poll. The tables above include those readings: one
+token "crashed" 73% for a minute at a time while its $500k of liquidity
+never moved, and upward flips booked fake wins. Live quotes and the
+tracker now stay on one pool (`pool_pin.py`), and `OutcomeStore.load()`
+drops one-off flips from older readings (`evaluation.drop_pool_flips`),
+so every report from now on is on cleaned data. The same week, cleaned,
+ladder exits at 60 bps per side:
+
+| MOMENTUM BUY exits | Win | Avg win | Avg loss | Per trade (95% CI) | Test split |
+| --- | --- | --- | --- | --- | --- |
+| Current | 16% | $+0.46 | $-0.38 | $-0.239 (-0.31 to -0.17) | $-0.243 |
+| +4% take, 30-min stagnation | 61% | $+0.24 | $-0.69 | $-0.118 (-0.20 to -0.03) | $-0.253 |
+| +20% take, 30-min stagnation | 35% | $+0.90 | $-0.58 | $-0.063 (-0.18 to +0.06) | $-0.255 |
+
+The +4% exit still halves the momentum loss per trade and lifts the win
+rate, but at that rate an average loss is about three average wins, so it
+needs roughly a 75% win rate to break even. Nothing in this week's clean
+data is profitable after costs for any signal type.
+
+Paper books wide-v1, wide-fresh-v1 and momentum-take-v1 now size positions
+with `PAPER_ORDER_USD` (default $10) and a daily loss limit of
+`PAPER_DAILY_LOSS_USD` (default 60% of one position). momentum-take-v1
+also uses wide-fresh-v1's fresh-setup gate, so a token is not re-bought
+on the same signal until it makes a new high above its last exit.
+

@@ -145,7 +145,7 @@ class CapitalBook:
         if not math.isfinite(amount_usd) or amount_usd <= 0:
             raise ValueError("shadow order amount must be positive and finite")
         if amount_usd > max_order_usd:
-            raise ValueError("shadow order exceeds the $5 maximum")
+            raise ValueError(f"shadow order exceeds the ${max_order_usd:g} maximum")
         if not mint or not math.isfinite(entry_price) or entry_price <= 0:
             raise ValueError("shadow buy requires a mint and positive entry price")
         account = payload["agents"][agent_id]

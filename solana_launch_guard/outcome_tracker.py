@@ -38,7 +38,8 @@ from typing import Any
 import certifi
 
 from .copyfomo_report import WalletTradeRow, is_paid_buy, looks_like_tokenized_stock
-from .evaluation import Observation, TrackedDecision
+from .evaluation import Observation, TrackedDecision, drop_pool_flips
+from .pool_pin import PoolPinner
 
 LOGGER = logging.getLogger(__name__)
 
@@ -94,10 +95,16 @@ def sampled(mint: str, rate: float) -> bool:
     return int.from_bytes(digest[:8], "big") / 2**64 < rate
 
 
-def parse_batch(payload: Any, requested: Iterable[str]) -> dict[str, Quote]:
-    """Pick each mint's deepest pool; mints absent from the reply map to an
-    empty Quote so callers record them as not found."""
-    best: dict[str, tuple[float, Quote]] = {}
+def parse_batch(
+    payload: Any, requested: Iterable[str], pools: PoolPinner | None = None
+) -> dict[str, Quote]:
+    """Pick each mint's pool; mints absent from the reply map to an empty
+    Quote so callers record them as not found. With `pools`, each mint stays
+    on the pool it was first quoted from (pool_pin.py); a mint whose pinned
+    pool is missing from this reply is left out entirely, so its schedule
+    stays due and it is retried next cycle instead of being recorded from a
+    different pool's price."""
+    found: dict[str, list[tuple[str, float, Quote]]] = {}
     for pair in payload if isinstance(payload, list) else []:
         if not isinstance(pair, dict) or pair.get("chainId") != "solana":
             continue
@@ -114,18 +121,32 @@ def parse_batch(payload: Any, requested: Iterable[str]) -> dict[str, Quote]:
             liquidity = 0.0
         if price <= 0:
             continue
-        if mint not in best or liquidity > best[mint][0]:
-            best[mint] = (liquidity, Quote(mint, price, liquidity))
-    return {
-        mint: best[mint][1] if mint in best else Quote(mint, None, None)
-        for mint in requested
-    }
+        pair_address = str(pair.get("pairAddress") or "")
+        found.setdefault(mint, []).append(
+            (pair_address, liquidity, Quote(mint, price, liquidity))
+        )
+    out: dict[str, Quote] = {}
+    for mint in requested:
+        candidates = found.get(mint)
+        if not candidates:
+            out[mint] = Quote(mint, None, None)
+            continue
+        if pools is None:
+            out[mint] = max(candidates, key=lambda c: c[1])[2]
+            continue
+        chosen = pools.choose(
+            mint, candidates, pair_of=lambda c: c[0], liquidity_of=lambda c: c[1]
+        )
+        if chosen is not None:
+            out[mint] = chosen[2]
+    return out
 
 
 class DexScreenerBatchClient:
     def __init__(self, timeout_seconds: float = 15.0) -> None:
         self._ssl = ssl.create_default_context(cafile=certifi.where())
         self._timeout = timeout_seconds
+        self._pools = PoolPinner()
 
     async def quotes(self, mints: Sequence[str]) -> dict[str, Quote]:
         return await asyncio.to_thread(self._quotes, list(mints))
@@ -139,7 +160,7 @@ class DexScreenerBatchClient:
             request, timeout=self._timeout, context=self._ssl
         ) as response:
             payload = json.loads(response.read().decode("utf-8"))
-        return parse_batch(payload, mints[:BATCH_SIZE])
+        return parse_batch(payload, mints[:BATCH_SIZE], self._pools)
 
 
 def _open_read_only(path: str | Path) -> sqlite3.Connection | None:
@@ -555,6 +576,10 @@ class OutcomeStore:
             observations.setdefault(mint, []).append(
                 Observation(at, price, liquidity, bool(found))
             )
+        # Readings recorded before pool pinning can come from a side pool for
+        # one poll; drop those one-off flips so they are not booked as
+        # crashes or spikes.
+        observations = {m: drop_pool_flips(rows) for m, rows in observations.items()}
         loaded: list[TrackedDecision] = []
         for source, source_id, mint, at, label, reasons_json in self.connection.execute(
             "SELECT source, source_id, mint, decided_at, label, reasons_json "

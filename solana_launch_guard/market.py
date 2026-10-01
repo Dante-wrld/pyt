@@ -12,6 +12,8 @@ from typing import Any
 
 import certifi
 
+from .pool_pin import PoolPinner
+
 WSOL_MINT = "So11111111111111111111111111111111111111112"
 USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 
@@ -99,6 +101,8 @@ class DexScreenerOracle:
         # doing that kind of bulk scan should construct with retries=0.
         self._max_429_retries = max_429_retries
         self._cache: dict[str, tuple[float, MarketQuote | None]] = {}
+        # One pool per token across polls (see pool_pin.py).
+        self._pools = PoolPinner()
         self._stock_token_cache: (
             tuple[float, frozenset[str], frozenset[str]] | None
         ) = None
@@ -386,7 +390,15 @@ class DexScreenerOracle:
             except (TypeError, ValueError):
                 return 0.0
 
-        pair = max(candidates, key=liquidity)
+        key = f"{chain}:{mint if chain == 'solana' else mint.lower()}"
+        chosen = self._pools.choose(
+            key, candidates,
+            pair_of=lambda p: str(p.get("pairAddress") or ""),
+            liquidity_of=liquidity,
+        )
+        if chosen is None:
+            return None  # pinned pool missing from this response; retry next poll
+        pair = chosen
         try:
             price_sol = float(pair["priceNative"]) if chain == "solana" else 0.0
             raw_price_usd = pair.get("priceUsd")
