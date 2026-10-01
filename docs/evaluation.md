@@ -480,3 +480,40 @@ the frozen gate would also take), `wide:frozen-out` (trades only the freeze
 blocks) and one row per signal type. If `wide:frozen-out` holds up after
 costs over 30+ trades, that is the evidence for loosening the freeze; if it
 loses, the freeze is doing its job.
+
+## Win rate is set by exits (momentum-take-v1)
+
+Most signals reach break-even at some point (89% of BUY NOW, 96% of BUY
+ZONE in the 2026-09-25..10-01 replay), but the 5-minute stagnation exit
+closes them first at a small loss, so win rates sit at 2-17%. Replaying
+the same signals with other exits (ladder, 60 bps per side):
+
+| Exit | BUY ZONE | BUY NOW | EARLY BUY | MOMENTUM BUY |
+| --- | --- | --- | --- | --- |
+| Current | 7% win, $-0.130 | 3%, $-0.126 | 4%, $-0.125 | 17%, $-0.205 |
+| Sell all at +4% | 15%, $-0.121 | 5%, $-0.122 | 7%, $-0.111 | 41%, $-0.031 |
+| +4% and 30-min stagnation | 24%, $-0.127 | 14%, $-0.099 | 16%, $-0.121 | 62%, $-0.017 |
+| No stagnation exit | 80%, $+0.008 | 15%, $-0.339 | 24%, $-0.077 | 49%, $-0.266 |
+
+A higher win rate is not automatically better: with no stagnation exit
+BUY ZONE wins 80% of the time but its average loss grows to $-1.32 against
+$+0.33 wins, and the test split loses $0.375 per trade. MOMENTUM BUY with
++4% and a 30-minute window is the one setting where both win rate and
+loss per trade improved. These settings were chosen on the same data, so
+`launch-guard-momentum-take` paper-tests them on new signals:
+
+```bash
+launch-guard-momentum-take            # paper only, alongside the other books
+launch-guard-momentum-take --status
+launch-guard-eval books               # compares it with wide-v1, hunter-v1, ...
+```
+
+The exit itself is `EARLY_TAKE_PCT` on the shared policy (sell everything
+once up this much while principal is at risk; 0 = off, the default, so live
+and the other books are unchanged). The book sets it from
+`MOMENTUM_TAKE_PCT` (4) and its stagnation window from
+`MOMENTUM_TAKE_STAGNATION_SECONDS` (1800) without touching the shared
+settings. Reproduce the replay with
+`launch-guard-eval report --exit-model ladder --slippage-bps 60
+--stagnation-window 1800 --early-take-pct 4 --early-take-fraction 1.0`.
+

@@ -75,7 +75,7 @@ def wide_decisions() -> tuple[str, ...]:
 
 
 async def wide_cycle(
-    book: WideCapitalBook, snapshot: dict[str, Any], *,
+    book: CapitalBook, snapshot: dict[str, Any], *,
     policy: ShadowRecoveryPolicy,
     decisions: Sequence[str] = DEFAULT_WIDE_DECISIONS,
     max_open_positions: int = 4,
@@ -84,16 +84,18 @@ async def wide_cycle(
     round_trip_cost_pct: float = 1.2,
     fetch_quotes: QuoteFetcher = dexscreener_quotes,
     now: float | None = None,
+    agent_id: str = WIDE_AGENT_ID,
 ) -> dict[str, Any]:
     """One paper cycle: exit held positions with hunter-v1's rules, then buy
-    at most one BUY_READY candidate."""
+    at most one BUY_READY candidate. `agent_id` lets another paper book
+    (momentum-take-v1) reuse the same cycle under its own name."""
     from .live_trial_runner import live_entry_gate
     from .strategy_profile import StrategyProfile
 
     at = time.time() if now is None else now
     fresh, observed = _fresh_board(snapshot, at)
     payload = book.load() or {}
-    positions = dict(payload.get("agents", {}).get(WIDE_AGENT_ID, {})
+    positions = dict(payload.get("agents", {}).get(agent_id, {})
                      .get("positions", {}))
     off_board = [m for m in positions if m not in fresh]
     fetched: dict[str, dict[str, Any]] = {}
@@ -113,7 +115,7 @@ async def wide_cycle(
         price = float(quote.get("price") or 0)
         if not math.isfinite(price) or price <= 0:
             continue
-        marked = book.mark_shadow_position(WIDE_AGENT_ID, mint, price)
+        marked = book.mark_shadow_position(agent_id, mint, price)
         review = assess_exit(marked, quote, policy, now=at)
         review["mint"] = mint
         state = review["state"]
@@ -130,15 +132,15 @@ async def wide_cycle(
             exits.append(review)
             continue
         review["fill"] = book.close_shadow_position(
-            WIDE_AGENT_ID, mint, fraction=fraction, stage=stage,
+            agent_id, mint, fraction=fraction, stage=stage,
             slippage_pct=round_trip_cost_pct)
         exits.append(review)
 
     entry: dict[str, Any] | None = None
     payload = book.load() or {}
-    account = payload.get("agents", {}).get(WIDE_AGENT_ID, {})
+    account = payload.get("agents", {}).get(agent_id, {})
     held = set(account.get("positions", {}))
-    daily = book.daily_realized_pnl(WIDE_AGENT_ID)
+    daily = book.daily_realized_pnl(agent_id)
     if (len(held) < max_open_positions
             and float(account.get("cash_usd", 0)) >= order_usd
             and daily > -max_daily_loss_usd):
@@ -153,7 +155,7 @@ async def wide_cycle(
                 continue
             currency = str(candidate.get("price_currency") or "")
             if reentry_block_reason(
-                book.sell_history(WIDE_AGENT_ID, mint, price_currency=currency),
+                book.sell_history(agent_id, mint, price_currency=currency),
                 float(candidate.get("price") or 0),
             ) is not None:
                 continue
@@ -166,7 +168,7 @@ async def wide_cycle(
             pick, live_blocked = max(
                 ready, key=lambda item: float(item[0].get("signal_score") or 0))
             book.reserve_shadow_buy(
-                agent_id=WIDE_AGENT_ID, mint=pick["mint"],
+                agent_id=agent_id, mint=pick["mint"],
                 symbol=str(pick.get("symbol") or pick["mint"][:6]),
                 amount_usd=order_usd, entry_price=float(pick["price"]),
                 price_currency=str(pick.get("price_currency") or "UNKNOWN"),
@@ -180,7 +182,7 @@ async def wide_cycle(
             entry = {"mint": pick["mint"], "symbol": pick.get("symbol"),
                      "decision": pick.get("decision"), "price": pick["price"],
                      "live_blocked": live_blocked}
-    return {"agent_id": WIDE_AGENT_ID, "mode": "shadow", "live_execution": False,
+    return {"agent_id": agent_id, "mode": "shadow", "live_execution": False,
             "exits": exits, "entry": entry, "daily_realized_pnl_usd": daily,
             "at": datetime.fromtimestamp(at, UTC).isoformat()}
 

@@ -36,6 +36,7 @@ launch-guard-eval = "solana_launch_guard.eval_cli:main"
 launch-guard-swing = "solana_launch_guard.swing_strategy:main"
 launch-guard-wide = "solana_launch_guard.wide_shadow:main"
 launch-guard-wide-fresh = "solana_launch_guard.wide_fresh_shadow:main"
+launch-guard-momentum-take = "solana_launch_guard.momentum_take_shadow:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["solana_launch_guard"]

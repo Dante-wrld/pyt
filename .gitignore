@@ -54,3 +54,5 @@ launch_guard_hunter_capacity.json
 launch_guard_trend_shadow/
 launch_guard_trend_evidence.json*
 launch_guard_swing_capital.json*
+# Paper capital books (wide-v1, wide-fresh-v1, momentum-take-v1, ...)
+launch_guard_*_capital.json*
