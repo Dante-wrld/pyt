@@ -51,7 +51,12 @@ from .swing_strategy import (
     _read_snapshot,
     dexscreener_quotes,
 )
-from .wide_shadow import DEFAULT_WIDE_DECISIONS, wide_decisions
+from .wide_shadow import (
+    DEFAULT_WIDE_DECISIONS,
+    paper_daily_loss_usd,
+    paper_order_usd,
+    wide_decisions,
+)
 
 LOGGER = logging.getLogger("solana_launch_guard.wide_fresh")
 
@@ -101,7 +106,7 @@ def fresh_setup_reason(
 
 
 def _record_gate(
-    book: WideFreshCapitalBook, agent_id: str, mint: str, position: dict[str, Any],
+    book: CapitalBook, agent_id: str, mint: str, position: dict[str, Any],
     quote: dict[str, Any],
 ) -> None:
     """After closing a position, remember its decision and the peak to clear
@@ -132,7 +137,7 @@ def _record_gate(
 
 
 async def wide_fresh_cycle(
-    book: WideFreshCapitalBook, snapshot: dict[str, Any], *,
+    book: CapitalBook, snapshot: dict[str, Any], *,
     policy: ShadowRecoveryPolicy,
     decisions: Sequence[str] = DEFAULT_WIDE_DECISIONS,
     max_open_positions: int = 4,
@@ -141,16 +146,18 @@ async def wide_fresh_cycle(
     round_trip_cost_pct: float = 1.2,
     fetch_quotes: QuoteFetcher = dexscreener_quotes,
     now: float | None = None,
+    agent_id: str = WIDE_FRESH_AGENT_ID,
 ) -> dict[str, Any]:
     """Same as wide_shadow.wide_cycle, plus the fresh-setup re-entry gate on
-    top of the shared re-entry rule."""
+    top of the shared re-entry rule. `agent_id` lets another paper book
+    (momentum-take-v1) reuse it under its own name."""
     from .live_trial_runner import live_entry_gate
     from .strategy_profile import StrategyProfile
 
     at = time.time() if now is None else now
     fresh, observed = _fresh_board(snapshot, at)
     payload = book.load() or {}
-    positions = dict(payload.get("agents", {}).get(WIDE_FRESH_AGENT_ID, {})
+    positions = dict(payload.get("agents", {}).get(agent_id, {})
                      .get("positions", {}))
     off_board = [m for m in positions if m not in fresh]
     fetched: dict[str, dict[str, Any]] = {}
@@ -170,7 +177,7 @@ async def wide_fresh_cycle(
         price = float(quote.get("price") or 0)
         if not math.isfinite(price) or price <= 0:
             continue
-        marked = book.mark_shadow_position(WIDE_FRESH_AGENT_ID, mint, price)
+        marked = book.mark_shadow_position(agent_id, mint, price)
         review = assess_exit(marked, quote, policy, now=at)
         review["mint"] = mint
         state = review["state"]
@@ -187,18 +194,18 @@ async def wide_fresh_cycle(
             exits.append(review)
             continue
         review["fill"] = book.close_shadow_position(
-            WIDE_FRESH_AGENT_ID, mint, fraction=fraction, stage=stage,
+            agent_id, mint, fraction=fraction, stage=stage,
             slippage_pct=round_trip_cost_pct)
         if fraction >= 1.0:
-            _record_gate(book, WIDE_FRESH_AGENT_ID, mint, marked, quote)
+            _record_gate(book, agent_id, mint, marked, quote)
         exits.append(review)
 
     entry: dict[str, Any] | None = None
     payload = book.load() or {}
-    account = payload.get("agents", {}).get(WIDE_FRESH_AGENT_ID, {})
+    account = payload.get("agents", {}).get(agent_id, {})
     held = set(account.get("positions", {}))
     gate = account.get("fresh_gate", {})
-    daily = book.daily_realized_pnl(WIDE_FRESH_AGENT_ID)
+    daily = book.daily_realized_pnl(agent_id)
     if (len(held) < max_open_positions
             and float(account.get("cash_usd", 0)) >= order_usd
             and daily > -max_daily_loss_usd):
@@ -217,7 +224,7 @@ async def wide_fresh_cycle(
                 continue
             currency = str(candidate.get("price_currency") or "")
             if reentry_block_reason(
-                book.sell_history(WIDE_FRESH_AGENT_ID, mint, price_currency=currency),
+                book.sell_history(agent_id, mint, price_currency=currency),
                 float(candidate.get("price") or 0),
             ) is not None:
                 continue
@@ -229,12 +236,13 @@ async def wide_fresh_cycle(
             pick, live_blocked = max(
                 ready, key=lambda item: float(item[0].get("signal_score") or 0))
             book.reserve_shadow_buy(
-                agent_id=WIDE_FRESH_AGENT_ID, mint=pick["mint"],
+                agent_id=agent_id, mint=pick["mint"],
                 symbol=str(pick.get("symbol") or pick["mint"][:6]),
                 amount_usd=order_usd, entry_price=float(pick["price"]),
                 price_currency=str(pick.get("price_currency") or "UNKNOWN"),
                 entry_liquidity_usd=float(pick.get("liquidity_usd") or 0),
                 max_open_positions=max_open_positions,
+                max_order_usd=order_usd,
                 pair_address=pick.get("pair_address"),
                 pair_created_at_ms=pick.get("pair_created_at_ms"),
                 decision=str(pick.get("decision")),
@@ -243,7 +251,7 @@ async def wide_fresh_cycle(
             entry = {"mint": pick["mint"], "symbol": pick.get("symbol"),
                      "decision": pick.get("decision"), "price": pick["price"],
                      "live_blocked": live_blocked}
-    return {"agent_id": WIDE_FRESH_AGENT_ID, "mode": "shadow", "live_execution": False,
+    return {"agent_id": agent_id, "mode": "shadow", "live_execution": False,
             "exits": exits, "entry": entry, "daily_realized_pnl_usd": daily,
             "at": datetime.fromtimestamp(at, UTC).isoformat()}
 
@@ -273,6 +281,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                           "fresh_gate": account.get("fresh_gate", {})}, indent=2))
         return
     policy = ShadowRecoveryPolicy.from_env()
+    order_usd = paper_order_usd()
     decisions = wide_decisions()
     max_open = int(_env_float("WIDE_MAX_OPEN_POSITIONS", 4))
     snapshot_path = os.getenv("RECOMMENDATION_SNAPSHOT_PATH",
@@ -283,7 +292,9 @@ def main(argv: Sequence[str] | None = None) -> None:
         try:
             result = asyncio.run(wide_fresh_cycle(
                 book, _read_snapshot(snapshot_path), policy=policy,
-                decisions=decisions, max_open_positions=max_open))
+                decisions=decisions, max_open_positions=max_open,
+                order_usd=order_usd,
+                max_daily_loss_usd=paper_daily_loss_usd(order_usd)))
             for review in result["exits"]:
                 if "fill" in review:
                     LOGGER.info("WIDE-FRESH SELL %s %s %s", review["mint"][:8],

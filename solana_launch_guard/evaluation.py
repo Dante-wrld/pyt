@@ -43,6 +43,52 @@ class Observation:
         )
 
 
+def drop_pool_flips(
+    observations: Sequence[Observation],
+    *, window: int = 3, price_jump: float = 0.4, liquidity_jump: float = 0.3,
+    agree: float = 0.15,
+) -> list[Observation]:
+    """Remove readings that came from a different pool for a poll or two.
+
+    Each reading is compared with the median price and median liquidity of
+    up to `window` readings on each side. It is a flip when it differs from
+    both medians by more than `price_jump` / `liquidity_jump` while at least
+    one reading before AND one after sit within `agree` of the median price,
+    i.e. the series is on one level both before and after it. A real crash
+    keeps going, so the readings before it do not match the later median and
+    nothing is dropped; a reading with nothing after it is never dropped.
+    See pool_pin.py for the cause and the live fix."""
+
+    def usable(o: Observation) -> bool:
+        return bool(o.found and o.price_usd and o.liquidity_usd)
+
+    def near(value: float, ref: float, limit: float) -> bool:
+        return ref > 0 and abs(value / ref - 1) <= limit
+
+    rows = list(observations)
+    keep: list[Observation] = []
+    for i, obs in enumerate(rows):
+        before = [o for o in rows[max(0, i - window):i] if usable(o)]
+        after = [o for o in rows[i + 1:i + 1 + window] if usable(o)]
+        if not (usable(obs) and before and after):
+            keep.append(obs)
+            continue
+        around = before + after
+        mid_price = sorted(o.price_usd or 0.0 for o in around)[len(around) // 2]
+        mid_liq = sorted(o.liquidity_usd or 0.0 for o in around)[len(around) // 2]
+        settled = any(
+            near(o.price_usd or 0.0, mid_price, agree) for o in before
+        ) and any(near(o.price_usd or 0.0, mid_price, agree) for o in after)
+        flipped = (
+            settled
+            and not near(obs.price_usd or 0.0, mid_price, price_jump)
+            and not near(obs.liquidity_usd or 0.0, mid_liq, liquidity_jump)
+        )
+        if not flipped:
+            keep.append(obs)
+    return keep
+
+
 @dataclass(frozen=True, slots=True)
 class TrackedDecision:
     source: str

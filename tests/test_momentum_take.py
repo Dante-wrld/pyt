@@ -181,3 +181,42 @@ def test_books_report_includes_momentum_take(tmp_path, book):
         momentum_take_book=book.path,
     )
     assert any(r.name == "momentum-take-v1" for r in results)
+
+
+def test_paper_books_default_to_ten_dollars(monkeypatch):
+    from solana_launch_guard.wide_shadow import paper_order_usd
+
+    monkeypatch.delenv("PAPER_ORDER_USD", raising=False)
+    assert paper_order_usd() == 10
+    monkeypatch.setenv("PAPER_ORDER_USD", "7.5")
+    assert paper_order_usd() == 7.5
+    monkeypatch.setenv("PAPER_ORDER_USD", "0")
+    with pytest.raises(ValueError):
+        paper_order_usd()
+
+
+def test_momentum_take_uses_the_fresh_setup_gate(book):
+    from solana_launch_guard.wide_fresh_shadow import wide_fresh_cycle
+
+    policy = momentum_take_policy(ShadowRecoveryPolicy())
+
+    async def fetch(mints):
+        return {}
+
+    def cycle(row):
+        return asyncio.run(wide_fresh_cycle(
+            book, snapshot([row]), policy=policy, decisions=("MOMENTUM BUY",),
+            fetch_quotes=fetch, agent_id=MOMENTUM_TAKE_AGENT_ID, order_usd=10.0,
+        ))
+
+    assert cycle(momentum())["entry"] is not None
+    account = book.load()["agents"][MOMENTUM_TAKE_AGENT_ID]
+    assert account["positions"]["M" * 44]["allocated_usd"] == 10.0
+    sold = cycle(momentum(price=1.05, peak_price=1.05))
+    assert any("fill" in e for e in sold["exits"])
+    # Same setup, no new high above the board peak at exit: not re-bought.
+    again = cycle(momentum(price=1.05, peak_price=1.05))
+    assert again["entry"] is None
+    assert "fresh_gate" in book.load()["agents"][MOMENTUM_TAKE_AGENT_ID]
+    # A new high clears the gate.
+    assert cycle(momentum(price=1.2, peak_price=1.2))["entry"] is not None

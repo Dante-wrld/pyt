@@ -68,6 +68,26 @@ class WideCapitalBook(CapitalBook):
     )
 
 
+def paper_order_usd() -> float:
+    """Dollars per paper position for the wide-style books (wide-v1,
+    wide-fresh-v1, momentum-take-v1). PAPER_ORDER_USD, default $10.
+    hunter-v1's shadow loop keeps the live test size so it stays a mirror
+    of live."""
+    amount = _env_float("PAPER_ORDER_USD", 10.0)
+    if not math.isfinite(amount) or amount <= 0:
+        raise ValueError("PAPER_ORDER_USD must be a positive amount")
+    return amount
+
+
+def paper_daily_loss_usd(order_usd: float) -> float:
+    """Daily loss limit for the wide-style books: PAPER_DAILY_LOSS_USD, or
+    60% of one position by default (the old $3 on $5 positions)."""
+    amount = _env_float("PAPER_DAILY_LOSS_USD", order_usd * 0.6)
+    if not math.isfinite(amount) or amount <= 0:
+        raise ValueError("PAPER_DAILY_LOSS_USD must be a positive amount")
+    return amount
+
+
 def wide_decisions() -> tuple[str, ...]:
     raw = os.getenv("WIDE_DECISIONS", "")
     chosen = tuple(d.strip().upper() for d in raw.split(",") if d.strip())
@@ -174,6 +194,7 @@ async def wide_cycle(
                 price_currency=str(pick.get("price_currency") or "UNKNOWN"),
                 entry_liquidity_usd=float(pick.get("liquidity_usd") or 0),
                 max_open_positions=max_open_positions,
+                max_order_usd=order_usd,
                 pair_address=pick.get("pair_address"),
                 pair_created_at_ms=pick.get("pair_created_at_ms"),
                 decision=str(pick.get("decision")),
@@ -212,6 +233,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                          indent=2))
         return
     policy = ShadowRecoveryPolicy.from_env()
+    order_usd = paper_order_usd()
     decisions = wide_decisions()
     max_open = int(_env_float("WIDE_MAX_OPEN_POSITIONS", 4))
     snapshot_path = os.getenv("RECOMMENDATION_SNAPSHOT_PATH",
@@ -222,7 +244,9 @@ def main(argv: Sequence[str] | None = None) -> None:
         try:
             result = asyncio.run(wide_cycle(
                 book, _read_snapshot(snapshot_path), policy=policy,
-                decisions=decisions, max_open_positions=max_open))
+                decisions=decisions, max_open_positions=max_open,
+                order_usd=order_usd,
+                max_daily_loss_usd=paper_daily_loss_usd(order_usd)))
             for review in result["exits"]:
                 if "fill" in review:
                     LOGGER.info("WIDE SELL %s %s %s", review["mint"][:8],

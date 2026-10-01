@@ -8,9 +8,11 @@ lifted the replayed win rate from 17% to 62% and cut the loss per trade from
 $0.205 to $0.017. That was measured on the data the settings were chosen
 from, so this book checks it on fresh signals.
 
-It is wide-v1's cycle (wide_shadow.wide_cycle: same entry review, re-entry
-rule, $5 size, 1.2% round-trip cost, $3 daily loss limit) under its own
-agent and capital book, with two exit changes applied only here:
+It is wide-fresh-v1's cycle (wide_fresh_shadow.wide_fresh_cycle: same entry
+review, shared re-entry rule plus the fresh-setup gate - no re-buy on the
+same signal until a new high above the last exit - PAPER_ORDER_USD per
+position, 1.2% round-trip cost, $3 daily loss limit) under its own agent and
+capital book, with two exit changes applied only here:
 
   - MOMENTUM_TAKE_PCT (default 4): sell the whole position at this gain
     (ShadowRecoveryPolicy.early_take_pct).
@@ -37,7 +39,8 @@ from .agent_capital import CapitalBook
 from .agents import AgentRole
 from .hunter_shadow_strategy import ShadowRecoveryPolicy
 from .swing_strategy import _read_snapshot
-from .wide_shadow import wide_cycle
+from .wide_fresh_shadow import wide_fresh_cycle
+from .wide_shadow import paper_daily_loss_usd, paper_order_usd
 
 LOGGER = logging.getLogger("solana_launch_guard.momentum_take")
 
@@ -105,7 +108,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
     book = MomentumTakeCapitalBook(args.book)
-    book.initialize(30)
+    book.initialize(40)  # four $10 positions
     if args.status:
         payload = book.load() or {}
         open_positions = (
@@ -121,6 +124,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         )
         return
     policy = momentum_take_policy()
+    order_usd = paper_order_usd()
     decisions = momentum_take_decisions()
     max_open = int(_env_float("MOMENTUM_TAKE_MAX_OPEN_POSITIONS", 4))
     snapshot_path = os.getenv(
@@ -137,13 +141,15 @@ def main(argv: Sequence[str] | None = None) -> None:
     while True:
         try:
             result = asyncio.run(
-                wide_cycle(
+                wide_fresh_cycle(
                     book,
                     _read_snapshot(snapshot_path),
                     policy=policy,
                     decisions=decisions,
                     max_open_positions=max_open,
                     agent_id=MOMENTUM_TAKE_AGENT_ID,
+                    order_usd=order_usd,
+                    max_daily_loss_usd=paper_daily_loss_usd(order_usd),
                 )
             )
             for review in result["exits"]:
