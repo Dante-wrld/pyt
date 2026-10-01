@@ -33,6 +33,7 @@ class BookResult:
     description: str
     starting_usd: float
     trades: int = 0
+    distinct_tokens: int = 0
     wins: int = 0
     net_usd: float = 0.0
     risked_usd: float = 0.0
@@ -91,8 +92,8 @@ def score_account(
         if not keep(fill):
             continue
         key = (str(fill.get("mint")), str(fill.get("opened_at", f"legacy-{index}")))
-        trade = trades.setdefault(key, {"cost": 0.0, "pnl": 0.0, "closed": False,
-                                        "closed_at": ""})
+        trade = trades.setdefault(key, {"mint": key[0], "cost": 0.0, "pnl": 0.0,
+                                        "closed": False, "closed_at": ""})
         trade["cost"] += float(fill.get("entry_value_usd") or 0.0)
         trade["pnl"] += float(fill.get("realized_pnl_usd") or 0.0)
         if fill.get("position_closed", True):
@@ -100,6 +101,7 @@ def score_account(
             trade["closed_at"] = str(fill.get("closed_at") or "")
     closed = sorted((t for t in trades.values() if t["closed"]),
                     key=lambda t: t["closed_at"])
+    result.distinct_tokens = len({t["mint"] for t in closed})
     equity = peak = 0.0
     returns: list[float] = []
     for trade in closed:
@@ -130,19 +132,22 @@ def score_account(
     return result
 
 
-def wide_slices(account: dict[str, Any] | None) -> list[BookResult]:
-    """wide-v1 overall, then split by whether the live gate would have taken
-    each trade, then by signal type."""
-    rows = [score_account(
-        "wide-v1", "every BUY_READY signal kind, any token age; hunter exits",
-        account)]
+def wide_slices(
+    account: dict[str, Any] | None, *, name: str = "wide-v1", prefix: str = "wide",
+    overall_description: str = (
+        "every BUY_READY signal kind, any token age; hunter exits"),
+) -> list[BookResult]:
+    """One wide-style book overall, then split by whether the live gate
+    would have taken each trade, then by signal type. Shared by wide-v1 and
+    any variant (e.g. wide-fresh-v1) that keeps the same account shape."""
+    rows = [score_account(name, overall_description, account)]
     if account is None:
         return rows
     rows.append(score_account(
-        "wide:live-too", "trades the frozen live gate would also take", account,
+        f"{prefix}:live-too", "trades the frozen live gate would also take", account,
         keep=lambda r: not r.get("live_blocked")))
     rows.append(score_account(
-        "wide:frozen-out", "trades only this book takes (the freeze blocks them)",
+        f"{prefix}:frozen-out", "trades only this book takes (the freeze blocks them)",
         account, keep=lambda r: bool(r.get("live_blocked"))))
     kinds = sorted({str(r.get("decision")) for r in
                     list(account.get("completed_trades", []))
@@ -150,7 +155,7 @@ def wide_slices(account: dict[str, Any] | None) -> list[BookResult]:
                     if r.get("decision")})
     for kind in kinds:
         rows.append(score_account(
-            f"wide:{kind}", f"wide-v1 {kind} trades only", account,
+            f"{prefix}:{kind}", f"{name} {kind} trades only", account,
             keep=_decision_is(kind)))
     return rows
 
@@ -161,7 +166,7 @@ def _decision_is(kind: str) -> Callable[[dict[str, Any]], bool]:
 
 def load_books(
     *, swing_book: Path, trend_directory: Path, hunter_book: Path | None,
-    wide_book: Path | None = None,
+    wide_book: Path | None = None, wide_fresh_book: Path | None = None,
 ) -> list[BookResult]:
     """Every paper book that exists, most comparable first."""
     books: list[BookResult] = []
@@ -181,6 +186,13 @@ def load_books(
         payload = _load(wide_book)
         books.extend(wide_slices(
             payload.get("agents", {}).get("wide-v1") if payload else None))
+    if wide_fresh_book is not None:
+        payload = _load(wide_fresh_book)
+        books.extend(wide_slices(
+            payload.get("agents", {}).get("wide-fresh-v1") if payload else None,
+            name="wide-fresh-v1", prefix="wide-fresh",
+            overall_description="wide-v1 rules + a fresh-setup re-entry gate "
+            "(no re-buy on the same signal until a new high above the last exit)"))
     if hunter_book is not None:
         payload = _load(hunter_book)
         books.append(score_account(
@@ -218,8 +230,9 @@ def render(books: Sequence[BookResult]) -> str:
         return "n/a" if value is None else f"{value * 100:+.1f}%"
 
     lines = ["Paper books (realized, after the cost each book charges)",
-             f"{'book':<15} {'trades':>6} {'win':>5} {'net $':>8} {'per $':>7} "
-             f"{'worst $':>8} {'max DD $':>9} {'DD/start':>8} {'PF':>5}  95% CI/trade"]
+             f"{'book':<15} {'trades':>6} {'tok':>4} {'win':>5} {'net $':>8} "
+             f"{'per $':>7} {'worst $':>8} {'max DD $':>9} {'DD/start':>8} "
+             f"{'PF':>5}  95% CI/trade"]
     for b in books:
         if b.missing:
             lines.append(f"{b.name:<15} (no book yet)")
@@ -230,8 +243,9 @@ def render(books: Sequence[BookResult]) -> str:
         dd_share = b.max_drawdown_usd / b.starting_usd * 100
         pf = "n/a" if b.profit_factor is None else f"{b.profit_factor:.2f}"
         lines.append(
-            f"{b.name:<15} {b.trades:>6} {win:>5} {b.net_usd:>+8.2f} "
-            f"{pct(b.return_per_dollar):>7} {b.worst_trade_usd:>+8.2f} "
+            f"{b.name:<15} {b.trades:>6} {b.distinct_tokens:>4} {win:>5} "
+            f"{b.net_usd:>+8.2f} {pct(b.return_per_dollar):>7} "
+            f"{b.worst_trade_usd:>+8.2f} "
             f"{b.max_drawdown_usd:>9.2f} {dd_share:>7.1f}% "
             f"{pf:>5}  {ci}")
         if b.open_positions:
@@ -244,5 +258,7 @@ def render(books: Sequence[BookResult]) -> str:
     lines += ["", "per $ = net P&L / total cost of closed positions (swing-v1 can risk "
               "$10 in one position, the others $5).",
               "DD/start = deepest realized drawdown as a share of the $30 book.",
+              "tok = distinct tokens among the closed trades (a low count next to a "
+              "high trade count means one token is doing most of the talking).",
               "", verdict(books)]
     return "\n".join(lines)
