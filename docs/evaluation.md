@@ -121,6 +121,127 @@ Signals from before tagging existed show as `untagged`. Compare patterns
 within one signal type only, and treat a pattern as worth a rule only when
 its interval clears the others'.
 
+## Dip volume vs rally volume at signal time
+
+Volume-price analysis reads a pullback on lighter volume than the rally as
+profit-taking (a dip worth buying) and a pullback that trades as heavily as
+the rally as distribution (likely to keep falling). The board measures this
+for every candidate: the heaviest m5 volume on the leg up into the peak, and
+the heaviest m5 volume once price is `PULLBACK_STARTED_PCT` below that peak.
+A new high after a dip starts a fresh leg. Each buy signal is tagged with:
+
+| Tag | Dip volume / rally volume |
+| --- | --- |
+| `LIGHT` | 0.6x or less |
+| `NORMAL` | between 0.6x and 1.0x |
+| `HEAVY` | 1.0x or more |
+| `UNKNOWN` | no dip measured (most MOMENTUM BUY and EARLY BUY signals) |
+
+DEX Screener's m5 volume is a rolling five-minute window, so the first polls
+of a dip still include the rally's tail. That pushes the ratio up, so a
+`LIGHT` tag is conservative. The volume is total volume, not sell volume.
+The cut-offs are research choices and have not been backtested.
+
+`report` splits each signal type by this tag. The matching entry rule is off
+by default:
+
+```bash
+# Refuse BUY ZONE / BUY NOW entries whose dip reached 1.0x the rally's
+# volume, or whose dip volume was never measured. MOMENTUM BUY and
+# EARLY BUY are unaffected. Applies to live and every paper book that
+# uses the hunter entry check.
+BUY_ZONE_MAX_PULLBACK_VOLUME_RATIO=1.0
+```
+
+Switch it on only when BUY ZONE's `LIGHT` (or `LIGHT`+`NORMAL`) bucket beats
+`HEAVY` on test data with non-overlapping intervals and 100+ test signals.
+A higher win rate alone is not enough: the rule must also raise profit per
+trade after costs, since it can drop winners along with losers.
+
+## Price-volume confirmation engine
+
+`solana_launch_guard/price_volume.py` classifies every board token from its
+own recent polls (price, rolling m5 volume, m5 buy/sell counts, liquidity),
+using only polls at or before the moment being judged. Volume is
+confirmation only: no state buys or sells by itself.
+
+**Where it sits.** quote → `RecommendationBook` (keeps each candidate's
+recent polls, stores `pv_*` fields on the candidate and in the snapshot)
+→ `price_volume.entry_block_reason`, the one gate shared by the hunter
+entry check (`assess_entry`, so live and every paper book), auto-buy and
+copy trades → existing risk arbiter, live gates and executor (untouched).
+For held tokens, `assess_exit` can add a price-volume exit only when
+`PV_EXIT_ENABLED=true`, ranked below every existing stop.
+
+**States.** BULL_CONFIRMED, BULL_WEAKENING, BEAR_CONFIRMED, BEAR_WEAKENING,
+WATCH; pullback episodes as HEALTHY_DIP_CANDIDATE → HEALTHY_DIP_CONFIRMED
+(light dip, rebound on re-expanding volume, buyers ≥ 55%), PULLBACK,
+DEAD_CAT_BOUNCE, BREAKDOWN_RISK; ACCUMULATION_CANDIDATE →
+ACCUMULATION_BREAKOUT; DISTRIBUTION_CANDIDATE; VOLUME_SHOCK →
+BULL_EXHAUSTION / SELLING_CLIMAX_CANDIDATE; UNKNOWN (under 5 minutes of
+history). Each reading also carries 1m/5m/15m reads, RVOL (current m5 over
+the lookback median, excluding the last 5 minutes), a 0–100 score
+(trend 25, RVOL 25, buyers 20, liquidity 15, persistence 15), a volume
+quality score, a held-position action (HOLD … EXIT_REVIEW) and a reason.
+`PRICE-VOLUME` log lines explain every buy signal; the dashboard shows
+the state on each candidate.
+
+**What the feed cannot give.** Per-side volume, trade sizes, unique
+wallets and wallet concentration are not in DEX Screener's data. "Sell
+volume" is volume on down-ticks; volume quality checks trade count,
+average trade size vs. the pool, churn vs. liquidity, and volume spikes
+with no price response. Consecutive identical polls (cached responses)
+are ignored.
+
+**Settings** (`.env.example` lists them all; all off or neutral by
+default):
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `PV_ENABLED` | `false` | Gate entries at all |
+| `PV_MODE` | `veto` | `veto`: block VETO states and poor volume quality. `confirm`: also require an entry state confirmed on `PV_CONFIRMATIONS_REQUIRED` of the last `PV_CONFIRMATION_WINDOW` polls |
+| `PV_SIGNALS` | `MOMENTUM BUY` | Paths gated: board decisions and/or `COPY` |
+| `PV_BLOCK_UNKNOWN` | `true` | Too little history blocks (missing data is never favourable) |
+| `PV_EXIT_ENABLED` | `false` | Allow the EXIT_REVIEW reading to close a position |
+
+### Evidence so far (replay of 2026-09-25 to 2026-10-01)
+
+`launch-guard-eval pv-backtest` rebuilt each signal's volume history from
+`intelligence_scores` (market cap as the price proxy) and simulated trades
+with the live-style ladder at 60 bps per side. Only 359 of 1,087 signals had
+volume history in the 2 minutes before they fired, from 23 tokens, so
+**none of this meets the 100-test-trade rule**:
+
+| Signals with history | Current | PV veto mode | PV confirm 3/5 |
+| --- | --- | --- | --- |
+| MOMENTUM BUY (95) | 21% win, $-0.092/trade, PF 0.74 | 24% win, $+0.009, PF 1.03 (49 trades) | 3 trades, all losses |
+| BUY ZONE (39) | 13% win, $-0.059 | 4% win, $-0.154 (25) | none |
+| BUY NOW (157) | 2% win, $-0.129 | 1% win, $-0.141 (91) | none |
+| EARLY BUY (68) | 6% win, $-0.152 | 0% win, $-0.131 (21) | none |
+
+- Supported (weakly): for MOMENTUM BUY, BULL_CONFIRMED signals did best
+  (+$0.37/trade, n=9) and BULL_WEAKENING (−$0.39, n=21), DISTRIBUTION
+  (−$0.46, n=11) and WATCH (−$0.36, n=14) worst. That is why the default
+  scope is MOMENTUM BUY only.
+- Not supported: vetoing BUY ZONE or BUY NOW (it removed the better
+  trades); vetoing EARLY BUY (slightly smaller loss per trade but no
+  winners left, 21 trades); the 3-of-5 persistence rule (2/3, 3/5 and 4/6
+  left 6, 3 and 1 momentum trades, each set net losing); ACCUMULATION_BREAKOUT
+  entries (−$0.20, n=6); BEAR_CONFIRMED as a bad sign for momentum entries
+  was too rare to judge (n=3).
+- Exits: closing on EXIT_REVIEW changed nothing measurable (the ladder's
+  stops and stagnation exit already fire first); closing on REDUCE moved
+  the overall result by under one cent per trade.
+
+From now on the board records every poll to `board_samples` (true price,
+deduplicated), so later replays cover every signal instead of about a
+third. Re-run, and enable only what clears the bar:
+
+```bash
+launch-guard-eval pv-backtest --slippage-bps 60
+launch-guard-eval report --exit-model ladder --slippage-bps 60   # "pv:" split
+```
+
 ## Restricting to a time window
 
 `report` and `sweep` take `--since` to use only decisions from a given local

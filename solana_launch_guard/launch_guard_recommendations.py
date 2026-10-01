@@ -7,6 +7,7 @@ import time
 
 from .launch_guard_state import LaunchGuardState
 from .market_structure import classify_candle_pattern
+from .price_volume import explain
 from .recommendations import (
     ACTIONABLE_BUY_DECISIONS,
     build_snapshot,
@@ -50,11 +51,17 @@ class RecommendationMonitorMixin(LaunchGuardState):
                         sources=candidate.sources,
                     ),
                     sources=",".join(candidate.sources),
+                    pullback_volume=candidate.pullback_volume_label,
+                    pv_state=candidate.pv_state,
                 )
             except Exception as exc:  # noqa: BLE001 - evaluation must not break the loop
                 LOGGER.warning("Could not record %s signal for %s: %s",
                                decision, candidate.symbol, exc)
                 continue
+            LOGGER.info(
+                "PRICE-VOLUME %s %s\n%s", decision, candidate.symbol,
+                explain(self.recommendations.price_volume(key), candidate.symbol),
+            )
             if candidate.chain != "solana":
                 continue
             try:
@@ -140,6 +147,10 @@ class RecommendationMonitorMixin(LaunchGuardState):
                     LOGGER.info("\n%s", format_recommendations(ranked, color=use_color))
 
             self._record_buy_signals()
+            try:
+                self.store.save_board_samples(self.recommendations.drain_pv_samples())
+            except Exception as exc:  # noqa: BLE001 - evaluation must not break the loop
+                LOGGER.warning("Could not record board samples: %s", exc)
 
             if self.notifier is not None:
                 notification_candidates = list(
