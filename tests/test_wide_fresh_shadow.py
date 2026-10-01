@@ -99,6 +99,35 @@ def test_the_hype_pattern_is_blocked_after_one_round_trip(tmp_path):
     assert blocked["entry"] is None
 
 
+def test_the_block_survives_a_process_restart(tmp_path):
+    """fresh_gate is read from and written to disk on every call - nothing
+    is held in memory between cycles - so a second WideFreshCapitalBook
+    instance pointed at the same file (standing in for a fresh `launch-guard
+    -wide-fresh` process after a restart) must see the same gate state and
+    refuse the same re-buy, not reset because the process did."""
+    mint = "H" * 44
+    path = tmp_path / "wide_fresh.json"
+    first_process = WideFreshCapitalBook(path)
+    first_process.initialize(30)
+    _run(first_process, _snapshot([
+        candidate(mint=mint, decision="EARLY BUY", price=0.9, peak_price=1.0)]))
+    _run(first_process, _snapshot([
+        candidate(mint=mint, decision="EARLY BUY", price=0.6, peak_price=1.0)]))
+    assert mint not in first_process.load()["agents"][WIDE_FRESH_AGENT_ID]["positions"]
+
+    # A brand new book object, as `main()` would construct on the next run -
+    # no state shared with `first_process` except the file on disk.
+    restarted_process = WideFreshCapitalBook(path)
+    blocked = _run(restarted_process, _snapshot([
+        candidate(mint=mint, decision="EARLY BUY", price=0.92, peak_price=0.98)]))
+    assert blocked["entry"] is None
+
+    # And it still recognizes a genuine new high after the "restart".
+    allowed = _run(restarted_process, _snapshot([
+        candidate(mint=mint, decision="EARLY BUY", price=1.15, peak_price=1.3)]))
+    assert allowed["entry"] is not None and allowed["entry"]["mint"] == mint
+
+
 def test_a_real_new_high_lets_it_back_in(tmp_path):
     mint = "H" * 44
     book = _book(tmp_path)
