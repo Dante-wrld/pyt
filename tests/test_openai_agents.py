@@ -6,6 +6,7 @@ import time
 
 from solana_launch_guard.agents import AgentRole
 from solana_launch_guard.agent_cli import build_parser, friendly_api_error, _priced_sell_signal, _solana_opportunity, _snapshot_is_fresh, shadow_once
+from solana_launch_guard.agent_cli import HunterRulesModel
 from solana_launch_guard.agent_capital import CapitalBook
 from solana_launch_guard.openai_agents import (
     OpenAIProposalModel,
@@ -92,6 +93,7 @@ def test_core_cycle_reviews_sell_before_hunter(tmp_path, monkeypatch):
     portfolio.write_text(json.dumps({"generated_at": time.time(), "signals": [{"chain": "solana", "token_address": "B" * 32, "decision": "EXIT WARNING", "current_price": 1, "current_value_usd": 2, "liquidity_usd": 20000}]}))
     monkeypatch.setenv("RECOMMENDATION_SNAPSHOT_PATH", str(recommendations))
     monkeypatch.setenv("PORTFOLIO_SNAPSHOT_PATH", str(portfolio))
+    monkeypatch.setenv("AGENT_COPY_SIGNAL_PATH", str(tmp_path / "missing_copy.json"))
     monkeypatch.setenv("AGENT_DECISION_LOG_PATH", str(tmp_path / "decisions.jsonl"))
     book = CapitalBook(tmp_path / "capital.json")
     book.initialize(30)
@@ -109,6 +111,7 @@ def test_shadow_buy_updates_reported_cash_and_sell_approval_does_not(tmp_path, m
     portfolio.write_text(json.dumps({"generated_at": time.time(), "signals": [{"chain": "solana", "token_address": "B" * 32, "decision": "EXIT WARNING", "current_price": 1, "current_value_usd": 2, "liquidity_usd": 20000}]}))
     monkeypatch.setenv("RECOMMENDATION_SNAPSHOT_PATH", str(recommendations))
     monkeypatch.setenv("PORTFOLIO_SNAPSHOT_PATH", str(portfolio))
+    monkeypatch.setenv("AGENT_COPY_SIGNAL_PATH", str(tmp_path / "missing_copy.json"))
     monkeypatch.setenv("AGENT_DECISION_LOG_PATH", str(tmp_path / "decisions.jsonl"))
     book = CapitalBook(tmp_path / "capital.json")
     book.initialize(30)
@@ -213,6 +216,7 @@ def test_manager_reads_loss_reviews_but_cannot_execute_rebuy(tmp_path, monkeypat
                                      "signals": [], "loss_sale_reviews": [review]}))
     monkeypatch.setenv("RECOMMENDATION_SNAPSHOT_PATH", str(tmp_path / "missing.json"))
     monkeypatch.setenv("PORTFOLIO_SNAPSHOT_PATH", str(portfolio))
+    monkeypatch.setenv("AGENT_COPY_SIGNAL_PATH", str(tmp_path / "missing_copy.json"))
     monkeypatch.setenv("AGENT_DECISION_LOG_PATH", str(tmp_path / "decisions.jsonl"))
     book = CapitalBook(tmp_path / "capital.json")
     book.initialize(30)
@@ -251,3 +255,92 @@ def test_credit_error_is_explained_without_a_traceback_message():
     message = friendly_api_error(error)
     assert "credits are exhausted" in message
     assert "No trade was executed" in message
+
+
+def _watched(mint, score, state):
+    return {"mint": mint, "signal_score": score}, state
+
+
+def _hunter_context(*pairs):
+    watched = [w for w, _ in pairs]
+    reviews = {w["mint"]: {"state": s} for w, s in pairs}
+    return {"recovery_reviews": reviews, "watched_candidates": watched}
+
+
+def test_hunter_rules_model_picks_the_best_buy_ready_candidate_with_no_api_call():
+    model = HunterRulesModel()
+    context = _hunter_context(
+        _watched("A" * 32, 60, "WATCH"),
+        _watched("B" * 32, 90, "BUY_READY"),
+        _watched("C" * 32, 75, "BUY_READY"),
+    )
+    proposal = model.propose(role=AgentRole.OPPORTUNITY_HUNTER, context=context)
+    assert proposal["action"] == "BUY"
+    assert proposal["mint"] == "B" * 32
+    assert proposal["requested_usd"] == HunterRulesModel.HUNTER_ORDER_USD
+    assert proposal["confidence"] >= 0.65  # clears RiskPolicy.minimum_confidence
+
+
+def test_hunter_rules_model_holds_with_no_buy_ready_candidate():
+    model = HunterRulesModel()
+    context = _hunter_context(_watched("A" * 32, 99, "WATCH"))
+    proposal = model.propose(role=AgentRole.OPPORTUNITY_HUNTER, context=context)
+    assert proposal["action"] == "HOLD"
+
+
+def test_hunter_rules_model_delegates_other_roles_to_its_fallback():
+    class FallbackSpy:
+        def __init__(self):
+            self.calls = []
+
+        def propose(self, *, role, context):
+            self.calls.append(role)
+            return {"action": "HOLD", "mint": "", "confidence": 1, "thesis": "fallback"}
+
+    fallback = FallbackSpy()
+    model = HunterRulesModel(fallback=fallback)
+    model.propose(role=AgentRole.PORTFOLIO_MANAGER, context={})
+    model.propose(role=AgentRole.COPY_TRADER, context={})
+    assert fallback.calls == [AgentRole.PORTFOLIO_MANAGER, AgentRole.COPY_TRADER]
+
+
+def test_hunter_rules_model_without_a_fallback_holds_other_roles_instead_of_erroring():
+    model = HunterRulesModel()
+    proposal = model.propose(role=AgentRole.PORTFOLIO_MANAGER, context={})
+    assert proposal["action"] == "HOLD"
+
+
+def test_shadow_once_buys_through_hunter_rules_with_zero_model_calls(
+    tmp_path, monkeypatch
+):
+    """End to end: hunter-v1 reaches a real shadow fill using only
+    assess_entry's own BUY_READY verdict, confirming no API call happens on
+    hunter's path at all - not even indirectly through a fallback."""
+    mint = "A" * 32
+    recommendations = tmp_path / "recommendations.json"
+    recommendations.write_text(json.dumps({"generated_at": time.time(), "candidates": [
+        {"chain": "solana", "mint": mint, "symbol": "A", "decision": "BUY ZONE",
+         "price": 1, "price_currency": "USD", "peak_price": 1.1,
+         "pullback_from_peak_pct": 9.09, "liquidity_usd": 20000,
+         "initial_liquidity_usd": 20000, "quoted_at": time.time(),
+         "pair_created_at_ms": time.time() * 1000 - 10 * 86_400_000,
+         "price_change_m5_pct": 3, "momentum_label": "RISING",
+         "volume_label": "RISING", "buys_m5": 20, "sells_m5": 10,
+         "buy_sell_ratio": 2, "risk_label": "MEDIUM", "signal_score": 80,
+         "entry_confirmation_count": 3, "entry_confirmation_required": 3},
+    ]}))
+    monkeypatch.setenv("RECOMMENDATION_SNAPSHOT_PATH", str(recommendations))
+    monkeypatch.setenv("PORTFOLIO_SNAPSHOT_PATH", str(tmp_path / "missing.json"))
+    monkeypatch.setenv("AGENT_DECISION_LOG_PATH", str(tmp_path / "decisions.jsonl"))
+    # Isolated from whatever the live freeze happens to be set to: this
+    # test is about HunterRulesModel needing no model call, not about the
+    # freeze (test_shadow_live_entry_gate.py already covers that).
+    monkeypatch.setenv("ENTRY_ALLOWED_DECISIONS", "BUY ZONE")
+    monkeypatch.setenv("ENTRY_MIN_TOKEN_AGE_DAYS", "3")
+    book = CapitalBook(tmp_path / "capital.json")
+    book.initialize(30)
+
+    result = shadow_once(HunterRulesModel(), book, core_only=True)
+    [hunter] = [a for a in result["agents"] if a["agent_id"] == "hunter-v1"]
+    assert hunter["arbitration"]["approved"] is True
+    assert hunter["shadow_fill"]["amount_usd"] == HunterRulesModel.HUNTER_ORDER_USD

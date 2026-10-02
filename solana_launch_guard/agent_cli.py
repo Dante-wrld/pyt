@@ -14,6 +14,7 @@ from openai import OpenAIError
 from .agent_capital import CapitalBook
 from .agents import (
     AgentCoordinator,
+    AgentModel,
     AgentRecord,
     AgentRole,
     Arbitration,
@@ -337,6 +338,51 @@ def funnel_report() -> dict[str, object]:
     }
 
 
+class HunterRulesModel:
+    """hunter-v1 doesn't need a model call to pick what to buy: assess_entry
+    (surfaced to every hunter context as recovery_reviews) already produces a
+    deterministic BUY_READY verdict per candidate - the same rule wide_cycle
+    already uses to pick its own entry in wide_shadow.py (best BUY_READY
+    candidate by signal_score), with no OpenAI call. hunter-v1 now keeps
+    trading through an API outage or exhausted credits exactly like
+    wide-v1/wide-fresh-v1/momentum-take-v1 already do. Portfolio-v1 and
+    copy-v1 still go through `fallback` - their mandate (exit judgment,
+    selective leader-copy) isn't a single existing rule the way hunter's
+    board selection is."""
+
+    HUNTER_ORDER_USD = 5.0
+
+    def __init__(self, fallback: AgentModel | None = None) -> None:
+        self.fallback = fallback
+
+    def propose(
+        self, *, role: AgentRole, context: dict[str, object]
+    ) -> dict[str, object]:
+        if role is not AgentRole.OPPORTUNITY_HUNTER:
+            if self.fallback is None:
+                return {"action": "HOLD", "mint": "", "confidence": 0,
+                        "thesis": "no model configured for this role"}
+            return self.fallback.propose(role=role, context=context)
+        reviews = context.get("recovery_reviews")
+        reviews = reviews if isinstance(reviews, dict) else {}
+        watched = context.get("watched_candidates")
+        watched = watched if isinstance(watched, list) else []
+        ready = [
+            c for c in watched
+            if isinstance(c, dict)
+            and reviews.get(c.get("mint"), {}).get("state") == "BUY_READY"
+        ]
+        if not ready:
+            return {"action": "HOLD", "mint": "", "confidence": 1.0,
+                    "thesis": "no watched candidate is BUY_READY"}
+        pick = max(ready, key=lambda c: float(c.get("signal_score") or 0))
+        return {
+            "action": "BUY", "mint": pick["mint"],
+            "requested_usd": self.HUNTER_ORDER_USD, "confidence": 0.9,
+            "thesis": f"rules-based entry: BUY_READY, score {pick.get('signal_score')}",
+        }
+
+
 def shadow_core_loop(book: CapitalBook, *, interval_seconds: int = 60) -> None:
     if interval_seconds < 60:
         raise ValueError("shadow loop interval must be at least 60 seconds")
@@ -363,7 +409,10 @@ def shadow_core_loop(book: CapitalBook, *, interval_seconds: int = 60) -> None:
                     copy_data.get("generated_at") if fresh[2] else None,
                 )
                 if any(fresh) and signature != last_seen:
-                    result = shadow_once(OpenAIProposalModel(), book, core_only=True)
+                    result = shadow_once(
+                        HunterRulesModel(fallback=OpenAIProposalModel()),
+                        book, core_only=True,
+                    )
                     print(json.dumps(result, indent=2), flush=True)
                     last_seen = signature
                 elif not any(fresh):
@@ -379,7 +428,7 @@ def shadow_core_loop(book: CapitalBook, *, interval_seconds: int = 60) -> None:
         print("Shadow agents stopped.", flush=True)
 
 
-def shadow_once(model: OpenAIProposalModel | None, book: CapitalBook, *, portfolio_sell_only: bool = False, core_only: bool = False) -> dict[str, object]:
+def shadow_once(model: AgentModel | None, book: CapitalBook, *, portfolio_sell_only: bool = False, core_only: bool = False) -> dict[str, object]:
     recommendations = _read_json(
         os.getenv("RECOMMENDATION_SNAPSHOT_PATH", "launch_guard_recommendations.json")
     )
@@ -750,13 +799,13 @@ def main() -> None:
             else:
                 result = {"status": "NOT_STARTED", "agents": {}}
         elif args.shadow_once:
-            model: OpenAIProposalModel | None = OpenAIProposalModel()
+            model: AgentModel | None = HunterRulesModel(fallback=OpenAIProposalModel())
             result = shadow_once(model, book)
         elif args.shadow_portfolio_sell_once:
             model = OpenAIProposalModel() if _priced_sell_signal(_read_json(os.getenv("PORTFOLIO_SNAPSHOT_PATH", "launch_guard_portfolio.json")).get("signals")) else None
             result = shadow_once(model, book, portfolio_sell_only=True)
         elif args.shadow_core_once:
-            model = OpenAIProposalModel()
+            model = HunterRulesModel(fallback=OpenAIProposalModel())
             result = shadow_once(model, book, core_only=True)
         elif args.shadow_core_loop:
             book.accounts()

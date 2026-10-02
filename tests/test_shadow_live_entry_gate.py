@@ -18,6 +18,7 @@ def _run(tmp_path, monkeypatch, allowed="BUY ZONE", **row):
                                     "candidates": [candidate(**row)]}))
     monkeypatch.setenv("RECOMMENDATION_SNAPSHOT_PATH", str(snapshot))
     monkeypatch.setenv("PORTFOLIO_SNAPSHOT_PATH", str(tmp_path / "missing.json"))
+    monkeypatch.setenv("AGENT_COPY_SIGNAL_PATH", str(tmp_path / "missing_copy.json"))
     monkeypatch.setenv("AGENT_DECISION_LOG_PATH", str(tmp_path / "log.jsonl"))
     # The frozen live profile.
     monkeypatch.setenv("ENTRY_ALLOWED_DECISIONS", allowed)
@@ -143,6 +144,7 @@ def test_daily_loss_limit_matches_live(tmp_path, monkeypatch, loss, approved):
         candidate(pair_created_at_ms=_old())]}))
     monkeypatch.setenv("RECOMMENDATION_SNAPSHOT_PATH", str(snapshot))
     monkeypatch.setenv("PORTFOLIO_SNAPSHOT_PATH", str(tmp_path / "missing.json"))
+    monkeypatch.setenv("AGENT_COPY_SIGNAL_PATH", str(tmp_path / "missing_copy.json"))
     monkeypatch.setenv("AGENT_DECISION_LOG_PATH", str(tmp_path / "log.jsonl"))
     book = CapitalBook(tmp_path / "capital.json")
     book.initialize(30)
