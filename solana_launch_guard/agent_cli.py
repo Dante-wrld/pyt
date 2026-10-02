@@ -128,12 +128,14 @@ def build_parser() -> argparse.ArgumentParser:
     group.add_argument(
         "--shadow-core-once",
         action="store_true",
-        help="review only Solana opportunities and priced sell guidance; skip copy trader",
+        help="review Solana opportunities and priced sell guidance, plus copy "
+             "trader when a leader signal is fresh",
     )
     group.add_argument(
         "--shadow-core-loop",
         action="store_true",
-        help="run Hunter and Portfolio Manager every 60 seconds until Ctrl+C",
+        help="run Hunter and Portfolio Manager every 60 seconds until Ctrl+C, "
+             "plus Copy Trader whenever a leader signal is fresh",
     )
     group.add_argument(
         "--live-test-preflight",
@@ -338,29 +340,37 @@ def funnel_report() -> dict[str, object]:
 def shadow_core_loop(book: CapitalBook, *, interval_seconds: int = 60) -> None:
     if interval_seconds < 60:
         raise ValueError("shadow loop interval must be at least 60 seconds")
-    last_seen: tuple[object, object] | None = None
+    last_seen: tuple[object, object, object] | None = None
     try:
         while True:
             try:
                 recommendations = _read_json(os.getenv("RECOMMENDATION_SNAPSHOT_PATH", "launch_guard_recommendations.json"))
                 portfolio = _read_json(os.getenv("PORTFOLIO_SNAPSHOT_PATH", "launch_guard_portfolio.json"))
+                copy_data = _read_json(os.getenv(
+                    "AGENT_COPY_SIGNAL_PATH", "launch_guard_copy_signals.json"
+                ))
                 fresh = (
                     _snapshot_is_fresh(recommendations) and bool(_solana_opportunity(recommendations.get("candidates")) or (recommendations.get("tracked_candidates") and (book.load() or {}).get("agents", {}).get("hunter-v1", {}).get("positions"))),
                     _snapshot_is_fresh(portfolio) and bool(
                         _priced_sell_signal(portfolio.get("signals"))
                         or portfolio.get("loss_sale_reviews")
                     ),
+                    _snapshot_is_fresh(copy_data) and bool(copy_data.get("signals")),
                 )
                 signature = (
                     recommendations.get("generated_at") if fresh[0] else None,
                     portfolio.get("generated_at") if fresh[1] else None,
+                    copy_data.get("generated_at") if fresh[2] else None,
                 )
                 if any(fresh) and signature != last_seen:
                     result = shadow_once(OpenAIProposalModel(), book, core_only=True)
                     print(json.dumps(result, indent=2), flush=True)
                     last_seen = signature
                 elif not any(fresh):
-                    print("No fresh eligible Hunter or Portfolio input; waiting.", flush=True)
+                    print(
+                        "No fresh eligible Hunter, Portfolio or Copy input; waiting.",
+                        flush=True,
+                    )
             except (OpenAIError, ValueError, RuntimeError, OSError) as exc:
                 message = friendly_api_error(exc) if isinstance(exc, OpenAIError) else str(exc)
                 print(f"Shadow cycle skipped: {message}", flush=True)
@@ -477,7 +487,9 @@ def shadow_once(model: OpenAIProposalModel | None, book: CapitalBook, *, portfol
             shadow_reviews.append(review)
     candidate = _solana_opportunity(recommendations.get("candidates")) if core_only and _snapshot_is_fresh(recommendations) else ({} if core_only else _first_dict(recommendations.get("candidates")))
     holding = _priced_sell_signal(portfolio.get("signals")) if (portfolio_sell_only or core_only) and _snapshot_is_fresh(portfolio) else ({} if portfolio_sell_only or core_only else _first_dict(portfolio.get("signals")))
-    leader = _first_dict(copy_data.get("signals"))
+    leader = (
+        _first_dict(copy_data.get("signals")) if _snapshot_is_fresh(copy_data) else {}
+    )
     loss_sale_reviews_raw = portfolio.get("loss_sale_reviews")
     reviews = (
         [item for item in loss_sale_reviews_raw if isinstance(item, dict)]
@@ -506,9 +518,14 @@ def shadow_once(model: OpenAIProposalModel | None, book: CapitalBook, *, portfol
     if core_only:
         # Review portfolio exits first: each model request consumes time, and
         # a sell quote may age out while Hunter evaluates a separate token.
-        inputs = tuple(item for item in (inputs[1], inputs[0]) if any(item[2].values()))
+        # Copy-v1 only joins when it actually has a fresh leader signal -
+        # unlike hunter/portfolio, "core" never means skipping it outright,
+        # just that an empty-context agent costs nothing to leave out.
+        inputs = tuple(
+            item for item in (inputs[1], inputs[0], inputs[2]) if any(item[2].values())
+        )
         if not inputs:
-            return {"mode": "shadow", "live_execution": False, "agents": [], "hunter_candidate_reviews": candidate_reviews, "hunter_position_reviews": shadow_reviews, "reason": "no eligible Solana opportunity or priced sell recommendation", "capital": book.public_status()}
+            return {"mode": "shadow", "live_execution": False, "agents": [], "hunter_candidate_reviews": candidate_reviews, "hunter_position_reviews": shadow_reviews, "reason": "no eligible Solana opportunity, priced sell recommendation, or leader copy signal", "capital": book.public_status()}
     if model is None:
         raise ValueError("an agent model is required for available shadow inputs")
     hunter_shadow_arbiter = RiskArbiter(replace(
@@ -630,6 +647,16 @@ def shadow_once(model: OpenAIProposalModel | None, book: CapitalBook, *, portfol
             arbitration = Arbitration(False, 0, ("no confirmed net-loss rebound review for this mint",))
         shadow_position = None
         shadow_fill = None
+        if (proposal.action is TradeAction.BUY and arbitration.approved
+                and proposal.mint not in fresh_quotes):
+            # Hunter's own buy path already filters this earlier (a watched
+            # quote is required before arbitration runs at all); this is the
+            # backstop for any other BUY-capable role - e.g. copy-v1, whose
+            # proposed mint can age off the board between its own signal
+            # firing and this cycle's quote refresh.
+            arbitration = Arbitration(
+                False, 0, ("buy mint lacks a fresh watched quote",)
+            )
         if arbitration.approved and proposal.action is TradeAction.BUY:
             selected = fresh_quotes[proposal.mint]
             price = float(selected["price"])

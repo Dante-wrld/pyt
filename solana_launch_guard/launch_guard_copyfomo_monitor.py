@@ -53,6 +53,15 @@ class CopyFomoMonitorMixin(LaunchGuardState):
         ).get(trade.wallet)
         if leader and trade.side == "SELL":
             self._record_leader_sell(leader, trade, symbol)
+        if leader and trade.side == "BUY":
+            usd_value = (
+                trade.token_delta * quote.price_usd
+                if quote and quote.price_usd else 0.0
+            )
+            self.record_leader_buy(
+                leader, trade.wallet, trade.mint,
+                quote.price_usd if quote else None, usd_value,
+            )
         LOGGER.info(
             "%s %-4s chain=solana token=%s mint=%s amount=%.8g signature=%s",
             f"COPYFOMO-LEADER {leader}" if leader else "COPYFOMO",

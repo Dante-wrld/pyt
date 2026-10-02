@@ -131,6 +131,80 @@ def test_shadow_buy_updates_reported_cash_and_sell_approval_does_not(tmp_path, m
     assert book.public_status()["agents"][0]["cash_usd"] == 25
 
 
+def test_core_loop_includes_copy_trader_when_a_leader_signal_is_fresh(
+    tmp_path, monkeypatch
+):
+    """core_only used to drop copy-v1 outright (agent_cli.py's own
+    --shadow-core-once help text said "skip copy trader"); it now only
+    drops it when there's nothing for it to evaluate, same as hunter and
+    portfolio - so it joins the loop exactly when a leader signal exists."""
+    mint = "A" * 32
+    recommendations = tmp_path / "recommendations.json"
+    copy_signals = tmp_path / "copy_signals.json"
+    recommendations.write_text(json.dumps({"generated_at": time.time(), "candidates": [
+        {"chain": "solana", "mint": mint, "symbol": "A", "decision": "BUY ZONE",
+         "price": 1, "price_currency": "USD", "liquidity_usd": 20000,
+         "quoted_at": time.time()},
+    ]}))
+    copy_signals.write_text(json.dumps({"generated_at": time.time(), "signals": [
+        {"leader_wallet": "LEADER_WALLET", "mint": mint, "liquidity_usd": 20000,
+         "price_move_since_entry_pct": 5},
+    ]}))
+    monkeypatch.setenv("RECOMMENDATION_SNAPSHOT_PATH", str(recommendations))
+    monkeypatch.setenv("PORTFOLIO_SNAPSHOT_PATH", str(tmp_path / "missing.json"))
+    monkeypatch.setenv("AGENT_COPY_SIGNAL_PATH", str(copy_signals))
+    monkeypatch.setenv("AGENT_DECISION_LOG_PATH", str(tmp_path / "decisions.jsonl"))
+    book = CapitalBook(tmp_path / "capital.json")
+    book.initialize(30)
+
+    class Model:
+        def propose(self, *, role, context):
+            if role is AgentRole.COPY_TRADER:
+                assert context["observed_leader_trade"]["mint"] == mint
+                leader_wallet = context["observed_leader_trade"]["leader_wallet"]
+                return {"action": "BUY", "mint": mint, "requested_usd": 5,
+                        "confidence": 0.9, "thesis": "follow leader",
+                        "leader_wallet": leader_wallet}
+            return {"action": "HOLD", "mint": "", "confidence": 0.8, "thesis": "n/a"}
+
+    result = shadow_once(Model(), book, core_only=True)
+    [copy] = [a for a in result["agents"] if a["agent_id"] == "copy-v1"]
+    assert copy["arbitration"]["approved"] is True
+    assert copy["shadow_fill"]["amount_usd"] == 5
+
+
+def test_core_loop_copy_buy_is_rejected_without_a_fresh_watched_quote(
+    tmp_path, monkeypatch
+):
+    """copy-v1's proposed mint can age off the board between its own
+    signal firing and this cycle's quote refresh; this must be a clean
+    rejection, not a KeyError in the buy-fill path."""
+    mint = "A" * 32
+    copy_signals = tmp_path / "copy_signals.json"
+    copy_signals.write_text(json.dumps({"generated_at": time.time(), "signals": [
+        {"leader_wallet": "LEADER_WALLET", "mint": mint, "liquidity_usd": 20000,
+         "price_move_since_entry_pct": 5},
+    ]}))
+    monkeypatch.setenv("RECOMMENDATION_SNAPSHOT_PATH", str(tmp_path / "missing.json"))
+    monkeypatch.setenv("PORTFOLIO_SNAPSHOT_PATH", str(tmp_path / "missing2.json"))
+    monkeypatch.setenv("AGENT_COPY_SIGNAL_PATH", str(copy_signals))
+    monkeypatch.setenv("AGENT_DECISION_LOG_PATH", str(tmp_path / "decisions.jsonl"))
+    book = CapitalBook(tmp_path / "capital.json")
+    book.initialize(30)
+
+    class Model:
+        def propose(self, *, role, context):
+            return {"action": "BUY", "mint": mint, "requested_usd": 5,
+                    "confidence": 0.9, "thesis": "follow leader",
+                    "leader_wallet": "LEADER_WALLET"}
+
+    result = shadow_once(Model(), book, core_only=True)
+    [copy] = [a for a in result["agents"] if a["agent_id"] == "copy-v1"]
+    assert copy["arbitration"]["approved"] is False
+    assert "buy mint lacks a fresh watched quote" in copy["arbitration"]["reasons"]
+    assert copy["shadow_fill"] is None
+
+
 def test_manager_reads_loss_reviews_but_cannot_execute_rebuy(tmp_path, monkeypatch):
     portfolio = tmp_path / "portfolio.json"
     review = {"sale_id": "tx1", "token_address": "B" * 32,

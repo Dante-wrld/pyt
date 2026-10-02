@@ -38,6 +38,7 @@ from .intelligence import CoinIntelligence
 from .launch_guard_auto_buy import AutoBuyMixin
 from .launch_guard_auto_rebuy import AutoRebuyMixin
 from .launch_guard_auto_sell import AutoSellMixin
+from .launch_guard_copy_signals import CopySignalFeedMixin, PendingCopySignal
 from .launch_guard_copyfomo_monitor import CopyFomoMonitorMixin
 from .launch_guard_ingestion import LaunchIngestionMixin
 from .launch_guard_launchlab import LaunchLabFeedMixin
@@ -103,6 +104,7 @@ class LaunchGuard(
     SolanaMomentumFeedMixin,
     LeaderHoldingsFeedMixin,
     CopyFomoMonitorMixin,
+    CopySignalFeedMixin,
 ):
     """Owns shared state (settings, store, broker, risk, oracle, ...) and
     composes the trading behaviors implemented by the mixins above; see
@@ -147,6 +149,8 @@ class LaunchGuard(
         self.buy_signal_last_decision: dict[str, str] = {}
         # mint -> {leader name: token amount}, from the leader-held feed.
         self.leader_holdings: dict[str, dict[str, float]] = {}
+        # mint -> pending leader BUY, from the copy-signal feed.
+        self.copy_signals: dict[str, PendingCopySignal] = {}
         # Separate from structure_scanner so tagging never spends its budget.
         self.signal_candle_scanner = MarketStructureScanner()
         self.signal_tag_tasks: set[asyncio.Task[None]] = set()
@@ -389,6 +393,14 @@ class LaunchGuard(
                     LOGGER.warning(
                         "FEED_LEADER_HOLDINGS is on but COPYFOMO_LEADER_WALLETS "
                         "is empty; leader-held feed inactive"
+                    )
+            if profile.feed_leader_copy_signals:
+                if self.settings.copyfomo_leader_wallets:
+                    tasks.append(asyncio.create_task(self.run_copy_signal_feed()))
+                else:
+                    LOGGER.warning(
+                        "FEED_LEADER_COPY_SIGNALS is on but "
+                        "COPYFOMO_LEADER_WALLETS is empty; copy-signal feed inactive"
                     )
 
         if mode == "robinhood":

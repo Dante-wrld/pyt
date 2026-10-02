@@ -76,6 +76,10 @@ class LaunchGuardState(Protocol):
     entry_block_logged: dict[str, str]
     buy_signal_last_decision: dict[str, str]
     leader_holdings: dict[str, dict[str, float]]
+    # Value shape: launch_guard_copy_signals.PendingCopySignal. Kept as Any
+    # here (like every other mixin-private dict) to avoid a type-only import
+    # cycle - that module imports this one for the mixin base.
+    copy_signals: dict[str, Any]
     signal_candle_scanner: MarketStructureScanner
     signal_tag_tasks: set[asyncio.Task[None]]
 
@@ -85,6 +89,11 @@ class LaunchGuardState(Protocol):
 
     async def _maybe_auto_sell(
         self, signal: PortfolioSignal, balance: SolanaTokenHolding
+    ) -> None: ...
+
+    def record_leader_buy(
+        self, leader: str, leader_wallet: str, mint: str,
+        price_usd: float | None, usd_value: float,
     ) -> None: ...
 
     async def _monitor_auto_rebuys(

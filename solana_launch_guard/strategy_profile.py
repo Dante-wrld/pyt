@@ -30,12 +30,13 @@ class StrategyProfile:
     feed_copyfomo_wallets: bool = True
     feed_multichain: bool = True
     feed_leader_holdings: bool = False
+    feed_leader_copy_signals: bool = False
     entry_allowed_decisions: tuple[str, ...] = ALL_BUY_DECISIONS
     entry_min_token_age_days: float = 0.0
     # A token that ONLY these sources found is never bought live; it is still
     # scored, signalled and tracked. A token another feed also found is not
     # affected, since that feed alone would have put it on the board.
-    entry_shadow_only_sources: tuple[str, ...] = ("leader-held",)
+    entry_shadow_only_sources: tuple[str, ...] = ("leader-held", "leader-copy")
 
     @classmethod
     def from_env(cls) -> StrategyProfile:
@@ -54,11 +55,14 @@ class StrategyProfile:
             feed_copyfomo_wallets=_bool("FEED_COPYFOMO_WALLETS", True),
             feed_multichain=_bool("FEED_MULTICHAIN", True),
             feed_leader_holdings=_bool("FEED_LEADER_HOLDINGS", False),
+            feed_leader_copy_signals=_bool("FEED_LEADER_COPY_SIGNALS", False),
             entry_allowed_decisions=allowed,
             entry_min_token_age_days=_float("ENTRY_MIN_TOKEN_AGE_DAYS", 0.0),
             entry_shadow_only_sources=tuple(
                 s.lower()
-                for s in _csv_upper("ENTRY_SHADOW_ONLY_SOURCES", "leader-held")
+                for s in _csv_upper(
+                    "ENTRY_SHADOW_ONLY_SOURCES", "leader-held,leader-copy"
+                )
             ),
         )
 
