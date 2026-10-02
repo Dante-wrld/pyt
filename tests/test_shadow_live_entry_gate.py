@@ -79,6 +79,52 @@ def test_momentum_buy_is_paused_like_live(tmp_path, monkeypatch):
     assert not result["agents"][0]["arbitration"]["approved"]
 
 
+@pytest.mark.parametrize("row", [
+    {"decision": "BUY NOW"},
+    {"decision": "EARLY BUY"},
+    {"pair_created_at_ms": time.time() * 1000 - DAY_MS},
+    {"sources": ["leader-held"]},
+    # Also satisfy assess_entry's own momentum-confirmation bar (separate
+    # from the live freeze this flag bypasses) so the case isolates what
+    # we're testing, matching test_momentum_buy_does_not_require_a_pullback.
+    {"decision": "MOMENTUM BUY", "price": 1.0, "peak_price": 1.0,
+     "pullback_from_peak_pct": 0, "volume_label": "RISING",
+     "buys_m5": 35, "sells_m5": 20},
+])
+def test_ignore_freeze_buys_what_live_would_skip(tmp_path, monkeypatch, row):
+    """HUNTER_SHADOW_IGNORE_FREEZE lets this paper loop buy what the live
+    freeze blocks, same intent as wide-v1 but through hunter's own
+    model-approved entries. Every case test_signals_live_would_skip_are_not_bought
+    and test_momentum_buy_is_paused_like_live refuse must now go through."""
+    monkeypatch.setenv("HUNTER_SHADOW_IGNORE_FREEZE", "true")
+    row = {"pair_created_at_ms": _old(), **row}
+    result, book = _run(tmp_path, monkeypatch, allowed="BUY ZONE,MOMENTUM BUY",
+                        **row)
+    review = result["hunter_candidate_reviews"][MINT]
+    assert review["state"] == "BUY_READY"
+    assert result["agents"][0]["arbitration"]["approved"]
+    assert MINT in book.load()["agents"]["hunter-v1"]["positions"]
+
+
+def test_ignore_freeze_defaults_off(tmp_path, monkeypatch):
+    """Unset (or any value other than \"true\"), the flag changes nothing -
+    still the frozen live profile."""
+    result, book = _run(tmp_path, monkeypatch, decision="EARLY BUY",
+                        pair_created_at_ms=_old())
+    assert result["hunter_candidate_reviews"][MINT]["state"] == "PAUSED"
+    assert book.load()["agents"]["hunter-v1"]["positions"] == {}
+
+
+def test_ignore_freeze_does_not_touch_the_live_entry_path():
+    """live_trial_runner.decide_hunter_entry (the real money path) has no
+    reference to this flag at all - grep rather than trust a docstring."""
+    import inspect
+
+    from solana_launch_guard import live_trial_runner
+    source = inspect.getsource(live_trial_runner)
+    assert "HUNTER_SHADOW_IGNORE_FREEZE" not in source
+
+
 def _lose_today(book, usd):
     """Record a closed losing trade of `usd` today."""
     book.reserve_shadow_buy(agent_id="hunter-v1", mint="L" * 44, symbol="L",

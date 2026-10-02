@@ -392,14 +392,21 @@ def shadow_once(model: OpenAIProposalModel | None, book: CapitalBook, *, portfol
         and 0 <= time.time() - float(item.get("quoted_at") or 0) <= 15
     } if _snapshot_is_fresh(recommendations) else {}
     # Same gates as the live trial (MOMENTUM BUY pause, strategy profile),
-    # so the shadow hunter only buys what live hunter-v1 would.
+    # so the shadow hunter only buys what live hunter-v1 would - unless
+    # HUNTER_SHADOW_IGNORE_FREEZE is set, which drops only this paper loop's
+    # own gate so it can explore what the freeze blocks, same as wide-v1.
+    # live_trial.py and decide_hunter_entry (the real entry path) never read
+    # this flag and are unaffected either way.
     entry_profile = StrategyProfile.from_env()
+    ignore_freeze = os.getenv("HUNTER_SHADOW_IGNORE_FREEZE", "false").lower() == "true"
+
+    def _hunter_entry_review(candidate: dict) -> dict:
+        review = assess_entry(candidate, recovery_policy)
+        return review if ignore_freeze else live_entry_gate(
+            candidate, review, profile=entry_profile)
+
     candidate_reviews = {
-        item["mint"]: live_entry_gate(
-            fresh_quotes[item["mint"]],
-            assess_entry(fresh_quotes[item["mint"]], recovery_policy),
-            profile=entry_profile,
-        )
+        item["mint"]: _hunter_entry_review(fresh_quotes[item["mint"]])
         for item in observed
         if isinstance(item, dict) and item.get("mint") in fresh_quotes
     }
@@ -582,10 +589,7 @@ def shadow_once(model: OpenAIProposalModel | None, book: CapitalBook, *, portfol
             if selected is None:
                 arbitration = Arbitration(False, 0, ("buy mint lacks a fresh watched quote",))
             else:
-                entry_review = live_entry_gate(
-                    selected, assess_entry(selected, recovery_policy),
-                    profile=entry_profile,
-                )
+                entry_review = _hunter_entry_review(selected)
                 # The live trial's arbiter limits (daily loss 10% of a fixed
                 # $30, impact, liquidity, quote age), in shadow mode. Before
                 # this, the shadow used the generic 3%-of-current-equity daily
