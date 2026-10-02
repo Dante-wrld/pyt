@@ -93,6 +93,15 @@ CONFIG = {
     # rest of the window instead of paying to re-learn the same lesson.
     "repeat_loss_block_count": 2,
     "repeat_loss_window_hours": 24.0,
+    # Entry-time rug filtering: of 2026-09's 7 liquidity-DANGER exits, 3 were
+    # a token being re-bought shortly after its OWN prior DANGER exit, and all
+    # 3 of those re-entries got rug-pulled again within 2-5.6 minutes (traced
+    # in tracker.log). A single liquidity-collapse exit, unlike an ordinary
+    # loss, means this specific pool is actively being drained right now -
+    # waiting for a second one (repeat_loss_block_count) is too slow. This
+    # blocks re-entry after just one.
+    "danger_reentry_block_count": 1,
+    "danger_reentry_window_hours": 24.0,
     "auto_enter": True,
     "history_hours": 6,
     "state_file": "tracker_state.json",
@@ -377,6 +386,7 @@ class Bot:
         self.hist = {t: TokenHistory(self.maxlen) for t in self.watchlist}
         self.positions, self.cooldown, self.total_pnl = {}, {}, 0.0
         self.loss_history: dict[str, list[float]] = {}
+        self.danger_loss_history: dict[str, list[float]] = {}
         self.pnl_before_split, self.pnl_since_split = 0.0, 0.0
         self.last_board_refresh = 0.0
         self._load()
@@ -393,6 +403,9 @@ class Bot:
         self.cooldown = st.get("cooldown", {})
         self.total_pnl = st.get("total_pnl", 0.0)
         self.loss_history = {t: list(v) for t, v in st.get("loss_history", {}).items()}
+        self.danger_loss_history = {
+            t: list(v) for t, v in st.get("danger_loss_history", {}).items()
+        }
         if "pnl_before_split" in st and "pnl_since_split" in st:
             self.pnl_before_split = st["pnl_before_split"]
             self.pnl_since_split = st["pnl_since_split"]
@@ -439,6 +452,7 @@ class Bot:
             "cooldown": self.cooldown,
             "total_pnl": self.total_pnl,
             "loss_history": self.loss_history,
+            "danger_loss_history": self.danger_loss_history,
             "pnl_before_split": self.pnl_before_split,
             "pnl_since_split": self.pnl_since_split,
             "history": {t: [asdict(s) for s in h.snaps][-240:] for t, h in self.hist.items()},
@@ -524,6 +538,15 @@ class Bot:
         recent = [t for t in self.loss_history.get(token, []) if t >= cutoff]
         return len(recent) >= self.cfg["repeat_loss_block_count"]
 
+    def _recently_danger_exited(self, token, now):
+        """True once a token has had this many liquidity-DANGER exits within
+        the window - unlike _is_repeat_offender, defaults to blocking after
+        just one, since a DANGER exit means this specific pool was being
+        actively drained, not merely a losing trade."""
+        cutoff = now - self.cfg["danger_reentry_window_hours"] * 3600
+        recent = [t for t in self.danger_loss_history.get(token, []) if t >= cutoff]
+        return len(recent) >= self.cfg["danger_reentry_block_count"]
+
     def _maybe_enter(self, token, h, snap, score, info):
         if not self.cfg["auto_enter"]:
             return
@@ -537,6 +560,7 @@ class Bot:
             "no_danger": not danger_signals(h),
             "cooldown": since_exit >= self.cfg["reentry_cooldown_min"],
             "not_repeat_offender": not self._is_repeat_offender(token, snap.ts),
+            "no_recent_danger_exit": not self._recently_danger_exited(token, snap.ts),
         }
         log.info("%s: price $%.8g health %.0f | entry checks failing: %s",
                  token[:6], snap.price, score,
@@ -638,6 +662,13 @@ class Bot:
             losses.append(snap.ts)
             cutoff = snap.ts - self.cfg["repeat_loss_window_hours"] * 3600
             self.loss_history[token] = [t for t in losses if t >= cutoff]
+        if reason.startswith("DANGER:"):
+            # Whether or not this particular close happened to be a loss -
+            # the risk flagged is the pool getting drained, not the P&L.
+            danger = self.danger_loss_history.setdefault(token, [])
+            danger.append(snap.ts)
+            cutoff = snap.ts - self.cfg["danger_reentry_window_hours"] * 3600
+            self.danger_loss_history[token] = [t for t in danger if t >= cutoff]
 
 
 async def run():

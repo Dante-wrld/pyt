@@ -158,6 +158,47 @@ def test_repeat_loss_block_expires_after_the_window(bot):
     assert not bot._is_repeat_offender(token, NOW + window_seconds + 200)
 
 
+def test_a_single_danger_exit_blocks_reentry(bot):
+    """Unlike an ordinary loss (needs 2 within the window), one liquidity-
+    DANGER exit blocks re-entry immediately - traced in tracker.log, every
+    re-entry into a token right after its own DANGER exit got rug-pulled
+    again within minutes."""
+    token = "RUGGED"
+    bot.positions[token] = losing_position(NOW)
+    bot._close(token, bot.positions[token], make_snap(NOW),
+                "DANGER: liquidity -56% in 15m")
+    assert bot._recently_danger_exited(token, NOW)
+    assert not bot._is_repeat_offender(token, NOW)  # only one loss either way
+
+
+def test_danger_block_expires_after_the_window(bot):
+    token = "RUGGED"
+    window_seconds = bot.cfg["danger_reentry_window_hours"] * 3600
+    bot.positions[token] = losing_position(NOW)
+    bot._close(token, bot.positions[token], make_snap(NOW),
+                "DANGER: liquidity -56% in 15m")
+    assert bot._recently_danger_exited(token, NOW + 200)
+    assert not bot._recently_danger_exited(token, NOW + window_seconds + 200)
+
+
+def test_an_ordinary_loss_never_counts_as_a_danger_exit(bot):
+    token = "RISKY"
+    bot.positions[token] = losing_position(NOW)
+    bot._close(token, bot.positions[token], make_snap(NOW), "trailing stop confirmed x3")
+    assert not bot._recently_danger_exited(token, NOW)
+    assert bot.danger_loss_history.get(token, []) == []
+
+
+def test_danger_history_survives_a_restart(tmp_path, bot):
+    token = "RUGGED"
+    bot.positions[token] = losing_position(NOW)
+    bot._close(token, bot.positions[token], make_snap(NOW),
+                "DANGER: liquidity -56% in 15m")
+    bot.save()
+    again = coin_tracker.Bot(cfg(tmp_path), coin_tracker.PaperExecutor())
+    assert again._recently_danger_exited(token, NOW + 200)
+
+
 def test_a_winning_close_never_counts_as_a_loss(bot):
     token = "WINNER"
     pos = coin_tracker.Position(qty=100.0, cost_usd=1.0, peak=1.0, opened=NOW, last_high=NOW)
