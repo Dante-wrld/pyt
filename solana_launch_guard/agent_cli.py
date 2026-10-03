@@ -553,7 +553,15 @@ def shadow_once(model: AgentModel | None, book: CapitalBook, *, portfolio_sell_o
                 )
                 review["arbitration"] = {"approved": approval.approved, "approved_usd": approval.approved_usd,
                                          "reasons": list(approval.reasons)}
-                if approval.approved and approval.approved_usd >= recovery_policy.min_sell_usd:
+                # The minimum sell keeps partial exits from becoming dust
+                # trades. It must not apply to closing the whole position: a
+                # rugged token worth $0.09 could never be sold, so its loss
+                # stayed unbooked and its slot and cash stayed reserved.
+                closes_everything = fraction >= 1.0
+                if approval.approved and (
+                    approval.approved_usd >= recovery_policy.min_sell_usd
+                    or closes_everything
+                ):
                     fraction = min(1.0, approval.approved_usd / float(marked["current_value_usd"]))
                     if state in {"EXIT", "EMERGENCY_EXIT"} and fraction < 1:
                         stage = "EXIT_CHUNK"

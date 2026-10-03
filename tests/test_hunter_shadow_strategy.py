@@ -633,6 +633,29 @@ def test_exit_is_not_capped_by_the_buy_side_order_limit(tmp_path, monkeypatch):
     assert book.public_status()["agents"][0]["open_positions"] == 0
 
 
+def test_a_rugged_position_worth_less_than_the_minimum_sell_still_closes(
+    tmp_path, monkeypatch
+):
+    """A -98% position is worth ~$0.10, under PORTFOLIO_MIN_SELL_VALUE_USD
+    ($2). The hard stop fired but the exit was blocked as 'below minimum',
+    so the loss was never booked and the slot stayed reserved forever."""
+    book = CapitalBook(tmp_path / "capital.json")
+    book.initialize(30)
+    book.reserve_shadow_buy(agent_id="hunter-v1", mint=MINT, symbol="A", amount_usd=5,
+                            entry_price=1, price_currency="USD")
+    snapshot = tmp_path / "snapshot.json"
+    snapshot.write_text(json.dumps({"generated_at": time.time(), "candidates": [],
+                                    "tracked_candidates": [candidate(price=0.02)]}))
+    monkeypatch.setenv("RECOMMENDATION_SNAPSHOT_PATH", str(snapshot))
+    monkeypatch.setenv("PORTFOLIO_SNAPSHOT_PATH", str(tmp_path / "missing.json"))
+    output = shadow_once(None, book, core_only=True)
+    review = output["hunter_position_reviews"][0]
+    assert review["state"] == "EXIT" and review.get("shadow_fill") is not None
+    account = book.load()["agents"]["hunter-v1"]
+    assert account["positions"] == {}
+    assert account["completed_trades"][-1]["realized_pnl_usd"] < -4.5
+
+
 def test_open_position_is_marked_from_tracked_quote_outside_shortlist(tmp_path, monkeypatch):
     book = CapitalBook(tmp_path / "capital.json")
     book.initialize(30)
