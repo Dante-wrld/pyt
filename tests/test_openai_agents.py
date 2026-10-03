@@ -304,6 +304,55 @@ def test_hunter_rules_model_delegates_other_roles_to_its_fallback():
     assert fallback.calls == [AgentRole.PORTFOLIO_MANAGER, AgentRole.COPY_TRADER]
 
 
+def test_a_failing_fallback_model_holds_that_role_instead_of_raising():
+    class Broken:
+        def propose(self, *, role, context):
+            raise RuntimeError("You have no credits remaining")
+
+    model = HunterRulesModel(fallback=Broken())
+    proposal = model.propose(role=AgentRole.PORTFOLIO_MANAGER, context={})
+    assert proposal["action"] == "HOLD"
+    assert "credits are exhausted" in proposal["thesis"]
+
+
+def test_hunter_still_buys_when_the_other_roles_model_is_down(tmp_path, monkeypatch):
+    """portfolio-v1 always has context (every holding) and is asked before
+    hunter; its model failing used to abort the whole cycle, so hunter never
+    got evaluated even though it needs no model."""
+    mint = "A" * 32
+    now = time.time()
+    (tmp_path / "rec.json").write_text(json.dumps({"generated_at": now, "candidates": [
+        {"chain": "solana", "mint": mint, "symbol": "A", "decision": "BUY ZONE",
+         "price": 1, "price_currency": "USD", "peak_price": 1.1,
+         "pullback_from_peak_pct": 9.09, "liquidity_usd": 20000,
+         "initial_liquidity_usd": 20000, "quoted_at": now,
+         "pair_created_at_ms": now * 1000 - 10 * 86_400_000,
+         "price_change_m5_pct": 3, "momentum_label": "RISING",
+         "volume_label": "RISING", "buys_m5": 20, "sells_m5": 10,
+         "buy_sell_ratio": 2, "risk_label": "MEDIUM", "signal_score": 80,
+         "entry_confirmation_count": 3, "entry_confirmation_required": 3}]}))
+    (tmp_path / "pf.json").write_text(json.dumps({"generated_at": now, "signals": [
+        {"chain": "solana", "token_address": "B" * 32, "decision": "HOLD",
+         "current_price": 1, "current_value_usd": 2, "liquidity_usd": 20000}]}))
+    monkeypatch.setenv("RECOMMENDATION_SNAPSHOT_PATH", str(tmp_path / "rec.json"))
+    monkeypatch.setenv("PORTFOLIO_SNAPSHOT_PATH", str(tmp_path / "pf.json"))
+    monkeypatch.setenv("AGENT_DECISION_LOG_PATH", str(tmp_path / "d.jsonl"))
+    monkeypatch.setenv("ENTRY_ALLOWED_DECISIONS", "BUY ZONE")
+    monkeypatch.setenv("ENTRY_MIN_TOKEN_AGE_DAYS", "3")
+    book = CapitalBook(tmp_path / "cap.json")
+    book.initialize(30)
+
+    class Broken:
+        def propose(self, *, role, context):
+            raise RuntimeError("You have no credits remaining")
+
+    result = shadow_once(HunterRulesModel(fallback=Broken()), book, core_only=True)
+    by_id = {a["agent_id"]: a for a in result["agents"]}
+    assert by_id["portfolio-v1"]["proposal"]["action"] == "HOLD"
+    assert by_id["hunter-v1"]["arbitration"]["approved"] is True
+    assert by_id["hunter-v1"]["shadow_fill"]["amount_usd"] == 5.0
+
+
 def test_hunter_rules_model_without_a_fallback_holds_other_roles_instead_of_erroring():
     model = HunterRulesModel()
     proposal = model.propose(role=AgentRole.PORTFOLIO_MANAGER, context={})

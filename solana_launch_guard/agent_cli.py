@@ -362,7 +362,16 @@ class HunterRulesModel:
             if self.fallback is None:
                 return {"action": "HOLD", "mint": "", "confidence": 0,
                         "thesis": "no model configured for this role"}
-            return self.fallback.propose(role=role, context=context)
+            # portfolio-v1 is asked first and always has context (every
+            # holding), so an uncaught model failure here aborted the whole
+            # cycle before hunter was ever evaluated. A failed model call is
+            # a HOLD for that role, never a reason to skip hunter.
+            try:
+                return self.fallback.propose(role=role, context=context)
+            except (OpenAIError, RuntimeError, ValueError, OSError) as exc:
+                return {"action": "HOLD", "mint": "", "confidence": 0,
+                        "thesis": "model unavailable, holding: "
+                                  f"{friendly_api_error(exc)}"[:300]}
         reviews = context.get("recovery_reviews")
         reviews = reviews if isinstance(reviews, dict) else {}
         watched = context.get("watched_candidates")
