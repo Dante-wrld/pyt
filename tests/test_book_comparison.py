@@ -106,6 +106,12 @@ def test_command_reads_every_book_and_tolerates_missing_ones(tmp_path, capsys):
     _trade(managed, "hunter-v1", "B" * 44, 0.9)
     eval_main(["books", "--swing-book", str(tmp_path / "swing.json"),
                "--trend-dir", str(tmp_path / "trend"),
+               # Every book path is isolated: left at their defaults the wide
+               # books read the real live files, and the "Too early" note
+               # disappears once two of them pass 30 trades.
+               "--wide-book", str(tmp_path / "missing.json"),
+               "--wide-fresh-book", str(tmp_path / "missing.json"),
+               "--momentum-take-book", str(tmp_path / "missing.json"),
                "--hunter-book", str(tmp_path / "missing.json")])
     out = capsys.readouterr().out
     assert "swing-v1" in out and "trend:managed" in out
