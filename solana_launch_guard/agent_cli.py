@@ -6,6 +6,7 @@ import json
 import math
 import os
 import time
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 
@@ -351,9 +352,27 @@ class HunterRulesModel:
     board selection is."""
 
     HUNTER_ORDER_USD = 5.0
+    # A dead model (exhausted credits) takes ~20s to fail because the client
+    # retries with backoff. portfolio-v1 is asked before hunter, so that
+    # delay pushed hunter's quote past the arbiter's 15s freshness limit and
+    # every one of its buys was rejected as stale. After a failure, skip the
+    # model entirely for this long instead of paying that delay each cycle.
+    MODEL_COOLDOWN_SECONDS = 900.0
 
-    def __init__(self, fallback: AgentModel | None = None) -> None:
+    def __init__(
+        self,
+        fallback: AgentModel | None = None,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
         self.fallback = fallback
+        self._clock = clock
+        self._down_until = 0.0
+        self._down_reason = ""
+
+    def _model_down_hold(self) -> dict[str, object]:
+        thesis = f"model unavailable, holding: {self._down_reason}"
+        return {"action": "HOLD", "mint": "", "confidence": 0, "thesis": thesis[:300]}
 
     def propose(
         self, *, role: AgentRole, context: dict[str, object]
@@ -366,12 +385,14 @@ class HunterRulesModel:
             # holding), so an uncaught model failure here aborted the whole
             # cycle before hunter was ever evaluated. A failed model call is
             # a HOLD for that role, never a reason to skip hunter.
+            if self._clock() < self._down_until:
+                return self._model_down_hold()
             try:
                 return self.fallback.propose(role=role, context=context)
             except (OpenAIError, RuntimeError, ValueError, OSError) as exc:
-                return {"action": "HOLD", "mint": "", "confidence": 0,
-                        "thesis": "model unavailable, holding: "
-                                  f"{friendly_api_error(exc)}"[:300]}
+                self._down_reason = friendly_api_error(exc)
+                self._down_until = self._clock() + self.MODEL_COOLDOWN_SECONDS
+                return self._model_down_hold()
         reviews = context.get("recovery_reviews")
         reviews = reviews if isinstance(reviews, dict) else {}
         watched = context.get("watched_candidates")
@@ -396,6 +417,8 @@ def shadow_core_loop(book: CapitalBook, *, interval_seconds: int = 60) -> None:
     if interval_seconds < 60:
         raise ValueError("shadow loop interval must be at least 60 seconds")
     last_seen: tuple[object, object, object] | None = None
+    # Built once so its model-down cooldown survives between cycles.
+    model: HunterRulesModel | None = None
     try:
         while True:
             try:
@@ -418,10 +441,9 @@ def shadow_core_loop(book: CapitalBook, *, interval_seconds: int = 60) -> None:
                     copy_data.get("generated_at") if fresh[2] else None,
                 )
                 if any(fresh) and signature != last_seen:
-                    result = shadow_once(
-                        HunterRulesModel(fallback=OpenAIProposalModel()),
-                        book, core_only=True,
-                    )
+                    if model is None:
+                        model = HunterRulesModel(fallback=OpenAIProposalModel())
+                    result = shadow_once(model, book, core_only=True)
                     print(json.dumps(result, indent=2), flush=True)
                     last_seen = signature
                 elif not any(fresh):

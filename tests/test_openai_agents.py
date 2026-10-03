@@ -315,6 +315,31 @@ def test_a_failing_fallback_model_holds_that_role_instead_of_raising():
     assert "credits are exhausted" in proposal["thesis"]
 
 
+def test_a_dead_model_is_skipped_for_the_cooldown_then_retried():
+    """A failing call takes ~20s (client backoff) and that delay made
+    hunter's quote stale; after one failure the model must not be called
+    again until the cooldown passes."""
+    now = [1000.0]
+
+    class Broken:
+        calls = 0
+
+        def propose(self, *, role, context):
+            Broken.calls += 1
+            raise RuntimeError("You have no credits remaining")
+
+    model = HunterRulesModel(fallback=Broken(), clock=lambda: now[0])
+    for _ in range(3):
+        held = model.propose(role=AgentRole.PORTFOLIO_MANAGER, context={})
+        assert held["action"] == "HOLD" and "credits are exhausted" in held["thesis"]
+    assert Broken.calls == 1  # the two later asks never reached the model
+    model.propose(role=AgentRole.COPY_TRADER, context={})
+    assert Broken.calls == 1  # any role shares the same cooldown
+    now[0] += HunterRulesModel.MODEL_COOLDOWN_SECONDS + 1
+    model.propose(role=AgentRole.PORTFOLIO_MANAGER, context={})
+    assert Broken.calls == 2  # retried once the cooldown is over
+
+
 def test_hunter_still_buys_when_the_other_roles_model_is_down(tmp_path, monkeypatch):
     """portfolio-v1 always has context (every holding) and is asked before
     hunter; its model failing used to abort the whole cycle, so hunter never
