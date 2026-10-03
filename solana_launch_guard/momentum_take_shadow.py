@@ -42,7 +42,14 @@ from collections.abc import Sequence
 
 from .agent_capital import CapitalBook
 from .agents import AgentRole
-from .hunter_shadow_strategy import ShadowRecoveryPolicy, paper_min_token_age_minutes
+from .hunter_shadow_strategy import (
+    ShadowRecoveryPolicy,
+    paper_min_token_age_minutes,
+    paper_rug_block_hours,
+    paper_rug_loss_pct,
+    paper_young_buy_minutes,
+    paper_young_rebuy_after_minutes,
+)
 from .swing_strategy import _read_snapshot
 from .wide_fresh_shadow import wide_fresh_cycle
 from .wide_shadow import paper_daily_loss_usd, paper_order_usd
@@ -179,6 +186,10 @@ def main(argv: Sequence[str] | None = None) -> None:
                     order_usd=order_usd,
                     max_daily_loss_usd=paper_daily_loss_usd(order_usd),
                     min_token_age_minutes=momentum_take_min_token_age_minutes(),
+                    rug_block_hours=paper_rug_block_hours(),
+                    rug_loss_pct=paper_rug_loss_pct(),
+                    young_buy_minutes=paper_young_buy_minutes(),
+                    young_rebuy_after_minutes=paper_young_rebuy_after_minutes(),
                 )
             )
             for review in result["exits"]:

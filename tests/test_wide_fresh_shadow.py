@@ -212,3 +212,112 @@ def test_min_token_age_skips_minutes_old_launches(tmp_path):
     other = WideFreshCapitalBook(tmp_path / "other.json")
     other.initialize(30)
     assert _run(other, _snapshot([dict(young)]))["entry"] is not None  # guard off
+
+
+# --- rug block: a collapsed token is dead for the book, new high or not ------
+
+def test_a_rugged_mint_is_blocked_on_any_signal_until_the_block_expires():
+    now = time.time()
+    gate = {"M" * 44: {"decision": "EARLY BUY", "peak_price": 1.0,
+                       "rugged_until": now + 3600}}
+    new_high = candidate(peak_price=1.5, price=1.4)
+    reason = fresh_setup_reason(gate, "M" * 44, "BUY ZONE", new_high, now=now)
+    assert reason is not None and reason.startswith("rugged")
+    assert fresh_setup_reason(gate, "M" * 44, "EARLY BUY", new_high,
+                              now=now + 7200) is None  # expired: new high allowed
+
+
+def _rug_then_pump(tmp_path, **cycle):
+    """Bought at 0.9, collapses to 0.6 (-33%), then pumps to a new high."""
+    mint = "H" * 44
+    book = _book(tmp_path)
+    _run(book, _snapshot([
+        candidate(mint=mint, decision="EARLY BUY", price=0.9,
+                  peak_price=1.0)]), **cycle)
+    _run(book, _snapshot([
+        candidate(mint=mint, decision="EARLY BUY", price=0.6,
+                  peak_price=1.0)]), **cycle)
+    assert mint not in book.load()["agents"][WIDE_FRESH_AGENT_ID]["positions"]
+    return _run(book, _snapshot([
+        candidate(mint=mint, decision="EARLY BUY", price=1.15,
+                  peak_price=1.3)]), **cycle)
+
+
+def test_without_the_rug_block_a_pump_to_a_new_high_is_bought_again(tmp_path):
+    assert _rug_then_pump(tmp_path)["entry"] is not None  # the GT2gF3 pattern
+
+
+def test_with_the_rug_block_the_same_pump_is_not_bought(tmp_path):
+    again = _rug_then_pump(tmp_path, rug_block_hours=24, rug_loss_pct=30)
+    assert again["entry"] is None
+
+
+def test_a_small_loss_is_not_a_rug(tmp_path):
+    mint = "S" * 44
+    book = _book(tmp_path)
+    kw = dict(rug_block_hours=24, rug_loss_pct=30)
+    _run(book, _snapshot([
+        candidate(mint=mint, decision="EARLY BUY", price=0.9, peak_price=1.0)]), **kw)
+    # -20% hard stop: a loss, but under the 30% rug line
+    _run(book, _snapshot([
+        candidate(mint=mint, decision="EARLY BUY", price=0.71, peak_price=1.0)]), **kw)
+    gate = book.load()["agents"][WIDE_FRESH_AGENT_ID]["fresh_gate"][mint]
+    assert "rugged_until" not in gate
+
+
+# --- bought young: not again until the token is 2 hours old ------------------
+
+def _bought_young_then_closed(tmp_path, *, age_minutes, **cycle):
+    """Buy a token that is `age_minutes` old, then stop it out."""
+    mint = "Y" * 44
+    book = _book(tmp_path)
+    created = (time.time() - age_minutes * 60) * 1000
+    _run(book, _snapshot([candidate(
+        mint=mint, decision="EARLY BUY", price=0.9, peak_price=1.0,
+        pair_created_at_ms=created)]), **cycle)
+    _run(book, _snapshot([candidate(
+        mint=mint, decision="EARLY BUY", price=0.7, peak_price=1.0,
+        pair_created_at_ms=created)]), **cycle)
+    assert mint not in book.load()["agents"][WIDE_FRESH_AGENT_ID]["positions"]
+    return book, mint, created
+
+
+RULE = dict(young_buy_minutes=60, young_rebuy_after_minutes=120)
+
+
+def _offer_later(book, mint, created_ms, *, token_age_minutes):
+    """The same token, new high, offered when it is `token_age_minutes` old
+    (its creation time is fixed, so we move the quote's clock by re-basing)."""
+    shift = (time.time() - token_age_minutes * 60) * 1000 - created_ms
+    return _run(book, _snapshot([candidate(
+        mint=mint, decision="EARLY BUY", price=1.15, peak_price=1.3,
+        pair_created_at_ms=created_ms + shift)]), **RULE)
+
+
+def test_a_token_bought_under_an_hour_old_waits_until_it_is_two_hours_old(tmp_path):
+    book, mint, created = _bought_young_then_closed(tmp_path, age_minutes=10, **RULE)
+    gate = book.load()["agents"][WIDE_FRESH_AGENT_ID]["fresh_gate"][mint]
+    assert gate["rebuy_min_age_minutes"] == 120
+    assert _offer_later(book, mint, created, token_age_minutes=90)["entry"] is None
+    assert _offer_later(book, mint, created, token_age_minutes=130)["entry"] is not None
+
+
+def test_a_token_bought_after_the_one_hour_mark_is_not_held_back(tmp_path):
+    book, mint, created = _bought_young_then_closed(tmp_path, age_minutes=75, **RULE)
+    gate = book.load()["agents"][WIDE_FRESH_AGENT_ID]["fresh_gate"][mint]
+    assert "rebuy_min_age_minutes" not in gate
+
+
+def test_the_young_rebuy_rule_is_off_unless_configured(tmp_path):
+    book, mint, created = _bought_young_then_closed(tmp_path, age_minutes=10)
+    gate = book.load()["agents"][WIDE_FRESH_AGENT_ID]["fresh_gate"][mint]
+    assert "rebuy_min_age_minutes" not in gate
+
+
+def test_an_unknown_token_age_cannot_prove_it_is_old_enough():
+    gate = {"M" * 44: {"decision": "EARLY BUY", "peak_price": 1.0,
+                       "rebuy_min_age_minutes": 120}}
+    reason = fresh_setup_reason(gate, "M" * 44, "EARLY BUY",
+                                candidate(peak_price=1.5, price=1.4), now=time.time())
+    assert reason is not None and "young" in reason
+

@@ -48,3 +48,12 @@ def _isolate_shared_quotes_path(tmp_path, monkeypatch):
     default; tests must not pick up the live one."""
     monkeypatch.setenv("SHARED_QUOTES_PATH", str(tmp_path / "no_shared_quotes.json"))
 
+
+@pytest.fixture(autouse=True)
+def _no_ambient_rug_block(monkeypatch):
+    """The live .env enables the paper rug block; tests that care set it."""
+    monkeypatch.delenv("PAPER_RUG_BLOCK_HOURS", raising=False)
+    monkeypatch.delenv("PAPER_RUG_LOSS_PCT", raising=False)
+    monkeypatch.delenv("PAPER_YOUNG_BUY_MINUTES", raising=False)
+    monkeypatch.delenv("PAPER_YOUNG_REBUY_AFTER_MINUTES", raising=False)
+

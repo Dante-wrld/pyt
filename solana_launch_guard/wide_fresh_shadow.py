@@ -43,6 +43,10 @@ from .hunter_shadow_strategy import (
     assess_entry,
     assess_exit,
     paper_min_token_age_minutes,
+    paper_rug_block_hours,
+    paper_rug_loss_pct,
+    paper_young_buy_minutes,
+    paper_young_rebuy_after_minutes,
     reentry_block_reason,
     too_young_reason,
 )
@@ -84,7 +88,7 @@ class WideFreshCapitalBook(CapitalBook):
 
 def fresh_setup_reason(
     gate: dict[str, dict[str, Any]], mint: str, decision: str,
-    candidate: dict[str, Any],
+    candidate: dict[str, Any], *, now: float | None = None,
 ) -> str | None:
     """None if this mint may be bought on this decision now; otherwise why
     not. Gated only by a mint's own last close on the *same* decision type -
@@ -93,6 +97,20 @@ def fresh_setup_reason(
     position, which the entry review's own pullback check must then confirm
     (this only gates whether that check is allowed to run again)."""
     state = gate.get(mint)
+    rugged_until = float((state or {}).get("rugged_until") or 0)
+    if rugged_until > (time.time() if now is None else now):
+        # Any signal type: a token that just collapsed is dead for this book.
+        return (f"rugged: last close was a collapse, blocked until "
+                f"{datetime.fromtimestamp(rugged_until, UTC):%Y-%m-%d %H:%M} UTC")
+    wait_until_age = float((state or {}).get("rebuy_min_age_minutes") or 0)
+    if wait_until_age > 0:
+        at = time.time() if now is None else now
+        created = float(candidate.get("pair_created_at_ms") or 0)
+        age = (at * 1000 - created) / 60_000 if created > 0 else None
+        if age is None or age < wait_until_age:
+            seen = "unknown" if age is None else f"{age:.0f} min"
+            return (f"bought while the token was young: not again until it is "
+                    f"{wait_until_age:g} min old (now {seen})")
     if state is None or state.get("decision") != decision:
         return None
     prior_peak = float(state.get("peak_price") or 0)
@@ -109,7 +127,9 @@ def fresh_setup_reason(
 
 def _record_gate(
     book: CapitalBook, agent_id: str, mint: str, position: dict[str, Any],
-    quote: dict[str, Any],
+    quote: dict[str, Any], *, rug_block_hours: float = 0.0,
+    rug_loss_pct: float = 30.0, young_buy_minutes: float = 0.0,
+    young_rebuy_after_minutes: float = 120.0,
 ) -> None:
     """After closing a position, remember its decision and the peak to clear
     before it can be bought again.
@@ -135,6 +155,20 @@ def _record_gate(
         "peak_price": peak,
         "closed_at": datetime.now(UTC).isoformat(),
     }
+    entry = float(position.get("entry_price") or 0)
+    price = float(quote.get("price") or 0)
+    if young_buy_minutes > 0:
+        created = float(position.get("pair_created_at_ms") or 0)
+        try:
+            opened = datetime.fromisoformat(str(position.get("opened_at"))).timestamp()
+        except ValueError:
+            opened = 0.0
+        if created > 0 and opened > 0 and (
+                (opened * 1000 - created) / 60_000 < young_buy_minutes):
+            gate[mint]["rebuy_min_age_minutes"] = young_rebuy_after_minutes
+    if rug_block_hours > 0 and entry > 0 and price > 0:
+        if (1 - price / entry) * 100 >= rug_loss_pct:
+            gate[mint]["rugged_until"] = time.time() + rug_block_hours * 3600
     book._write(payload)  # noqa: SLF001 - same-package persistence helper
 
 
@@ -150,6 +184,10 @@ async def wide_fresh_cycle(
     now: float | None = None,
     agent_id: str = WIDE_FRESH_AGENT_ID,
     min_token_age_minutes: float = 0.0,
+    rug_block_hours: float = 0.0,
+    rug_loss_pct: float = 30.0,
+    young_buy_minutes: float = 0.0,
+    young_rebuy_after_minutes: float = 120.0,
 ) -> dict[str, Any]:
     """Same as wide_shadow.wide_cycle, plus the fresh-setup re-entry gate on
     top of the shared re-entry rule. `agent_id` lets another paper book
@@ -200,7 +238,11 @@ async def wide_fresh_cycle(
             agent_id, mint, fraction=fraction, stage=stage,
             slippage_pct=round_trip_cost_pct)
         if fraction >= 1.0:
-            _record_gate(book, agent_id, mint, marked, quote)
+            _record_gate(book, agent_id, mint, marked, quote,
+                         rug_block_hours=rug_block_hours,
+                         rug_loss_pct=rug_loss_pct,
+                         young_buy_minutes=young_buy_minutes,
+                         young_rebuy_after_minutes=young_rebuy_after_minutes)
         exits.append(review)
 
     entry: dict[str, Any] | None = None
@@ -221,7 +263,8 @@ async def wide_fresh_cycle(
                 continue
             if too_young_reason(candidate, at, min_token_age_minutes) is not None:
                 continue
-            blocked_fresh = fresh_setup_reason(gate, mint, decision, candidate)
+            blocked_fresh = fresh_setup_reason(
+                gate, mint, decision, candidate, now=at)
             if blocked_fresh is not None:
                 continue
             review = assess_entry(candidate, policy)
@@ -300,7 +343,11 @@ def main(argv: Sequence[str] | None = None) -> None:
                 decisions=decisions, max_open_positions=max_open,
                 order_usd=order_usd,
                 max_daily_loss_usd=paper_daily_loss_usd(order_usd),
-                min_token_age_minutes=paper_min_token_age_minutes()))
+                min_token_age_minutes=paper_min_token_age_minutes(),
+                rug_block_hours=paper_rug_block_hours(),
+                rug_loss_pct=paper_rug_loss_pct(),
+                young_buy_minutes=paper_young_buy_minutes(),
+                young_rebuy_after_minutes=paper_young_rebuy_after_minutes()))
             for review in result["exits"]:
                 if "fill" in review:
                     LOGGER.info("WIDE-FRESH SELL %s %s %s", review["mint"][:8],

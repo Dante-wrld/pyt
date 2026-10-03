@@ -73,6 +73,52 @@ def paper_min_token_age_minutes() -> float:
     return amount
 
 
+def paper_rug_block_hours() -> float:
+    """PAPER_RUG_BLOCK_HOURS (default 0 = off): after a paper position closes
+    down PAPER_RUG_LOSS_PCT or more, that token cannot be bought again by the
+    same book for this long. A token that just fell ~90% in one check and then
+    pumped to a "new high" was bought twice and fell ~90% both times
+    (-$8.87, -$9.08); a new-high rule cannot tell that from a recovery."""
+    raw = os.getenv("PAPER_RUG_BLOCK_HOURS")
+    if not raw:
+        return 0.0
+    hours = float(raw)
+    if not math.isfinite(hours) or hours < 0:
+        raise ValueError("PAPER_RUG_BLOCK_HOURS must be zero or positive")
+    return hours
+
+
+def paper_rug_loss_pct() -> float:
+    """PAPER_RUG_LOSS_PCT (default 30): the closing loss that counts as a rug."""
+    raw = os.getenv("PAPER_RUG_LOSS_PCT")
+    pct = float(raw) if raw else 30.0
+    if not math.isfinite(pct) or not 0 < pct < 100:
+        raise ValueError("PAPER_RUG_LOSS_PCT must be between 0 and 100")
+    return pct
+
+
+def paper_young_buy_minutes() -> float:
+    """PAPER_YOUNG_BUY_MINUTES (default 0 = off): a paper buy of a token
+    younger than this counts as a "young" buy for PAPER_YOUNG_REBUY_AFTER_
+    MINUTES."""
+    raw = os.getenv("PAPER_YOUNG_BUY_MINUTES")
+    minutes = float(raw) if raw else 0.0
+    if not math.isfinite(minutes) or minutes < 0:
+        raise ValueError("PAPER_YOUNG_BUY_MINUTES must be zero or positive")
+    return minutes
+
+
+def paper_young_rebuy_after_minutes() -> float:
+    """PAPER_YOUNG_REBUY_AFTER_MINUTES (default 120): once a book has bought a
+    token while it was under PAPER_YOUNG_BUY_MINUTES old, it will not buy that
+    token again until the token itself is at least this old."""
+    raw = os.getenv("PAPER_YOUNG_REBUY_AFTER_MINUTES")
+    minutes = float(raw) if raw else 120.0
+    if not math.isfinite(minutes) or minutes < 0:
+        raise ValueError("PAPER_YOUNG_REBUY_AFTER_MINUTES must be zero or positive")
+    return minutes
+
+
 def too_young_reason(
     candidate: dict[str, Any], now: float, min_age_minutes: float
 ) -> str | None:
