@@ -291,6 +291,22 @@ class LaunchIngestionMixin(LaunchGuardState):
                 limit=self.settings.auto_buy_watch_batch_size
             )
             semaphore = asyncio.Semaphore(5)
+            # One batched request for every due watch instead of one
+            # single-token request each: the single-token endpoint sits on a
+            # much stricter rate-limit bucket than tokens/v1 (see
+            # DexScreenerOracle.quote_many), and ~2,000 launches an hour kept
+            # this loop at its worst case of 10 requests every 15s. A failure
+            # here just leaves `prefetched` empty, so each watch falls back to
+            # its own lookup exactly as before.
+            prefetched: dict[str, MarketQuote | None] = {}
+            if due:
+                try:
+                    prefetched = await self.oracle.quote_many(
+                        [str(watch["token_address"]) for watch in due],
+                        chain="solana",
+                    )
+                except (ConnectionError, OSError, RuntimeError, ValueError) as exc:
+                    LOGGER.warning("AUTO-BUY WATCH batch quote failed: %s", exc)
 
             async def evaluate(
                 watch: Mapping[str, Any],
@@ -298,7 +314,9 @@ class LaunchIngestionMixin(LaunchGuardState):
             ) -> None:
                 async with limiter:
                     try:
-                        await self._evaluate_auto_buy_discovery_watch(watch)
+                        await self._evaluate_auto_buy_discovery_watch(
+                            watch, prefetched=prefetched
+                        )
                     except (ConnectionError, RuntimeError, ValueError) as exc:
                         attempts = int(watch["attempts"]) + 1
                         self.store.record_auto_buy_discovery_observation(
@@ -334,7 +352,8 @@ class LaunchIngestionMixin(LaunchGuardState):
             )
 
     async def _evaluate_auto_buy_discovery_watch(
-        self, watch: Mapping[str, Any]
+        self, watch: Mapping[str, Any],
+        prefetched: Mapping[str, MarketQuote | None] | None = None,
     ) -> None:
         observed = time.time()
         mint = str(watch["token_address"])
@@ -353,7 +372,10 @@ class LaunchIngestionMixin(LaunchGuardState):
             )
             return
 
-        quote = await self.oracle.quote(mint)
+        if prefetched is not None and mint in prefetched:
+            quote = prefetched[mint]
+        else:
+            quote = await self.oracle.quote(mint)
         current = self.store.load_auto_buy_discovery_watch(mint)
         if current is None or current["status"] not in {
             "WATCHING",
