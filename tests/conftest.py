@@ -15,3 +15,11 @@ def _isolate_copy_signal_path(tmp_path, monkeypatch):
     monkeypatch.setenv(
         "AGENT_COPY_SIGNAL_PATH", str(tmp_path / "unset_copy_signals.json")
     )
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_paper_min_age(monkeypatch):
+    """The live .env turns the paper minimum-token-age guard on, and some
+    test imports load .env into the process; tests that care set it
+    themselves, the rest must see the code default (off)."""
+    monkeypatch.delenv("PAPER_MIN_TOKEN_AGE_MINUTES", raising=False)

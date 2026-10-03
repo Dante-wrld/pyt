@@ -201,3 +201,14 @@ def test_four_slots_then_full(tmp_path):
     for i in range(5):
         _run(book, _snapshot([candidate(mint=str(i) * 44, signal_score=90)]))
     assert len(book.load()["agents"][WIDE_FRESH_AGENT_ID]["positions"]) == 4
+
+
+def test_min_token_age_skips_minutes_old_launches(tmp_path):
+    now = time.time()
+    young = candidate(mint="Y" * 44, decision="EARLY BUY",
+                      pair_created_at_ms=(now - 10 * 60) * 1000)
+    assert _run(_book(tmp_path), _snapshot([young]),
+                min_token_age_minutes=45)["entry"] is None
+    other = WideFreshCapitalBook(tmp_path / "other.json")
+    other.initialize(30)
+    assert _run(other, _snapshot([dict(young)]))["entry"] is not None  # guard off

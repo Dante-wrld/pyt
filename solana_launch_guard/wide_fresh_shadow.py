@@ -42,7 +42,9 @@ from .hunter_shadow_strategy import (
     ShadowRecoveryPolicy,
     assess_entry,
     assess_exit,
+    paper_min_token_age_minutes,
     reentry_block_reason,
+    too_young_reason,
 )
 from .live_trial_ledger import principal_sale_fraction
 from .swing_strategy import (
@@ -147,6 +149,7 @@ async def wide_fresh_cycle(
     fetch_quotes: QuoteFetcher = dexscreener_quotes,
     now: float | None = None,
     agent_id: str = WIDE_FRESH_AGENT_ID,
+    min_token_age_minutes: float = 0.0,
 ) -> dict[str, Any]:
     """Same as wide_shadow.wide_cycle, plus the fresh-setup re-entry gate on
     top of the shared re-entry rule. `agent_id` lets another paper book
@@ -215,6 +218,8 @@ async def wide_fresh_cycle(
             mint = candidate["mint"]
             decision = str(candidate.get("decision"))
             if mint in held or decision not in decisions:
+                continue
+            if too_young_reason(candidate, at, min_token_age_minutes) is not None:
                 continue
             blocked_fresh = fresh_setup_reason(gate, mint, decision, candidate)
             if blocked_fresh is not None:
@@ -294,7 +299,8 @@ def main(argv: Sequence[str] | None = None) -> None:
                 book, _read_snapshot(snapshot_path), policy=policy,
                 decisions=decisions, max_open_positions=max_open,
                 order_usd=order_usd,
-                max_daily_loss_usd=paper_daily_loss_usd(order_usd)))
+                max_daily_loss_usd=paper_daily_loss_usd(order_usd),
+                min_token_age_minutes=paper_min_token_age_minutes()))
             for review in result["exits"]:
                 if "fill" in review:
                     LOGGER.info("WIDE-FRESH SELL %s %s %s", review["mint"][:8],

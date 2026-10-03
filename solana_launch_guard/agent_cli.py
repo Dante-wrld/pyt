@@ -29,7 +29,9 @@ from .hunter_shadow_strategy import (
     ShadowRecoveryPolicy,
     assess_entry,
     assess_exit,
+    paper_min_token_age_minutes,
     reentry_block_reason,
+    too_young_reason,
 )
 from .live_trial_ledger import principal_sale_fraction
 from .live_trial_runner import (
@@ -490,10 +492,19 @@ def shadow_once(model: AgentModel | None, book: CapitalBook, *, portfolio_sell_o
     entry_profile = StrategyProfile.from_env()
     ignore_freeze = os.getenv("HUNTER_SHADOW_IGNORE_FREEZE", "false").lower() == "true"
 
+    min_age_minutes = paper_min_token_age_minutes()
+
     def _hunter_entry_review(candidate: dict) -> dict:
         review = assess_entry(candidate, recovery_policy)
-        return review if ignore_freeze else live_entry_gate(
+        review = review if ignore_freeze else live_entry_gate(
             candidate, review, profile=entry_profile)
+        too_young = too_young_reason(candidate, time.time(), min_age_minutes)
+        if too_young is None:
+            return review
+        # Applies even with the freeze ignored: that bypasses the live gate,
+        # not the paper-only guard against minutes-old tokens that rug.
+        return {**review, "state": "PAUSED",
+                "reasons": [too_young, *review.get("reasons", [])]}
 
     candidate_reviews = {
         item["mint"]: _hunter_entry_review(fresh_quotes[item["mint"]])

@@ -116,3 +116,19 @@ def test_comparison_splits_the_wide_book(tmp_path, monkeypatch):
         swing_book=tmp_path / "none.json", trend_directory=tmp_path / "none",
         hunter_book=None, wide_book=tmp_path / "wide.json")]
     assert "wide:frozen-out" in names
+
+
+def test_min_token_age_skips_minutes_old_launches(tmp_path, monkeypatch):
+    _frozen(monkeypatch)
+    now = time.time()
+    young = candidate(mint="Y" * 44, pair_created_at_ms=(now - 10 * 60) * 1000)
+    assert _run(_book(tmp_path), _snapshot([young]),
+                min_token_age_minutes=45)["entry"] is None
+    book = WideCapitalBook(tmp_path / "wide2.json")
+    book.initialize(30)
+    assert _run(book, _snapshot([dict(young)]))["entry"] is not None  # guard off
+    old = candidate(mint="O" * 44, pair_created_at_ms=(now - 3 * 3600) * 1000)
+    book3 = WideCapitalBook(tmp_path / "wide3.json")
+    book3.initialize(30)
+    assert _run(book3, _snapshot([old]),
+                min_token_age_minutes=45)["entry"] is not None

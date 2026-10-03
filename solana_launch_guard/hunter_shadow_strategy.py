@@ -59,6 +59,37 @@ class SellRecord:
     entry_price: float | None
 
 
+def paper_min_token_age_minutes() -> float:
+    """PAPER_MIN_TOKEN_AGE_MINUTES (default 0 = off): paper books and the
+    hunter shadow loop ignore tokens younger than this. Minutes-old launches
+    from the PumpPortal feed rugged paper positions -98% inside a minute;
+    this skips that window while still allowing recent graduates."""
+    raw = os.getenv("PAPER_MIN_TOKEN_AGE_MINUTES")
+    if not raw:
+        return 0.0
+    amount = float(raw)
+    if not math.isfinite(amount) or amount < 0:
+        raise ValueError("PAPER_MIN_TOKEN_AGE_MINUTES must be zero or positive")
+    return amount
+
+
+def too_young_reason(
+    candidate: dict[str, Any], now: float, min_age_minutes: float
+) -> str | None:
+    """Why this candidate is too new for a paper entry, or None. An unknown
+    age is blocked once the guard is on: it can't be shown to be old enough."""
+    if min_age_minutes <= 0:
+        return None
+    created = _number(candidate.get("pair_created_at_ms"))
+    if created <= 0:
+        return "token age is unknown and PAPER_MIN_TOKEN_AGE_MINUTES is set"
+    age_minutes = (now * 1000 - created) / 60_000
+    if age_minutes < min_age_minutes:
+        return (f"token is {age_minutes:.0f} min old, below "
+                f"PAPER_MIN_TOKEN_AGE_MINUTES={min_age_minutes:g}")
+    return None
+
+
 def reentry_block_reason(
     sells: list[SellRecord], current_price: float,
     *, streak_needed: int = REENTRY_LOSS_STREAK,

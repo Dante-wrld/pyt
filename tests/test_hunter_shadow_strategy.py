@@ -669,3 +669,55 @@ def test_open_position_is_marked_from_tracked_quote_outside_shortlist(tmp_path, 
     output = shadow_once(None, book, core_only=True)
     assert output["hunter_position_reviews"][0]["post_entry_peak"] == 1.2
     assert book.public_status()["agents"][0]["equity_usd"] == 31
+
+
+# --- PAPER_MIN_TOKEN_AGE_MINUTES: skip minutes-old launches ------------------
+
+def test_too_young_reason_unit(monkeypatch):
+    from solana_launch_guard.hunter_shadow_strategy import (
+        paper_min_token_age_minutes,
+        too_young_reason,
+    )
+    now = 1_000_000.0
+    young = {"pair_created_at_ms": (now - 10 * 60) * 1000}
+    old = {"pair_created_at_ms": (now - 90 * 60) * 1000}
+    assert too_young_reason(young, now, 0) is None  # off
+    assert "10 min old" in too_young_reason(young, now, 45)
+    assert too_young_reason(old, now, 45) is None
+    assert "unknown" in too_young_reason({}, now, 45)
+    assert paper_min_token_age_minutes() == 0.0
+    monkeypatch.setenv("PAPER_MIN_TOKEN_AGE_MINUTES", "45")
+    assert paper_min_token_age_minutes() == 45.0
+
+
+def _hunter_run(tmp_path, monkeypatch, age_minutes):
+    snapshot = tmp_path / "snapshot.json"
+    snapshot.write_text(json.dumps({"generated_at": time.time(), "candidates": [
+        candidate(pair_created_at_ms=(time.time() - age_minutes * 60) * 1000)]}))
+    monkeypatch.setenv("RECOMMENDATION_SNAPSHOT_PATH", str(snapshot))
+    monkeypatch.setenv("PORTFOLIO_SNAPSHOT_PATH", str(tmp_path / "missing.json"))
+    monkeypatch.setenv("AGENT_DECISION_LOG_PATH", str(tmp_path / "log.jsonl"))
+    monkeypatch.setenv("HUNTER_SHADOW_IGNORE_FREEZE", "true")
+    monkeypatch.setenv("PAPER_MIN_TOKEN_AGE_MINUTES", "45")
+    book = CapitalBook(tmp_path / "capital.json")
+    book.initialize(30)
+
+    class Model:
+        def propose(self, *, role, context):
+            return {"action": "BUY", "mint": MINT, "requested_usd": 5,
+                    "confidence": 0.9, "thesis": "test"}
+
+    return shadow_once(Model(), book, core_only=True), book
+
+
+def test_hunter_skips_a_token_younger_than_the_paper_minimum(tmp_path, monkeypatch):
+    result, book = _hunter_run(tmp_path, monkeypatch, age_minutes=10)
+    review = result["hunter_candidate_reviews"][MINT]
+    assert review["state"] == "PAUSED" and "10 min old" in review["reasons"][0]
+    assert book.load()["agents"]["hunter-v1"]["positions"] == {}
+
+
+def test_hunter_still_buys_a_token_past_the_paper_minimum(tmp_path, monkeypatch):
+    result, book = _hunter_run(tmp_path, monkeypatch, age_minutes=120)
+    assert result["hunter_candidate_reviews"][MINT]["state"] == "BUY_READY"
+    assert MINT in book.load()["agents"]["hunter-v1"]["positions"]

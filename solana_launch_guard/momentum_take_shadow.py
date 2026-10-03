@@ -37,7 +37,7 @@ from collections.abc import Sequence
 
 from .agent_capital import CapitalBook
 from .agents import AgentRole
-from .hunter_shadow_strategy import ShadowRecoveryPolicy
+from .hunter_shadow_strategy import ShadowRecoveryPolicy, paper_min_token_age_minutes
 from .swing_strategy import _read_snapshot
 from .wide_fresh_shadow import wide_fresh_cycle
 from .wide_shadow import paper_daily_loss_usd, paper_order_usd
@@ -150,6 +150,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                     agent_id=MOMENTUM_TAKE_AGENT_ID,
                     order_usd=order_usd,
                     max_daily_loss_usd=paper_daily_loss_usd(order_usd),
+                    min_token_age_minutes=paper_min_token_age_minutes(),
                 )
             )
             for review in result["exits"]:
