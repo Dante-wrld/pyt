@@ -20,7 +20,7 @@ capital book, with two exit changes applied only here:
   - MOMENTUM_TAKE_STOP_LOSS_PCT (default: the shared STOP_LOSS_PCT): hard stop.
   - MOMENTUM_TAKE_MAX_HOLD_SECONDS (default 0 = off): sell whatever is left after
     this long, regardless of momentum.
-  - MOMENTUM_TAKE_INTERVAL_SECONDS (default 30, the minimum): poll cadence.
+  - MOMENTUM_TAKE_INTERVAL_SECONDS (default 15, the minimum): poll cadence.
 
 MOMENTUM BUY is paused for live trading; this book trades it on paper only
 and records whether the live gate would have refused each entry. It never
@@ -130,7 +130,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     )
     parser.add_argument(
         "--interval", type=float,
-        default=_env_float("MOMENTUM_TAKE_INTERVAL_SECONDS", 30.0))
+        default=_env_float("MOMENTUM_TAKE_INTERVAL_SECONDS", 15.0))
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--status", action="store_true")
     args = parser.parse_args(argv)
@@ -202,7 +202,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             LOGGER.warning("momentum-take cycle skipped: %s", exc)
         if args.once:
             return
-        time.sleep(max(args.interval, 30.0))
+        time.sleep(max(args.interval, 15.0))
 
 
 if __name__ == "__main__":

@@ -254,18 +254,37 @@ QuoteFetcher = Callable[[Sequence[str]], Awaitable[dict[str, dict[str, Any]]]]
 
 
 async def dexscreener_quotes(mints: Sequence[str]) -> dict[str, dict[str, Any]]:
-    """Price held mints the board no longer covers (USD, no flow data)."""
-    from .outcome_tracker import BATCH_SIZE, DexScreenerBatchClient
+    """Price held mints the board no longer covers (USD, no flow data).
 
+    Reads the shared prices from position_quotes first (one process prices the
+    union of every book's holdings) and asks DexScreener directly only for
+    mints it does not cover, so this still works with that process stopped. A
+    failed direct request no longer discards the shared prices already in hand.
+    """
+    from .outcome_tracker import BATCH_SIZE, DexScreenerBatchClient
+    from .position_quotes import read_shared_quotes
+
+    wanted = list(mints)
+    shared = read_shared_quotes()
+    out: dict[str, dict[str, Any]] = {
+        m: shared[m] for m in wanted if m in shared}
+    missing = [m for m in wanted if m not in out]
+    if not missing:
+        return out
     client = DexScreenerBatchClient()
-    out: dict[str, dict[str, Any]] = {}
-    mints = list(mints)
-    for start in range(0, len(mints), BATCH_SIZE):
-        quotes = await client.quotes(mints[start:start + BATCH_SIZE])
-        for mint, quote in quotes.items():
-            if quote.price_usd:
-                out[mint] = {"price": quote.price_usd, "price_currency": "USD",
-                             "liquidity_usd": quote.liquidity_usd}
+    try:
+        for start in range(0, len(missing), BATCH_SIZE):
+            quotes = await client.quotes(missing[start:start + BATCH_SIZE])
+            for mint, quote in quotes.items():
+                if quote.price_usd:
+                    out[mint] = {"price": quote.price_usd, "price_currency": "USD",
+                                 "liquidity_usd": quote.liquidity_usd}
+    except Exception:
+        if not out:
+            raise  # nothing priced at all: let the caller see the failure
+        logging.getLogger("solana_launch_guard.swing").warning(
+            "direct quotes failed for %d mint(s); using shared prices for the rest",
+            len(missing))
     return out
 
 

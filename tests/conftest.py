@@ -41,3 +41,10 @@ def _no_ambient_momentum_take_exits(monkeypatch):
                  "MOMENTUM_TAKE_MAX_HOLD_SECONDS"):
         monkeypatch.delenv(name, raising=False)
 
+
+@pytest.fixture(autouse=True)
+def _isolate_shared_quotes_path(tmp_path, monkeypatch):
+    """dexscreener_quotes reads the shared price file in the repo root by
+    default; tests must not pick up the live one."""
+    monkeypatch.setenv("SHARED_QUOTES_PATH", str(tmp_path / "no_shared_quotes.json"))
+
