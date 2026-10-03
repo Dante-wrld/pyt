@@ -220,3 +220,17 @@ def test_momentum_take_uses_the_fresh_setup_gate(book):
     assert "fresh_gate" in book.load()["agents"][MOMENTUM_TAKE_AGENT_ID]
     # A new high clears the gate.
     assert cycle(momentum(price=1.2, peak_price=1.2))["entry"] is not None
+
+
+def test_momentum_take_age_guard_can_differ_from_the_shared_one(monkeypatch):
+    from solana_launch_guard.momentum_take_shadow import (
+        momentum_take_min_token_age_minutes,
+    )
+    assert momentum_take_min_token_age_minutes() == 0.0
+    monkeypatch.setenv("PAPER_MIN_TOKEN_AGE_MINUTES", "60")
+    assert momentum_take_min_token_age_minutes() == 60.0  # follows the shared guard
+    monkeypatch.setenv("MOMENTUM_TAKE_MIN_TOKEN_AGE_MINUTES", "0")
+    assert momentum_take_min_token_age_minutes() == 0.0   # explicit override wins
+    monkeypatch.setenv("MOMENTUM_TAKE_MIN_TOKEN_AGE_MINUTES", "15")
+    assert momentum_take_min_token_age_minutes() == 15.0
+

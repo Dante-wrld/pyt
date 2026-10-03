@@ -31,6 +31,7 @@ import asyncio
 import dataclasses
 import json
 import logging
+import math
 import os
 import time
 from collections.abc import Sequence
@@ -63,6 +64,22 @@ class MomentumTakeCapitalBook(CapitalBook):
     AGENTS: tuple[tuple[str, AgentRole], ...] = (
         (MOMENTUM_TAKE_AGENT_ID, AgentRole.OPPORTUNITY_HUNTER),
     )
+
+
+def momentum_take_min_token_age_minutes() -> float:
+    """MOMENTUM_TAKE_MIN_TOKEN_AGE_MINUTES overrides the shared
+    PAPER_MIN_TOKEN_AGE_MINUTES for this book only. This is the short-hold,
+    take-profit book, so it is the designated place to keep testing very
+    young tokens while hunter and the wide books skip them. Unset follows the
+    shared guard."""
+    raw = os.getenv("MOMENTUM_TAKE_MIN_TOKEN_AGE_MINUTES")
+    if raw is None or not raw.strip():
+        return paper_min_token_age_minutes()
+    amount = float(raw)
+    if not math.isfinite(amount) or amount < 0:
+        raise ValueError(
+            "MOMENTUM_TAKE_MIN_TOKEN_AGE_MINUTES must be zero or positive")
+    return amount
 
 
 def momentum_take_decisions() -> tuple[str, ...]:
@@ -150,7 +167,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                     agent_id=MOMENTUM_TAKE_AGENT_ID,
                     order_usd=order_usd,
                     max_daily_loss_usd=paper_daily_loss_usd(order_usd),
-                    min_token_age_minutes=paper_min_token_age_minutes(),
+                    min_token_age_minutes=momentum_take_min_token_age_minutes(),
                 )
             )
             for review in result["exits"]:

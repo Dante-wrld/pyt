@@ -23,3 +23,4 @@ def _no_ambient_paper_min_age(monkeypatch):
     test imports load .env into the process; tests that care set it
     themselves, the rest must see the code default (off)."""
     monkeypatch.delenv("PAPER_MIN_TOKEN_AGE_MINUTES", raising=False)
+    monkeypatch.delenv("MOMENTUM_TAKE_MIN_TOKEN_AGE_MINUTES", raising=False)
