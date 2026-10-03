@@ -179,6 +179,12 @@ class ShadowRecoveryPolicy:
     half_profit_multiple: float = 3.0
     second_stage_fraction: float = 0.5
     min_sell_usd: float = 2.0
+    # Hard time limit: sell whatever is left this long after entry, whatever
+    # momentum says (0 = off). Unlike the stagnation exit it does not wait for
+    # momentum to turn non-positive, so a flat coin that still shows a little
+    # upward momentum cannot be held until it dies. Not read from the
+    # environment: only momentum-take-v1 sets it, via dataclasses.replace.
+    max_hold_seconds: float = 0.0
     stagnation_window_seconds: float = 300.0
     stagnation_min_gain_pct: float = 3.0
     require_medium_risk: bool = True
@@ -503,6 +509,12 @@ def assess_exit(
         reasons.append(
             f"early take-profit: {gain:+.2f}% reached the "
             f"+{policy.early_take_pct:g}% target"
+        )
+    elif policy.max_hold_seconds > 0 and age_seconds >= policy.max_hold_seconds:
+        state = "EXIT"
+        reasons.append(
+            f"max hold: {age_seconds / 60:.0f} min since entry "
+            f"(limit {policy.max_hold_seconds / 60:g} min), selling at {gain:+.2f}%"
         )
     elif locked:
         state = "EXIT"

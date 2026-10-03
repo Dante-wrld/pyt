@@ -234,3 +234,43 @@ def test_momentum_take_age_guard_can_differ_from_the_shared_one(monkeypatch):
     monkeypatch.setenv("MOMENTUM_TAKE_MIN_TOKEN_AGE_MINUTES", "15")
     assert momentum_take_min_token_age_minutes() == 15.0
 
+
+def test_momentum_take_stop_loss_is_its_own_setting(monkeypatch):
+    from solana_launch_guard.momentum_take_shadow import momentum_take_policy
+    shared = momentum_take_policy().stop_loss_pct
+    monkeypatch.setenv("MOMENTUM_TAKE_STOP_LOSS_PCT", "10")
+    monkeypatch.setenv("MOMENTUM_TAKE_PCT", "2")
+    monkeypatch.setenv("MOMENTUM_TAKE_STAGNATION_SECONDS", "300")
+    policy = momentum_take_policy()
+    assert (policy.stop_loss_pct, policy.early_take_pct,
+            policy.stagnation_window_seconds) == (10.0, 2.0, 300.0)
+    assert shared != 10.0  # unset falls back to the shared stop, not this one
+
+
+def test_quick_exit_settings_sell_small_profit_timeouts_and_stops(monkeypatch):
+    """+2% take (covers the 1.2% round-trip cost), -10% stop, 5-minute limit."""
+    from solana_launch_guard.momentum_take_shadow import momentum_take_policy
+    monkeypatch.setenv("MOMENTUM_TAKE_PCT", "2")
+    monkeypatch.setenv("MOMENTUM_TAKE_STOP_LOSS_PCT", "10")
+    monkeypatch.setenv("MOMENTUM_TAKE_MAX_HOLD_SECONDS", "300")
+    policy = momentum_take_policy()
+
+    def state(price, age_seconds, peak=None):
+        pos = position(opened_at=time.time() - age_seconds,
+                       highest_price_since_entry=peak or max(price, 1.0))
+        review = assess_exit(pos, {**QUOTE, "price": price}, policy)
+        return review["state"], " ".join(review["reasons"])
+
+    take, why = state(1.021, 60)
+    assert take == "EXIT" and "+2% target" in why          # small profit, sold fast
+    assert state(1.015, 60)[0] != "EXIT"                   # under target, still young
+    stop, why = state(0.89, 60)
+    assert stop == "EXIT" and "hard stop" in why           # -10% cut early, not -20%
+    stale, why = state(0.99, 330)
+    assert stale == "EXIT" and "max hold" in why           # 5-minute limit
+    assert state(0.99, 120)[0] != "EXIT"                   # not yet 5 minutes
+    # the old way: a flat coin with positive momentum was held past the window
+    still = assess_exit(position(opened_at=time.time() - 330),
+                        {**QUOTE, "price": 1.0}, ShadowRecoveryPolicy())
+    assert still["state"] != "EXIT" or "max hold" not in " ".join(still["reasons"])
+

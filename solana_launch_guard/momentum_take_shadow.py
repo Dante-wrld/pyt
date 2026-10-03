@@ -17,6 +17,10 @@ capital book, with two exit changes applied only here:
   - MOMENTUM_TAKE_PCT (default 4): sell the whole position at this gain
     (ShadowRecoveryPolicy.early_take_pct).
   - MOMENTUM_TAKE_STAGNATION_SECONDS (default 1800): stagnation window.
+  - MOMENTUM_TAKE_STOP_LOSS_PCT (default: the shared STOP_LOSS_PCT): hard stop.
+  - MOMENTUM_TAKE_MAX_HOLD_SECONDS (default 0 = off): sell whatever is left after
+    this long, regardless of momentum.
+  - MOMENTUM_TAKE_INTERVAL_SECONDS (default 30, the minimum): poll cadence.
 
 MOMENTUM BUY is paused for live trading; this book trades it on paper only
 and records whether the live gate would have refused each entry. It never
@@ -96,12 +100,17 @@ def momentum_take_policy(
     base = base or ShadowRecoveryPolicy.from_env()
     take = _env_float("MOMENTUM_TAKE_PCT", 4.0)
     window = _env_float("MOMENTUM_TAKE_STAGNATION_SECONDS", 1800.0)
-    if take <= 0 or window <= 0:
+    stop = _env_float("MOMENTUM_TAKE_STOP_LOSS_PCT", base.stop_loss_pct)
+    max_hold = _env_float("MOMENTUM_TAKE_MAX_HOLD_SECONDS", 0.0)
+    if take <= 0 or window <= 0 or not 0 < stop < 100 or max_hold < 0:
         raise ValueError(
-            "MOMENTUM_TAKE_PCT and MOMENTUM_TAKE_STAGNATION_SECONDS must be positive"
+            "MOMENTUM_TAKE_PCT and MOMENTUM_TAKE_STAGNATION_SECONDS must be "
+            "positive, MOMENTUM_TAKE_STOP_LOSS_PCT between 0 and 100 and "
+            "MOMENTUM_TAKE_MAX_HOLD_SECONDS zero or positive"
         )
     return dataclasses.replace(
-        base, early_take_pct=take, stagnation_window_seconds=window
+        base, early_take_pct=take, stagnation_window_seconds=window,
+        stop_loss_pct=stop, max_hold_seconds=max_hold,
     )
 
 
@@ -119,7 +128,9 @@ def main(argv: Sequence[str] | None = None) -> None:
         "--book",
         default=os.getenv("MOMENTUM_TAKE_BOOK_PATH", DEFAULT_MOMENTUM_TAKE_BOOK),
     )
-    parser.add_argument("--interval", type=float, default=60.0)
+    parser.add_argument(
+        "--interval", type=float,
+        default=_env_float("MOMENTUM_TAKE_INTERVAL_SECONDS", 30.0))
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--status", action="store_true")
     args = parser.parse_args(argv)

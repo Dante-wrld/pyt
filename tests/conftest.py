@@ -31,3 +31,13 @@ def _no_ambient_hunter_daily_loss_override(monkeypatch):
     """Same reason as above: the live .env sets this, tests that care set it."""
     monkeypatch.delenv("HUNTER_SHADOW_IGNORE_DAILY_LOSS", raising=False)
 
+
+@pytest.fixture(autouse=True)
+def _no_ambient_momentum_take_exits(monkeypatch):
+    """momentum-take-v1's exit settings live in the real .env; tests that care
+    set them, the rest must see the code defaults."""
+    for name in ("MOMENTUM_TAKE_PCT", "MOMENTUM_TAKE_STAGNATION_SECONDS",
+                 "MOMENTUM_TAKE_STOP_LOSS_PCT", "MOMENTUM_TAKE_INTERVAL_SECONDS",
+                 "MOMENTUM_TAKE_MAX_HOLD_SECONDS"):
+        monkeypatch.delenv(name, raising=False)
+
