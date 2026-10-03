@@ -627,14 +627,23 @@ def shadow_once(model: AgentModel | None, book: CapitalBook, *, portfolio_sell_o
             return {"mode": "shadow", "live_execution": False, "agents": [], "hunter_candidate_reviews": candidate_reviews, "hunter_position_reviews": shadow_reviews, "reason": "no eligible Solana opportunity, priced sell recommendation, or leader copy signal", "capital": book.public_status()}
     if model is None:
         raise ValueError("an agent model is required for available shadow inputs")
+    live_policy = _live_arbiter(
+        min_liquidity_usd=recovery_policy.min_liquidity_usd,
+        max_open_positions=(
+            HUNTER_MOMENTUM_MAX_OPEN_POSITIONS + HUNTER_NORMAL_MAX_OPEN_POSITIONS
+        ),
+    ).policy
+    # Paper only: HUNTER_SHADOW_IGNORE_DAILY_LOSS drops live's daily loss cap
+    # for this loop so hunter keeps trading (and producing evidence) after a
+    # bad day. live_trial's own arbiter never reads this flag.
+    ignore_daily_loss = os.getenv(
+        "HUNTER_SHADOW_IGNORE_DAILY_LOSS", "false").lower() == "true"
     hunter_shadow_arbiter = RiskArbiter(replace(
-        _live_arbiter(
-            min_liquidity_usd=recovery_policy.min_liquidity_usd,
-            max_open_positions=(
-                HUNTER_MOMENTUM_MAX_OPEN_POSITIONS + HUNTER_NORMAL_MAX_OPEN_POSITIONS
-            ),
-        ).policy,
+        live_policy,
         allowed_modes=("shadow",),
+        max_daily_loss_pct=(
+            float("inf") if ignore_daily_loss else live_policy.max_daily_loss_pct
+        ),
     ))
     coordinator = AgentCoordinator(
         model,

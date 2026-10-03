@@ -2167,6 +2167,13 @@ def settings(database_path: Path, **overrides: object) -> Settings:
         "reject_unknown_price": True,
         "database_path": str(database_path),
         "log_level": "INFO",
+        # LaunchGuard.__init__ restores tracked pullbacks from this file. Left
+        # at the default it is the live board in the repo root, which leaks
+        # real candidates (with real decisions and sources) into any test that
+        # builds a LaunchGuard, and made three tests pass or fail with the
+        # market. Overrides below still win.
+        "recommendation_snapshot_path": str(
+            database_path.parent / "isolated_recommendations.json"),
     }
     values.update(overrides)
     result = Settings(**values)

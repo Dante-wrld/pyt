@@ -159,3 +159,28 @@ def test_daily_loss_limit_matches_live(tmp_path, monkeypatch, loss, approved):
     assert arbitration["approved"] is approved, arbitration
     if not approved:
         assert "daily loss limit reached" in arbitration["reasons"]
+
+
+def test_ignore_daily_loss_keeps_hunter_trading_after_a_bad_day(tmp_path, monkeypatch):
+    """-$3.10 trips live's $3.00 cap (test_daily_loss_limit_matches_live);
+    with HUNTER_SHADOW_IGNORE_DAILY_LOSS the paper loop keeps buying."""
+    monkeypatch.setenv("HUNTER_SHADOW_IGNORE_DAILY_LOSS", "true")
+    snapshot = tmp_path / "snapshot.json"
+    snapshot.write_text(json.dumps({"generated_at": time.time(), "candidates": [
+        candidate(pair_created_at_ms=_old())]}))
+    monkeypatch.setenv("RECOMMENDATION_SNAPSHOT_PATH", str(snapshot))
+    monkeypatch.setenv("PORTFOLIO_SNAPSHOT_PATH", str(tmp_path / "missing.json"))
+    monkeypatch.setenv("AGENT_COPY_SIGNAL_PATH", str(tmp_path / "missing_copy.json"))
+    monkeypatch.setenv("AGENT_DECISION_LOG_PATH", str(tmp_path / "log.jsonl"))
+    book = CapitalBook(tmp_path / "capital.json")
+    book.initialize(30)
+    _lose_today(book, 3.10)
+
+    class Model:
+        def propose(self, *, role, context):
+            return {"action": "BUY", "mint": MINT, "requested_usd": 5,
+                    "confidence": 0.9, "thesis": "test"}
+
+    arbitration = shadow_once(Model(), book, core_only=True)["agents"][0]["arbitration"]
+    assert arbitration["approved"] is True, arbitration
+

@@ -24,3 +24,10 @@ def _no_ambient_paper_min_age(monkeypatch):
     themselves, the rest must see the code default (off)."""
     monkeypatch.delenv("PAPER_MIN_TOKEN_AGE_MINUTES", raising=False)
     monkeypatch.delenv("MOMENTUM_TAKE_MIN_TOKEN_AGE_MINUTES", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_hunter_daily_loss_override(monkeypatch):
+    """Same reason as above: the live .env sets this, tests that care set it."""
+    monkeypatch.delenv("HUNTER_SHADOW_IGNORE_DAILY_LOSS", raising=False)
+
