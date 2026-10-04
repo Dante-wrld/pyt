@@ -35,6 +35,7 @@ from .hunter_shadow_strategy import (
     ShadowRecoveryPolicy,
     assess_entry,
     assess_exit,
+    chase_block_reason,
     paper_min_token_age_minutes,
     reentry_block_reason,
     too_young_reason,
@@ -174,6 +175,8 @@ async def wide_cycle(
             if mint in held or str(candidate.get("decision")) not in decisions:
                 continue
             if too_young_reason(candidate, at, min_token_age_minutes) is not None:
+                continue
+            if chase_block_reason(candidate, at) is not None:
                 continue
             review = assess_entry(candidate, policy)
             if review["state"] != "BUY_READY":

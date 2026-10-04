@@ -275,71 +275,72 @@ def test_quick_exit_settings_sell_small_profit_timeouts_and_stops(monkeypatch):
     assert still["state"] != "EXIT" or "max hold" not in " ".join(still["reasons"])
 
 
-# --- young-token take: 10-15% target, kept only after a pullback-then-rise ----
-
-YOUNG_ENV = {"MOMENTUM_TAKE_YOUNG_MINUTES": "60"}
-
+# --- young-token exit: ride from +2%, sell on a pullback from the peak --------
 
 def _young_policy(monkeypatch):
     from solana_launch_guard.momentum_take_shadow import momentum_take_policy
     monkeypatch.setenv("MOMENTUM_TAKE_PCT", "2")
     monkeypatch.setenv("MOMENTUM_TAKE_STOP_LOSS_PCT", "10")
     monkeypatch.setenv("MOMENTUM_TAKE_MAX_HOLD_SECONDS", "300")
-    for key, value in YOUNG_ENV.items():
-        monkeypatch.setenv(key, value)
+    monkeypatch.setenv("MOMENTUM_TAKE_YOUNG_MINUTES", "60")
     return momentum_take_policy()
 
 
-def _young_state(policy, price, age_seconds, *, token_age_minutes=10,
-                 peak=None, low=None):
+def _young_state(policy, price, age_seconds, *, token_age_minutes=10, peak=None):
     now = time.time()
     pos = position(
         opened_at=now - age_seconds,
         pair_created_at_ms=(now - token_age_minutes * 60) * 1000,
-        highest_price_since_entry=peak if peak is not None else max(price, 1.0),
-        lowest_price_since_entry=low if low is not None else min(price, 1.0))
+        highest_price_since_entry=peak if peak is not None else max(price, 1.0))
     review = assess_exit(pos, {**QUOTE, "price": price}, policy, now=now)
     return review["state"], " ".join(review["reasons"])
 
 
-def test_a_young_token_does_not_sell_at_two_percent_inside_the_window(monkeypatch):
+def test_a_young_token_is_not_sold_at_the_flat_two_percent(monkeypatch):
     policy = _young_policy(monkeypatch)
-    assert _young_state(policy, 1.03, 30)[0] != "EXIT"     # old rule sold here
+    assert _young_state(policy, 1.025, 30)[0] != "EXIT"      # old rule sold here
+    assert _young_state(policy, 1.10, 30)[0] != "EXIT"       # at +10% and still rising
 
 
-def test_a_young_token_sells_at_the_top_of_the_range_or_after_a_giveback(monkeypatch):
+def test_a_young_token_sells_on_a_pullback_from_its_peak_not_from_entry(monkeypatch):
     policy = _young_policy(monkeypatch)
-    state, why = _young_state(policy, 1.16, 40)
-    assert state == "EXIT" and "young-token take" in why   # 15% max
-    # at 10.5% and still rising: keep going toward the 15% top
-    assert _young_state(policy, 1.105, 40, peak=1.105)[0] != "EXIT"
-    # peaked at +13%, now +9.8%: gave back 3.2 points, so sell
-    state, why = _young_state(policy, 1.098, 40, peak=1.13)
-    assert state == "EXIT" and "young-token take" in why
+    # peaked at +10%, now 2.7% below that peak (still +7% over entry): sell
+    state, why = _young_state(policy, 1.07, 60, peak=1.10)
+    assert state == "EXIT" and "young-token pullback" in why
+    # peaked at +10%, only 1.8% below the peak: keep holding
+    assert _young_state(policy, 1.08, 60, peak=1.10)[0] != "EXIT"
 
 
-def test_without_a_pullback_and_rise_it_falls_back_to_two_percent(monkeypatch):
+def test_a_small_peak_reversal_is_sold_at_the_floor_before_it_becomes_a_loss(monkeypatch):
     policy = _young_policy(monkeypatch)
-    state, why = _young_state(policy, 1.025, 90)
-    assert state == "EXIT" and "early take-profit" in why
+    # peaked at +2.3%: only 1.1% below the peak, but the gain has slipped to +1.15%
+    state, why = _young_state(policy, 1.0115, 45, peak=1.023)
+    assert state == "EXIT" and "young-token pullback" in why
+    # same peak, gain still +1.5%, above the floor: keep riding
+    assert _young_state(policy, 1.015, 45, peak=1.023)[0] != "EXIT"
 
 
-def test_with_a_pullback_and_rise_it_keeps_the_ten_percent_target(monkeypatch):
+def test_a_pullback_before_reaching_two_percent_does_not_trigger_the_trail(monkeypatch):
     policy = _young_policy(monkeypatch)
-    # dipped to -4%, now +3% (7 points off the low): pattern held, +3% is not sold
-    assert _young_state(policy, 1.03, 90, low=0.96)[0] != "EXIT"
-    # ...and gets the longer hold: still held at 6 minutes, sold at the 10 minute limit
-    assert _young_state(policy, 1.03, 360, low=0.96)[0] != "EXIT"
-    state, why = _young_state(policy, 1.03, 630, low=0.96)
-    assert state == "EXIT" and "max hold" in why
+    # peak only +1.5% (never armed): a 3% slide is not a young-token pullback exit
+    assert _young_state(policy, 0.985, 60, peak=1.015)[0] != "EXIT"
+
+
+def test_an_armed_young_position_gets_the_longer_hold_others_do_not(monkeypatch):
+    policy = _young_policy(monkeypatch)
+    assert _young_state(policy, 1.05, 400, peak=1.05)[0] != "EXIT"  # armed: held past 5 min
+    state, why = _young_state(policy, 1.05, 650, peak=1.05)
+    assert state == "EXIT" and "max hold" in why                         # 10 minute limit
+    state, why = _young_state(policy, 0.99, 330, peak=1.0)
+    assert state == "EXIT" and "max hold" in why                         # never armed: 5 minutes
 
 
 def test_the_stop_and_old_tokens_are_unchanged_by_the_young_rule(monkeypatch):
     policy = _young_policy(monkeypatch)
     state, why = _young_state(policy, 0.89, 20)
-    assert state == "EXIT" and "hard stop" in why          # -10% stop still applies
+    assert state == "EXIT" and "hard stop" in why
     state, why = _young_state(policy, 1.025, 60, token_age_minutes=180)
-    assert state == "EXIT" and "early take-profit" in why  # old token: normal +2% take
+    assert state == "EXIT" and "early take-profit" in why                # old token: +2% take
 
 
 def test_the_young_rule_is_off_unless_configured(monkeypatch):
@@ -351,15 +352,45 @@ def test_the_young_rule_is_off_unless_configured(monkeypatch):
     assert state == "EXIT" and "early take-profit" in why
 
 
-def test_marking_a_position_records_its_lowest_price(tmp_path):
-    from solana_launch_guard.agent_capital import CapitalBook
-    book = CapitalBook(tmp_path / "c.json")
-    book.initialize(30)
-    book.reserve_shadow_buy(agent_id="hunter-v1", mint="L" * 44, symbol="L",
-                            amount_usd=5, entry_price=1.0, price_currency="USD")
-    book.mark_shadow_position("hunter-v1", "L" * 44, 0.95)
-    book.mark_shadow_position("hunter-v1", "L" * 44, 1.04)
-    marked = book.mark_shadow_position("hunter-v1", "L" * 44, 1.0)
-    assert marked["lowest_price_since_entry"] == 0.95
-    assert marked["highest_price_since_entry"] == 1.04
 
+# --- pump-chase guard ---------------------------------------------------------
+
+def _young_row(age_minutes, m5):
+    return momentum(pair_created_at_ms=int((time.time() - age_minutes * 60) * 1000),
+                    price_change_m5_pct=m5)
+
+
+def test_chase_guard_is_off_unless_configured(book):
+    assert run(book, snapshot([_young_row(10, 80)]), momentum_take_policy())["entry"]
+
+
+def test_chase_guard_skips_a_young_token_that_just_pumped(book, monkeypatch):
+    monkeypatch.setenv("PAPER_CHASE_MAX_M5_PCT", "45")
+    assert run(book, snapshot([_young_row(10, 80)]), momentum_take_policy())["entry"] is None
+    assert run(book, snapshot([_young_row(10, 20)]), momentum_take_policy())["entry"]
+
+
+def test_chase_guard_leaves_older_tokens_and_unknowns_alone(book, monkeypatch):
+    from solana_launch_guard.hunter_shadow_strategy import chase_block_reason
+    monkeypatch.setenv("PAPER_CHASE_MAX_M5_PCT", "45")
+    now = time.time()
+    assert chase_block_reason(_young_row(180, 80), now) is None       # old token
+    assert chase_block_reason(momentum(price_change_m5_pct=80), now) is None  # age unknown
+    assert chase_block_reason(_young_row(10, None), now) is None      # run-up unknown
+    assert "chasing a pump" in chase_block_reason(_young_row(10, 80), now)
+    monkeypatch.setenv("PAPER_CHASE_YOUNG_MINUTES", "5")
+    assert chase_block_reason(_young_row(10, 80), now) is None        # past the window
+
+
+def test_chase_guard_also_applies_to_the_fresh_gate_cycle(book, monkeypatch):
+    from solana_launch_guard.wide_fresh_shadow import wide_fresh_cycle
+    monkeypatch.setenv("PAPER_CHASE_MAX_M5_PCT", "45")
+
+    async def fetch(mints):
+        return {}
+
+    result = asyncio.run(wide_fresh_cycle(
+        book, snapshot([_young_row(10, 80)]), policy=momentum_take_policy(),
+        decisions=("MOMENTUM BUY",), fetch_quotes=fetch,
+        agent_id=MOMENTUM_TAKE_AGENT_ID, order_usd=10.0))
+    assert result["entry"] is None

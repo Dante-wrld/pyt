@@ -21,9 +21,10 @@ capital book, with two exit changes applied only here:
   - MOMENTUM_TAKE_MAX_HOLD_SECONDS (default 0 = off): sell whatever is left after
     this long, regardless of momentum.
   - MOMENTUM_TAKE_YOUNG_MINUTES (default 0 = off) and MOMENTUM_TAKE_YOUNG_*: tokens
-    younger than this aim for a 10-15% take instead of +2%, keeping that target only
-    if they pulled back and recovered within the first minute, else falling back to
-    the +2% take (see ShadowRecoveryPolicy.young_*).
+    younger than this skip the flat take; once up MOMENTUM_TAKE_YOUNG_TAKE_PCT (2)
+    they sell when the price falls MOMENTUM_TAKE_YOUNG_TRAIL_PCT (2.5) below the
+    peak, or when the gain slips to MOMENTUM_TAKE_YOUNG_FLOOR_PCT (1.2, about the
+    round-trip cost) so a reversal is sold before it becomes a loss (see ShadowRecoveryPolicy.young_*).
   - MOMENTUM_TAKE_INTERVAL_SECONDS (default 15, the minimum): poll cadence.
 
 MOMENTUM BUY is paused for live trading; this book trades it on paper only
@@ -126,12 +127,9 @@ def momentum_take_policy(
         base, early_take_pct=take, stagnation_window_seconds=window,
         stop_loss_pct=stop, max_hold_seconds=max_hold,
         young_token_minutes=young,
-        young_take_pct=_env_float("MOMENTUM_TAKE_YOUNG_TAKE_PCT", 10.0),
-        young_take_max_pct=_env_float("MOMENTUM_TAKE_YOUNG_TAKE_MAX_PCT", 15.0),
-        young_trail_pct=_env_float("MOMENTUM_TAKE_YOUNG_TRAIL_PCT", 2.0),
-        young_window_seconds=_env_float("MOMENTUM_TAKE_YOUNG_WINDOW_SECONDS", 60.0),
-        young_pullback_pct=_env_float("MOMENTUM_TAKE_YOUNG_PULLBACK_PCT", 3.0),
-        young_rise_pct=_env_float("MOMENTUM_TAKE_YOUNG_RISE_PCT", 3.0),
+        young_take_pct=_env_float("MOMENTUM_TAKE_YOUNG_TAKE_PCT", 2.0),
+        young_trail_pct=_env_float("MOMENTUM_TAKE_YOUNG_TRAIL_PCT", 2.5),
+        young_floor_pct=_env_float("MOMENTUM_TAKE_YOUNG_FLOOR_PCT", 1.2),
         young_max_hold_seconds=_env_float(
             "MOMENTUM_TAKE_YOUNG_MAX_HOLD_SECONDS", 600.0),
     )

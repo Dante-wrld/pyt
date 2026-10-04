@@ -42,6 +42,7 @@ from .hunter_shadow_strategy import (
     ShadowRecoveryPolicy,
     assess_entry,
     assess_exit,
+    chase_block_reason,
     paper_min_token_age_minutes,
     paper_rug_block_hours,
     paper_rug_loss_pct,
@@ -262,6 +263,8 @@ async def wide_fresh_cycle(
             if mint in held or decision not in decisions:
                 continue
             if too_young_reason(candidate, at, min_token_age_minutes) is not None:
+                continue
+            if chase_block_reason(candidate, at) is not None:
                 continue
             blocked_fresh = fresh_setup_reason(
                 gate, mint, decision, candidate, now=at)
