@@ -38,7 +38,11 @@ def _no_ambient_momentum_take_exits(monkeypatch):
     set them, the rest must see the code defaults."""
     for name in ("MOMENTUM_TAKE_PCT", "MOMENTUM_TAKE_STAGNATION_SECONDS",
                  "MOMENTUM_TAKE_STOP_LOSS_PCT", "MOMENTUM_TAKE_INTERVAL_SECONDS",
-                 "MOMENTUM_TAKE_MAX_HOLD_SECONDS"):
+                 "MOMENTUM_TAKE_MAX_HOLD_SECONDS", "MOMENTUM_TAKE_YOUNG_MINUTES",
+                 "MOMENTUM_TAKE_YOUNG_TAKE_PCT", "MOMENTUM_TAKE_YOUNG_TAKE_MAX_PCT",
+                 "MOMENTUM_TAKE_YOUNG_TRAIL_PCT", "MOMENTUM_TAKE_YOUNG_WINDOW_SECONDS",
+                 "MOMENTUM_TAKE_YOUNG_PULLBACK_PCT", "MOMENTUM_TAKE_YOUNG_RISE_PCT",
+                 "MOMENTUM_TAKE_YOUNG_MAX_HOLD_SECONDS"):
         monkeypatch.delenv(name, raising=False)
 
 

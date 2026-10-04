@@ -267,9 +267,11 @@ class CapitalBook:
         position = payload["agents"][agent_id]["positions"][mint]
         entry = float(position["entry_price"])
         peak = max(entry, float(position.get("highest_price_since_entry", entry)), price)
+        low = min(entry, float(position.get("lowest_price_since_entry", entry)), price)
         cost = float(position["allocated_usd"])
         position.update(
-            highest_price_since_entry=peak, current_price=price,
+            highest_price_since_entry=peak, lowest_price_since_entry=low,
+            current_price=price,
             current_value_usd=round(cost * price / entry, 8),
             return_pct=round((price / entry - 1) * 100, 6),
             drawdown_from_post_entry_peak_pct=round((peak - price) / peak * 100, 6),

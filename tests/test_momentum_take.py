@@ -274,3 +274,92 @@ def test_quick_exit_settings_sell_small_profit_timeouts_and_stops(monkeypatch):
                         {**QUOTE, "price": 1.0}, ShadowRecoveryPolicy())
     assert still["state"] != "EXIT" or "max hold" not in " ".join(still["reasons"])
 
+
+# --- young-token take: 10-15% target, kept only after a pullback-then-rise ----
+
+YOUNG_ENV = {"MOMENTUM_TAKE_YOUNG_MINUTES": "60"}
+
+
+def _young_policy(monkeypatch):
+    from solana_launch_guard.momentum_take_shadow import momentum_take_policy
+    monkeypatch.setenv("MOMENTUM_TAKE_PCT", "2")
+    monkeypatch.setenv("MOMENTUM_TAKE_STOP_LOSS_PCT", "10")
+    monkeypatch.setenv("MOMENTUM_TAKE_MAX_HOLD_SECONDS", "300")
+    for key, value in YOUNG_ENV.items():
+        monkeypatch.setenv(key, value)
+    return momentum_take_policy()
+
+
+def _young_state(policy, price, age_seconds, *, token_age_minutes=10,
+                 peak=None, low=None):
+    now = time.time()
+    pos = position(
+        opened_at=now - age_seconds,
+        pair_created_at_ms=(now - token_age_minutes * 60) * 1000,
+        highest_price_since_entry=peak if peak is not None else max(price, 1.0),
+        lowest_price_since_entry=low if low is not None else min(price, 1.0))
+    review = assess_exit(pos, {**QUOTE, "price": price}, policy, now=now)
+    return review["state"], " ".join(review["reasons"])
+
+
+def test_a_young_token_does_not_sell_at_two_percent_inside_the_window(monkeypatch):
+    policy = _young_policy(monkeypatch)
+    assert _young_state(policy, 1.03, 30)[0] != "EXIT"     # old rule sold here
+
+
+def test_a_young_token_sells_at_the_top_of_the_range_or_after_a_giveback(monkeypatch):
+    policy = _young_policy(monkeypatch)
+    state, why = _young_state(policy, 1.16, 40)
+    assert state == "EXIT" and "young-token take" in why   # 15% max
+    # at 10.5% and still rising: keep going toward the 15% top
+    assert _young_state(policy, 1.105, 40, peak=1.105)[0] != "EXIT"
+    # peaked at +13%, now +9.8%: gave back 3.2 points, so sell
+    state, why = _young_state(policy, 1.098, 40, peak=1.13)
+    assert state == "EXIT" and "young-token take" in why
+
+
+def test_without_a_pullback_and_rise_it_falls_back_to_two_percent(monkeypatch):
+    policy = _young_policy(monkeypatch)
+    state, why = _young_state(policy, 1.025, 90)
+    assert state == "EXIT" and "early take-profit" in why
+
+
+def test_with_a_pullback_and_rise_it_keeps_the_ten_percent_target(monkeypatch):
+    policy = _young_policy(monkeypatch)
+    # dipped to -4%, now +3% (7 points off the low): pattern held, +3% is not sold
+    assert _young_state(policy, 1.03, 90, low=0.96)[0] != "EXIT"
+    # ...and gets the longer hold: still held at 6 minutes, sold at the 10 minute limit
+    assert _young_state(policy, 1.03, 360, low=0.96)[0] != "EXIT"
+    state, why = _young_state(policy, 1.03, 630, low=0.96)
+    assert state == "EXIT" and "max hold" in why
+
+
+def test_the_stop_and_old_tokens_are_unchanged_by_the_young_rule(monkeypatch):
+    policy = _young_policy(monkeypatch)
+    state, why = _young_state(policy, 0.89, 20)
+    assert state == "EXIT" and "hard stop" in why          # -10% stop still applies
+    state, why = _young_state(policy, 1.025, 60, token_age_minutes=180)
+    assert state == "EXIT" and "early take-profit" in why  # old token: normal +2% take
+
+
+def test_the_young_rule_is_off_unless_configured(monkeypatch):
+    from solana_launch_guard.momentum_take_shadow import momentum_take_policy
+    monkeypatch.setenv("MOMENTUM_TAKE_PCT", "2")
+    policy = momentum_take_policy()
+    assert policy.young_token_minutes == 0
+    state, why = _young_state(policy, 1.025, 30)
+    assert state == "EXIT" and "early take-profit" in why
+
+
+def test_marking_a_position_records_its_lowest_price(tmp_path):
+    from solana_launch_guard.agent_capital import CapitalBook
+    book = CapitalBook(tmp_path / "c.json")
+    book.initialize(30)
+    book.reserve_shadow_buy(agent_id="hunter-v1", mint="L" * 44, symbol="L",
+                            amount_usd=5, entry_price=1.0, price_currency="USD")
+    book.mark_shadow_position("hunter-v1", "L" * 44, 0.95)
+    book.mark_shadow_position("hunter-v1", "L" * 44, 1.04)
+    marked = book.mark_shadow_position("hunter-v1", "L" * 44, 1.0)
+    assert marked["lowest_price_since_entry"] == 0.95
+    assert marked["highest_price_since_entry"] == 1.04
+

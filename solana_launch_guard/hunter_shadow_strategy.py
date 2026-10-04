@@ -231,6 +231,24 @@ class ShadowRecoveryPolicy:
     # upward momentum cannot be held until it dies. Not read from the
     # environment: only momentum-take-v1 sets it, via dataclasses.replace.
     max_hold_seconds: float = 0.0
+    # Young-token take (momentum-take-v1 only, off while young_token_minutes is
+    # 0; set via dataclasses.replace, never from the shared env). A position
+    # opened on a token younger than young_token_minutes aims for
+    # young_take_pct, stretching to young_take_max_pct (it sells at the max, or
+    # once it gives back young_trail_pct from a peak above the take). After
+    # young_window_seconds it keeps that target only if the price pulled back
+    # young_pullback_pct below entry and has since risen young_rise_pct off
+    # that low; otherwise it falls back to early_take_pct. Held positions use
+    # young_max_hold_seconds instead of max_hold_seconds. The hard stop is
+    # unchanged.
+    young_token_minutes: float = 0.0
+    young_take_pct: float = 10.0
+    young_take_max_pct: float = 15.0
+    young_trail_pct: float = 2.0
+    young_window_seconds: float = 60.0
+    young_pullback_pct: float = 3.0
+    young_rise_pct: float = 3.0
+    young_max_hold_seconds: float = 600.0
     stagnation_window_seconds: float = 300.0
     stagnation_min_gain_pct: float = 3.0
     require_medium_risk: bool = True
@@ -485,6 +503,23 @@ def assess_exit(
     # fires on data we don't actually have (never infer missing data as
     # grounds for an exit, same principle as the rest of this module).
     age_seconds = ((now if now is not None else time.time()) - opened_at) if opened_at > 0 else 0.0
+    # --- young-token take: is this a young position still holding for 10-15%?
+    created_ms = _number(position.get("pair_created_at_ms"))
+    young = (
+        policy.young_token_minutes > 0 and created_ms > 0 and opened_at > 0
+        and (opened_at * 1000 - created_ms) / 60_000 < policy.young_token_minutes
+    )
+    young_holding = False
+    if young:
+        tracked_low = _number(position.get("lowest_price_since_entry")) or entry
+        low = min(entry, tracked_low, price)
+        low_gain = (low / entry - 1) * 100
+        pattern = (low_gain <= -policy.young_pullback_pct
+                   and gain >= low_gain + policy.young_rise_pct)
+        young_holding = age_seconds < policy.young_window_seconds or pattern
+    max_hold = (policy.young_max_hold_seconds
+                if young_holding and age_seconds >= policy.young_window_seconds
+                else policy.max_hold_seconds)
     liquidity_failure = liquidity > 0 and (liquidity < policy.min_liquidity_usd or baseline > 0 and liquidity < baseline * (1 - policy.liquidity_drop_pct / 100))
     # Protections (hard stop, lock, stagnation, the tighter trailing stop)
     # stay on until the stake is actually back. principal_secured says so
@@ -546,9 +581,20 @@ def assess_exit(
             f"hard stop: {gain:+.2f}% breaches the -{policy.stop_loss_pct:.0f}% "
             "loss limit; no flow confirmation required"
         )
+    elif young_holding and not principal_recovered and (
+        gain >= policy.young_take_max_pct
+        or (peak_gain >= policy.young_take_pct
+            and peak_gain - gain >= policy.young_trail_pct)
+    ):
+        state = "EXIT"
+        reasons.append(
+            f"young-token take: {gain:+.2f}% (target {policy.young_take_pct:g}-"
+            f"{policy.young_take_max_pct:g}%, peak {peak_gain:+.2f}%)"
+        )
     elif (
         policy.early_take_pct > 0
         and not principal_recovered
+        and not young_holding
         and gain >= policy.early_take_pct
     ):
         state = "EXIT"
@@ -556,11 +602,11 @@ def assess_exit(
             f"early take-profit: {gain:+.2f}% reached the "
             f"+{policy.early_take_pct:g}% target"
         )
-    elif policy.max_hold_seconds > 0 and age_seconds >= policy.max_hold_seconds:
+    elif max_hold > 0 and age_seconds >= max_hold:
         state = "EXIT"
         reasons.append(
             f"max hold: {age_seconds / 60:.0f} min since entry "
-            f"(limit {policy.max_hold_seconds / 60:g} min), selling at {gain:+.2f}%"
+            f"(limit {max_hold / 60:g} min), selling at {gain:+.2f}%"
         )
     elif locked:
         state = "EXIT"
